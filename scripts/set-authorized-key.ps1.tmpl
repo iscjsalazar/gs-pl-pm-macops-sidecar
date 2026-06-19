@@ -1,0 +1,13 @@
+# Instala la llave publica SSH para login de administradores en el guest (ACL correcto para sshd).
+# @@PUBKEY@@ se sustituye con la llave publica real antes de enviarlo por WinRM.
+$ErrorActionPreference = "Stop"
+$dir = "C:\ProgramData\ssh"
+if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
+$f = Join-Path $dir "administrators_authorized_keys"
+Set-Content -Path $f -Value '@@PUBKEY@@' -Encoding ascii
+# ACL: solo Administrators y SYSTEM (requisito de sshd para administrators_authorized_keys)
+icacls $f /inheritance:r | Out-Null
+icacls $f /grant "Administrators:F" | Out-Null
+icacls $f /grant "SYSTEM:F" | Out-Null
+Restart-Service sshd
+"authorized_keys instalado:"; Get-Content $f

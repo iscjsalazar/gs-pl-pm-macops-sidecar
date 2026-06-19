@@ -1,0 +1,15 @@
+# macOS
+.DS_Store
+
+# Marcador de punto de montaje del wrapper (no es artefacto de este repo)
+.keep
+
+# Descargas/artefactos pesados (ISO, VMs, instaladores, cache de Packer, salidas de build): conservar la carpeta
+/artifacts/*
+!/artifacts/.gitkeep
+
+# Configuración local con credenciales del orquestador
+.env
+
+# Autounattend generado a partir del template (contiene credenciales del guest)
+/packer/Autounattend.xml
