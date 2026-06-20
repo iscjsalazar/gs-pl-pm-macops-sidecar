@@ -11,5 +11,8 @@
 # Configuración local con credenciales del orquestador
 .env
 
+# Registro de slots por worktree (estado local del orquestador wt-*)
+/.worktrees/
+
 # Autounattend generado a partir del template (contiene credenciales del guest)
 /packer/Autounattend.xml

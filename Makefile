@@ -26,6 +26,17 @@
 #   make e2e-net-check                       # smoke de conectividad (M1 + guest -> backend/data tier)
 #   # Prereq: 'dotnet' (SDK .NET 10) y firewall abierto en macdata; 'macdata' resoluble en /etc/hosts del M1 (ver README).
 #
+# Aprovisionamiento aislado por worktree (wt-*; SQL compartido de nvoslabs + bus PM-owned, en macdata):
+#   make wt-up WT=<folder>                    # aprovisiona el entorno del worktree (slot, seed, API); intel-only
+#   make wt-up WT=<folder> SOLUTION=<path>    # fuerza la raiz de la solucion del worktree (build de la API)
+#   make wt-down WT=<folder>                  # baja API + BD del worktree; libera el slot (singletons intactos)
+#   make wt-ls                                # lista el registro de slots (folder -> slot)
+#   make wt-status                            # estado de los contenedores PM por worktree y del bus
+#   make wt-seed-ln                           # asegura la referencia LN compartida (pm_erpln106) una vez
+#   # Slot 0..N-1 (N=SLOTS, default 4) -> proyecto pm-wt<N>, API :5180+N*10, BD pm_planning_wt<N>, bus prefix wt<N>.
+#   # Vars del SQL compartido (override): SHAREDSQL_NET/HOST/PORT/PASSWORD (default red nvoslabsc3-sharedsql-dt, sqlserver:1433).
+#   # WT se autodetecta con git rev-parse si se corre dentro del worktree. Requiere REMOTE=macdata.
+#
 # Legado CargaPlantaPT_LN (legacy-*; data tier solo en intel/macdata):
 #   make legacy-launch                       # todo: data tier (intel) + VM + build + deploy + tunel + URL
 #   make legacy-launch FORCE=1               # fuerza rebuild/redeploy aunque ya este arriba
@@ -87,7 +98,21 @@ GUESTKEY  ?= ~/pm-host-windows/artifacts/ssh/id_pmwin
 E2E_ENV = $(PM_ENV) PM_GUEST_GATEWAY=$(GATEWAY) PM_GUEST_WINHOST=$(WINHOST) \
           PM_GUEST_KEY='$(GUESTKEY)' PM_E2E_DATATIER=$(DATATIER)
 
+# --- Variables aprovisionamiento por worktree (wt-*) ---
+WT          ?=
+SLOTS       ?= 4
+SOLUTION    ?=
+SHAREDSQL_NET   ?=
+SHAREDSQL_HOST  ?=
+SHAREDSQL_PORT  ?=
+SHAREDSQL_PASSWORD ?=
+
+WT_ENV = $(PM_ENV) WT=$(WT) PM_WT_SLOTS=$(SLOTS) PM_WT_SOLUTION_DIR='$(SOLUTION)' \
+         PM_SHARED_SQL_NETWORK=$(SHAREDSQL_NET) PM_SHARED_SQL_HOST=$(SHAREDSQL_HOST) \
+         PM_SHARED_SQL_PORT=$(SHAREDSQL_PORT) PM_SHARED_SQL_PASSWORD='$(SHAREDSQL_PASSWORD)'
+
 .PHONY: pm-run pm-watch pm-seed pm-api pm-api-down pm-test pm-test-clean pm-down pm-nuke pm-ps pm-logs pm-port pm-bootstrap-intel \
+        wt-up wt-down wt-ls wt-status wt-seed-ln \
         e2e-backend e2e-backend-down e2e-net-check \
         legacy-launch legacy-data-up legacy-vm-up legacy-build legacy-deploy legacy-diag legacy-diag-logs \
         legacy-tunnel legacy-status legacy-url legacy-down help
@@ -122,6 +147,23 @@ e2e-backend-down: ; $(E2E_ENV) ./pm.sh e2e-backend-down
 e2e-net-check:    override REMOTE  := macdata
 e2e-net-check:    override PROFILE := full
 e2e-net-check:    ; $(E2E_ENV) ./scripts/e2e-net-check.sh
+
+# --- aprovisionamiento por worktree (wt-*): intel-only (SQL compartido + bus en macdata) ---
+# 'override TARGET' fuerza intel (el SQL compartido vive en el docker de macdata); REMOTE default macdata
+# (override por linea de comando permitido si el alias SSH difiere).
+wt-up:      override TARGET := intel
+wt-up:      REMOTE := macdata
+wt-up:      ; $(WT_ENV) ./wt.sh up
+wt-down:    override TARGET := intel
+wt-down:    REMOTE := macdata
+wt-down:    ; $(WT_ENV) ./wt.sh down
+wt-status:  override TARGET := intel
+wt-status:  REMOTE := macdata
+wt-status:  ; $(WT_ENV) ./wt.sh status
+wt-seed-ln: override TARGET := intel
+wt-seed-ln: REMOTE := macdata
+wt-seed-ln: ; $(WT_ENV) ./wt.sh seed-ln
+wt-ls:      ; $(WT_ENV) ./wt.sh ls
 
 # --- legado ---
 legacy-launch:    ; $(LEGACY_ENV) ./legacy.sh launch

@@ -61,6 +61,28 @@ load_env() {
   PM_GUEST_KEY="${PM_GUEST_KEY:-~/pm-host-windows/artifacts/ssh/id_pmwin}"
   # 'e2e-backend' levanta el data tier (intel) antes de la API; 0 lo omite (asume data tier ya provisto).
   PM_E2E_DATATIER="${PM_E2E_DATATIER:-1}"
+
+  # --- Aprovisionamiento por worktree (verbos wt-*) ---
+  # Un slot (0..N-1) es la unica perilla por worktree; de el se derivan proyecto/offset/BD/prefijo de bus.
+  PM_WT_SLOTS="${PM_WT_SLOTS:-4}"                       # N de slots disponibles
+  PM_WT_REGISTRY="${PM_WT_REGISTRY:-$BASE_DIR/.worktrees/slots.tsv}"   # registro gitignored folder->slot
+  # SQL compartido (reuso del de nvoslabs): la API y el seeder lo alcanzan uniendose a su red externa
+  # (idiomatico, igual que los labs de nvoslabs) o, en su defecto, por el puerto publicado en loopback.
+  PM_SHARED_SQL_NETWORK="${PM_SHARED_SQL_NETWORK:-nvoslabsc3-sharedsql-dt}"   # red externa del SQL compartido
+  PM_SHARED_SQL_HOST="${PM_SHARED_SQL_HOST:-sqlserver}"        # alias del SQL dentro de esa red
+  PM_SHARED_SQL_PORT="${PM_SHARED_SQL_PORT:-1433}"            # puerto interno del SQL compartido
+  PM_SHARED_SQL_PUBLISHED="${PM_SHARED_SQL_PUBLISHED:-60201}"  # puerto publicado en loopback de macdata (fallback)
+  PM_SHARED_SQL_CONTAINER="${PM_SHARED_SQL_CONTAINER:-nvoslabsc3-sharedsql-sqlserver}"  # contenedor (autodiscovery del SA)
+  PM_SHARED_SQL_PASSWORD="${PM_SHARED_SQL_PASSWORD:-}"        # vacio -> autodiscovery (printenv en el contenedor)
+  # Referencia LN PROPIA de PM en el SQL compartido (NO el erpln106 de nvoslabs, que es de otra solucion):
+  # singleton sembrado una vez (guarded seed-once), compartido read-only por todos los worktrees.
+  PM_WT_LN_DB="${PM_WT_LN_DB:-pm_erpln106}"
+  # Bus PM-owned compartido entre worktrees (proyecto compose dedicado): el aislamiento lo da el prefijo
+  # de instancia ServiceBus__SubscriptionPrefix=wt<N> (la API auto-provisiona topics+subscriptions prefijados).
+  PM_WT_BUS_PROJECT="${PM_WT_BUS_PROJECT:-pm-shared}"
+  # Puerto host del bus compartido: solo para debug desde la M1; la API lo alcanza por la red interna
+  # (servicebus:5672). Default alto para no chocar con un bus pm-local en 5672.
+  PM_WT_BUS_HOST_PORT="${PM_WT_BUS_HOST_PORT:-15672}"
   compute_ports
 }
 

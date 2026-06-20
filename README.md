@@ -137,6 +137,41 @@ Prerrequisitos en `macdata`:
 La inyección de esa URL en el config del legado y el feature flag que deriva la carga al backend pertenecen a
 otras solicitudes (orquestación E2E y feature flag); aquí sólo se habilita la conectividad de red.
 
+## Comandos — aprovisionamiento por worktree (`wt-*`)
+
+Para trabajar varias solicitudes en paralelo, cada worktree obtiene un entorno aislado a partir de un **slot**
+(`0..N-1`, `N=SLOTS`, default 4). El comando reusa el **SQL compartido de nvoslabs** y un **bus PM-owned**
+singleton; por worktree levanta una BD de producto y un contenedor de API construido **desde el código del
+worktree**. Es **intel-only** (el SQL compartido y el bus viven en `macdata`); `make` fuerza `TARGET=intel`,
+`REMOTE=macdata`.
+
+Del slot `N` se derivan: proyecto `pm-wt<N>`, API `:5180+N*10`, BD `pm_planning_wt<N>` y prefijo de bus `wt<N>`.
+
+| Comando | Acción |
+| --- | --- |
+| `make wt-up WT=<folder>` | Asigna el slot, asegura los singletons (SQL compartido alcanzable, referencia LN `pm_erpln106`, bus `pm-shared`), siembra `pm_planning_wt<N>`, construye y corre `pm-wt<N>-api`; imprime los endpoints. |
+| `make wt-up WT=<folder> SOLUTION=<path>` | Fuerza la raíz de la solución del worktree (contexto de build de la API). |
+| `make wt-down WT=<folder>` | Baja la API y la BD del worktree y libera el slot; deja los singletons compartidos intactos. |
+| `make wt-ls` | Lista el registro de slots (`folder → slot`). |
+| `make wt-status` | Estado de los contenedores PM por worktree y del bus. |
+| `make wt-seed-ln` | Asegura la referencia LN compartida `pm_erpln106` (paso deliberado de una vez; idempotente). |
+
+```bash
+make wt-up WT=feat_pm_mi-solicitud      # aprovisiona; WT se autodetecta con git rev-parse dentro del worktree
+make wt-status                           # contenedores pm-wt* + bus pm-shared
+make wt-down WT=feat_pm_mi-solicitud     # baja API + BD del worktree; libera el slot
+```
+
+El **slot** se asigna desde un registro gitignored `.worktrees/slots.tsv` (lock por `mkdir`, slot libre más bajo,
+autodetección por `git rev-parse --show-toplevel`). La conexión al SQL compartido es parametrizable
+(`SHAREDSQL_NET`/`HOST`/`PORT`/`PASSWORD`; default red `nvoslabsc3-sharedsql-dt`, `sqlserver:1433`, password
+autodescubierta del contenedor). La referencia LN propia de PM se siembra una sola vez con guard de completitud
+(no re-siembra si ya está poblada). **Oracle ControlPiso por worktree y el legado multi-sitio** no entran en este
+núcleo (sirven a la vía legada/E2E): quedan como follow-up.
+
+Prerrequisitos en `macdata`: el SQL compartido de nvoslabs corriendo (red `nvoslabsc3-sharedsql-dt`), `colima`
+del data tier activo y las imágenes base de .NET (`sdk:10.0`/`aspnet:10.0`) disponibles.
+
 ## Variables
 
 `make help` lista los comandos. El `Makefile` traduce variables cortas a las `PM_*` / `PM_LEGACY_*` que consumen
@@ -164,6 +199,10 @@ los drivers. Los puertos del data tier se derivan en un solo lugar (`compute_por
 | `LEGACY_PROFILE` | legacy | `full` | Perfil del data tier del legado (requiere Oracle ControlPiso). |
 | `DATATIER` | legacy | `1` | `0` = no gestiona el data tier (asume ya provisto). |
 | `FORCE` | legacy | `0` | `1` = rebuild/redeploy aunque ya esté arriba. |
+| `WT` | wt | (vacío) | Folder del worktree; clave del slot. Se autodetecta con `git rev-parse` dentro del worktree. |
+| `SLOTS` | wt | `4` | `N` de slots (`0..N-1`). |
+| `SOLUTION` | wt | (worktree o principal) | Raíz de la solución del worktree (contexto de build de la API). |
+| `SHAREDSQL_NET` / `_HOST` / `_PORT` / `_PASSWORD` | wt | `nvoslabsc3-sharedsql-dt` / `sqlserver` / `1433` / (autodescubierta) | Conexión al SQL compartido de nvoslabs. |
 
 ### Variables de entorno del bus / Ln (data tier `full`)
 
