@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Orquestador del data tier PM (SQL Server + Oracle) + API real para macOS.
-# Verbos: run [--watch] | seed | api | api-down | e2e-backend | e2e-backend-down | test | test-clean | down | nuke | ps | logs | port
+# Verbos: run [--watch] | seed | api | api-down | e2e-backend | e2e-backend-down | test | test-clean | format | format-check | down | nuke | ps | logs | port
 # Target: PM_TARGET=local (colima/desktop) | intel (rsync + docker compose en la mac Intel via SSH)
 #
 #   ./pm.sh run                 # levanta + seedea el data tier (local)
@@ -179,6 +179,17 @@ cmd_port() {
   [ "$PM_PROFILE" = full ] && echo "BUS  -> $(compose port servicebus 5672 2>/dev/null || echo 'n/d')" || true
 }
 
+# Passthrough fino al formateo de la solucion: la logica vive en pl-programa-maestro/scripts/format*.sh
+# (changed-vs-develop, self-contained). Esta capa no la duplica; solo delega en PM_SOLUTION_DIR.
+cmd_format() {
+  command -v dotnet >/dev/null 2>&1 || { echo "[pm] falta 'dotnet' en PATH" >&2; return 2; }
+  ( cd "$PM_SOLUTION_DIR" && ./scripts/format.sh "$@" )
+}
+cmd_format_check() {
+  command -v dotnet >/dev/null 2>&1 || { echo "[pm] falta 'dotnet' en PATH" >&2; return 2; }
+  ( cd "$PM_SOLUTION_DIR" && ./scripts/format-check.sh "$@" )
+}
+
 case "$VERB" in
   run)      cmd_run ;;
   seed)     cmd_seed ;;
@@ -188,10 +199,12 @@ case "$VERB" in
   e2e-backend-down) cmd_api_e2e_down ;;
   test)       cmd_test "$@" ;;
   test-clean) cmd_test_clean "$@" ;;
+  format)       cmd_format "$@" ;;
+  format-check) cmd_format_check "$@" ;;
   down)     cmd_down ;;
   nuke)     cmd_nuke ;;
   ps)       cmd_ps ;;
   logs)     cmd_logs ;;
   port)     cmd_port ;;
-  *) echo "uso: $0 {run [--watch]|seed|api|api-down|e2e-backend|e2e-backend-down|test|test-clean|down|nuke|ps|logs|port}"; exit 2 ;;
+  *) echo "uso: $0 {run [--watch]|seed|api|api-down|e2e-backend|e2e-backend-down|test|test-clean|format|format-check|down|nuke|ps|logs|port}"; exit 2 ;;
 esac

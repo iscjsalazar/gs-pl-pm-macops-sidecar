@@ -10,6 +10,8 @@
 #   make pm-test-clean            # GATE limpio: pm-run (up+seed) + API fresca + TODA la suite (fija PROFILE=full)
 #   make pm-test FILTER='FullyQualifiedName~RtSync'   # acota por filtro (inner-loop)
 #   make pm-test APIFORCE=1                            # relanza la API (api-down+api) antes de testear; no reusa
+#   make pm-format               # formatea los .cs modificados vs develop (delega a scripts/format.sh in-repo)
+#   make pm-format-check         # gate de formato changed-vs-develop (delega a scripts/format-check.sh); sin data tier
 #   make pm-down / pm-nuke        # baja el data tier (conserva / borra volumenes)   [pm-nuke: ver aviso abajo]
 #   make pm-ps / pm-logs / pm-port
 #   make pm-run TARGET=intel REMOTE=macdata SQLHOST=macdata   # data tier en la Intel (requiere 'macdata' en /etc/hosts del M1; ver README)
@@ -111,7 +113,7 @@ WT_ENV = $(PM_ENV) WT=$(WT) PM_WT_SLOTS=$(SLOTS) PM_WT_SOLUTION_DIR='$(SOLUTION)
          PM_SHARED_SQL_NETWORK=$(SHAREDSQL_NET) PM_SHARED_SQL_HOST=$(SHAREDSQL_HOST) \
          PM_SHARED_SQL_PORT=$(SHAREDSQL_PORT) PM_SHARED_SQL_PASSWORD='$(SHAREDSQL_PASSWORD)'
 
-.PHONY: pm-run pm-watch pm-seed pm-api pm-api-down pm-test pm-test-clean pm-down pm-nuke pm-ps pm-logs pm-port pm-bootstrap-intel \
+.PHONY: pm-run pm-watch pm-seed pm-api pm-api-down pm-test pm-test-clean pm-format pm-format-check pm-down pm-nuke pm-ps pm-logs pm-port pm-bootstrap-intel \
         wt-up wt-down wt-ls wt-status wt-seed-ln \
         e2e-backend e2e-backend-down e2e-net-check \
         legacy-launch legacy-data-up legacy-vm-up legacy-build legacy-deploy legacy-diag legacy-diag-logs \
@@ -127,6 +129,8 @@ pm-test:     ; $(PM_ENV) ./pm.sh test
 pm-test-clean: PROFILE  := full
 pm-test-clean: APIFORCE := 1
 pm-test-clean: ; $(PM_ENV) ./pm.sh test-clean
+pm-format:       ; $(PM_ENV) ./pm.sh format          # formatea .cs modificados vs develop (delega a scripts/format.sh in-repo)
+pm-format-check: ; $(PM_ENV) ./pm.sh format-check    # gate de formato changed-vs-develop (delega a scripts/format-check.sh)
 pm-down:     ; $(PM_ENV) ./pm.sh down
 pm-nuke:     ; $(PM_ENV) ./pm.sh nuke
 pm-ps:       ; $(PM_ENV) ./pm.sh ps
