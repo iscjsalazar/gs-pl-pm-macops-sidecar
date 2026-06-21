@@ -80,12 +80,17 @@ wt_slot_release() {  # uso: wt_slot_release <folder>   (correr bajo wt_registry_
   awk -F'\t' -v f="$1" '$1!=f' "$PM_WT_REGISTRY" > "$tmp" && mv "$tmp" "$PM_WT_REGISTRY"
 }
 
-# Resuelve el folder del worktree: WT explicito, o autodeteccion por el toplevel git si se corre dentro de uno.
+# Resuelve el folder del worktree de CODIGO: WT explicito, o autodeteccion por el toplevel git SOLO si el CWD
+# es un worktree de codigo (bajo worktrees/* con PL.PM.sln), mismo criterio que resolve_solution_dir. Sin el
+# guard, correr desde el checkout central del sidecar (o un worktree del propio sidecar) devolveria el basename
+# del sidecar y consumiria un slot bajo una clave que no es un worktree de codigo (registro compartido).
 wt_resolve_folder() {
   if [ -n "${WT:-}" ]; then printf '%s' "$WT"; return 0; fi
   local top; top="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-  [ -n "$top" ] && { basename "$top"; return 0; }
-  wt_die "falta WT=<folder> (o ejecutar dentro del worktree para autodeteccion)"; return 1
+  case "$top" in
+    "$WRAPPER_DIR/worktrees/"*) [ -f "$top/PL.PM.sln" ] && { basename "$top"; return 0; } ;;
+  esac
+  wt_die "falta WT=<folder> (la autodeteccion por CWD solo aplica dentro de un worktree de codigo bajo worktrees/* con PL.PM.sln)"; return 1
 }
 
 # Deriva todos los parametros por slot y recalcula puertos.
@@ -276,14 +281,20 @@ cmd_wt_up() {
   wt_derive "$slot"
   wt_log "worktree '$folder' -> slot $slot (proyecto $PM_PROJECT, offset $PM_PORT_OFFSET, API :$PM_API_PORT, BD $PM_PLANNING_DB, bus $WT_SB_PREFIX)"
 
-  # Codigo de la API (build): el worktree si existe; override explicito por PM_WT_SOLUTION_DIR; si no, el
-  # default de load_env (la solucion principal) -> util para smoke sin un worktree git aparte.
+  # Codigo de la API (build): override explicito por PM_WT_SOLUTION_DIR; si no, el worktree de codigo
+  # worktrees/<folder> SOLO si es la solucion .NET (marcador PL.PM.sln, mismo criterio que resolve_solution_dir);
+  # si no, el default de load_env (la solucion central) -> util para smoke sin un worktree git aparte.
   if [ -n "${PM_WT_SOLUTION_DIR:-}" ]; then
     PM_SOLUTION_DIR="$PM_WT_SOLUTION_DIR"
-  elif [ -e "$WRAPPER_DIR/worktrees/$folder/.git" ]; then
+  elif [ -f "$WRAPPER_DIR/worktrees/$folder/PL.PM.sln" ]; then
     PM_SOLUTION_DIR="$WRAPPER_DIR/worktrees/$folder"
   fi
-  [ -d "$PM_SOLUTION_DIR" ] || { wt_die "no existe la solucion '$PM_SOLUTION_DIR' (worktree '$folder'); fija PM_WT_SOLUTION_DIR"; return 1; }
+  # Falla temprana y clara si la solucion resuelta no es pl-programa-maestro (evita un build de Docker confuso
+  # cuando 'folder' es un worktree de la legacy o del propio sidecar, que tienen .git pero no PL.PM.sln).
+  [ -f "$PM_SOLUTION_DIR/PL.PM.sln" ] || { wt_die "la solucion '$PM_SOLUTION_DIR' (worktree '$folder') no contiene PL.PM.sln; wt-up es para pl-programa-maestro: corre dentro de su worktree o fija SOLUTION=<path>"; return 1; }
+  # Re-deriva containers/compose del PM_SOLUTION_DIR resuelto (invariante containers==solution/containers):
+  # asi el seed (sync_to_intel) y el build de la API (sync_solution_to_intel) salen del MISMO arbol.
+  PM_CONTAINERS_DIR="$PM_SOLUTION_DIR/containers"; COMPOSE_DIR="$PM_CONTAINERS_DIR/compose"
   # Dir remoto por slot en macdata (aisla el contexto de build entre worktrees).
   PM_REMOTE_SOLUTION_DIR="pm-solution-wt${slot}"
   wt_log "codigo de la API: $PM_SOLUTION_DIR -> $PM_REMOTE_SSH:$PM_REMOTE_SOLUTION_DIR"

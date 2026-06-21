@@ -67,11 +67,15 @@ APIPORT     ?=
 FILTER      ?=
 TESTPROJECT ?=
 APIFORCE    ?= 0
+# Override de la raiz del arbol (autodetectada por marcador gs-pl-pm-macops-sidecar/ si se omite); util si el
+# sidecar corre fuera del layout estandar. WT/SOLUTION (def. en el bloque wt-*) seleccionan el codigo a operar.
+WRAPPER     ?=
 
 PM_ENV = PM_TARGET=$(TARGET) PM_PROFILE=$(PROFILE) PM_PROJECT=$(PROJECT) \
          PM_PORT_OFFSET=$(OFFSET) PM_PORT_MODE=$(PORT_MODE) PM_REMOTE_SSH=$(REMOTE) \
          PM_REMOTE_DOCKER_CONTEXT=$(CONTEXT) PM_TEST_SQL_HOST=$(SQLHOST) PM_API_PORT=$(APIPORT) \
-         PM_TEST_FILTER='$(FILTER)' PM_TEST_PROJECT='$(TESTPROJECT)' PM_API_FORCE=$(APIFORCE)
+         PM_TEST_FILTER='$(FILTER)' PM_TEST_PROJECT='$(TESTPROJECT)' PM_API_FORCE=$(APIFORCE) \
+         WT=$(WT) PM_SOLUTION_DIR='$(SOLUTION)' PM_WRAPPER_DIR='$(WRAPPER)'
 
 # --- Variables legado (legacy-*) ---
 MACDATA       ?= macdata
@@ -87,7 +91,8 @@ MAX           ?= 40
 
 LEGACY_ENV = PM_LEGACY_MACDATA=$(MACDATA) PM_LEGACY_WINHOST=$(WINHOST) PM_LEGACY_SITE_PORT=$(SITEPORT) \
              PM_LEGACY_TUNNEL_PORT=$(TUNNEL) PM_LEGACY_SQL_PORT=$(SQLPORT) PM_LEGACY_ORACLE_PORT=$(ORACLEPORT) \
-             PM_LEGACY_PROFILE=$(LEGACY_PROFILE) PM_LEGACY_DATATIER=$(DATATIER) PM_LEGACY_FORCE=$(FORCE)
+             PM_LEGACY_PROFILE=$(LEGACY_PROFILE) PM_LEGACY_DATATIER=$(DATATIER) PM_LEGACY_FORCE=$(FORCE) \
+             WT=$(WT) PM_LEGACY_SRC_LOCAL='$(SOLUTION)' PM_WRAPPER_DIR='$(WRAPPER)'
 
 # --- Variables E2E (Opción C: API co-localizada con el data tier en macdata, alcanzable por el guest) ---
 # macdata vista DESDE el guest (pasarela NAT de VMware):

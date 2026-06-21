@@ -5,19 +5,59 @@
 set -euo pipefail
 
 # --- rutas ---
-# BASE_DIR = .../gs-pl-pm-macops-sidecar ; CONTAINERS_DIR = .../pl-programa-maestro/containers
-BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WRAPPER_DIR="$(cd "$BASE_DIR/.." && pwd)"
-PM_CONTAINERS_DIR="${PM_CONTAINERS_DIR:-$WRAPPER_DIR/pl-programa-maestro/containers}"
-PM_SOLUTION_DIR="${PM_SOLUTION_DIR:-$(cd "$PM_CONTAINERS_DIR/.." && pwd)}"   # raiz de pl-programa-maestro
-COMPOSE_DIR="$PM_CONTAINERS_DIR/compose"
+# BASE_DIR = raiz del checkout del sidecar (el central o un git worktree de gs-pl-pm-macops-sidecar).
+# pwd -P (ruta fisica): casa con el toplevel que devuelve git (que resuelve symlinks) en la autodeteccion por CWD.
+BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# WRAPPER_DIR = raiz del arbol que aloja los repos hermanos (pl-programa-maestro, pl-pm-legacy) y el checkout
+# central del sidecar. NO se deriva de "BASE_DIR/.." (eso asume el sidecar un nivel bajo la raiz y se rompe
+# desde un git worktree del sidecar): se localiza subiendo hasta el primer ancestro con gs-pl-pm-macops-sidecar/.
+# Override duro: PM_WRAPPER_DIR.
+find_wrapper_dir() {
+  local d="$1"
+  while [ "$d" != "/" ]; do
+    [ -d "$d/gs-pl-pm-macops-sidecar" ] && { printf '%s' "$d"; return 0; }
+    d="$(dirname "$d")"
+  done
+  return 1
+}
+WRAPPER_DIR="${PM_WRAPPER_DIR:-$(find_wrapper_dir "$BASE_DIR" || true)}"
+[ -n "$WRAPPER_DIR" ] && [ -d "$WRAPPER_DIR" ] || {
+  echo "[pm] ERROR: no se localizo la raiz del proyecto (un ancestro con gs-pl-pm-macops-sidecar/); fija PM_WRAPPER_DIR." >&2
+  exit 1
+}
+# Checkout central del sidecar (ruta oficial/estable): aloja el estado compartido (.env, registro de slots),
+# que un git worktree del sidecar reusa en vez de fragmentar.
+SIDECAR_CENTRAL_DIR="$WRAPPER_DIR/gs-pl-pm-macops-sidecar"
 COMPOSE_FILE="docker-compose.yml"
+
+# Resuelve la solucion (pl-programa-maestro) a construir/probar y deriva containers/compose. Prioridad:
+# PM_SOLUTION_DIR explicito > WT=<folder> (worktree de codigo, validado por PL.PM.sln) > CWD dentro de un
+# worktree de codigo > central. Cubre: solicitud sidecar standalone -> central; vinculada a un worktree -> ese.
+resolve_solution_dir() {
+  if [ -z "${PM_SOLUTION_DIR:-}" ]; then
+    local cand="" top
+    if [ -n "${WT:-}" ] && [ -f "$WRAPPER_DIR/worktrees/$WT/PL.PM.sln" ]; then
+      cand="$WRAPPER_DIR/worktrees/$WT"
+    else
+      top="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+      case "$top" in
+        "$WRAPPER_DIR/worktrees/"*) [ -f "$top/PL.PM.sln" ] && cand="$top" ;;
+      esac
+    fi
+    if [ -n "$cand" ]; then PM_SOLUTION_DIR="$cand"; else PM_SOLUTION_DIR="$WRAPPER_DIR/pl-programa-maestro"; fi
+  fi
+  PM_CONTAINERS_DIR="${PM_CONTAINERS_DIR:-$PM_SOLUTION_DIR/containers}"
+  COMPOSE_DIR="$PM_CONTAINERS_DIR/compose"
+}
 
 # --- carga de .env (orquestador) ---
 # Orden: $PM_ENV_FILE > gs-pl-pm-macops-sidecar/.env > containers/.env.example (solo defaults).
 load_env() {
+  resolve_solution_dir
   local f
-  for f in "${PM_ENV_FILE:-}" "$BASE_DIR/.env" "$PM_CONTAINERS_DIR/.env"; do
+  # .env del orquestador (estado compartido): el del checkout central primero, para que un git worktree del
+  # sidecar herede credenciales/config sin recrearlas. Orden: PM_ENV_FILE > central/.env > este checkout/.env.
+  for f in "${PM_ENV_FILE:-}" "$SIDECAR_CENTRAL_DIR/.env" "$BASE_DIR/.env" "$PM_CONTAINERS_DIR/.env"; do
     if [ -n "$f" ] && [ -f "$f" ]; then
       # shellcheck disable=SC1090
       set -a; . "$f"; set +a
@@ -65,7 +105,7 @@ load_env() {
   # --- Aprovisionamiento por worktree (verbos wt-*) ---
   # Un slot (0..N-1) es la unica perilla por worktree; de el se derivan proyecto/offset/BD/prefijo de bus.
   PM_WT_SLOTS="${PM_WT_SLOTS:-4}"                       # N de slots disponibles
-  PM_WT_REGISTRY="${PM_WT_REGISTRY:-$BASE_DIR/.worktrees/slots.tsv}"   # registro gitignored folder->slot
+  PM_WT_REGISTRY="${PM_WT_REGISTRY:-$SIDECAR_CENTRAL_DIR/.worktrees/slots.tsv}"   # registro compartido (checkout central); gitignored folder->slot
   # SQL compartido (reuso del de nvoslabs): la API y el seeder lo alcanzan uniendose a su red externa
   # (idiomatico, igual que los labs de nvoslabs) o, en su defecto, por el puerto publicado en loopback.
   PM_SHARED_SQL_NETWORK="${PM_SHARED_SQL_NETWORK:-nvoslabsc3-sharedsql-dt}"   # red externa del SQL compartido

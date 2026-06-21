@@ -147,6 +147,14 @@ worktree**. Es **intel-only** (el SQL compartido y el bus viven en `macdata`); `
 
 Del slot `N` se derivan: proyecto `pm-wt<N>`, API `:5180+N*10`, BD `pm_planning_wt<N>` y prefijo de bus `wt<N>`.
 
+> **Dos sentidos de "worktree" (distintos).** Estos verbos `wt-*` aprovisionan el **runtime** por worktree
+> (un slot con su BD, puertos y contenedor de API). El "worktree" que aprovisionan es un **git worktree del
+> repo de código** (`pl-programa-maestro` / `pl-pm-legacy`), típicamente en `pm-cc-wrapper/worktrees/<folder>`,
+> que sirve de contexto de build de la API. Es distinto de un **git worktree del propio sidecar**: el sidecar
+> resuelve su raíz por marcador (no por su ubicación física), así que los verbos `make` funcionan tanto desde
+> el checkout central como desde un worktree del sidecar, compartiendo el estado con el central. Ver
+> §Rutas y worktrees.
+
 | Comando | Acción |
 | --- | --- |
 | `make wt-up WT=<folder>` | Asigna el slot, asegura los singletons (SQL compartido alcanzable, referencia LN `pm_erpln106`, bus `pm-shared`), siembra `pm_planning_wt<N>`, construye y corre `pm-wt<N>-api`; imprime los endpoints. |
@@ -243,6 +251,30 @@ stack competirían por los mismos mensajes. Regla: un agente = un stack (`PROJEC
 
 > **Aviso `pm-nuke`:** `legacy-*` comparte el stack `pm-local`; `pm-nuke` borra volúmenes — se re-siembra el seed,
 > pero no lo que el legado haya escrito en vivo.
+
+> **Aviso `TARGET=intel` desde varios checkouts:** `pm-run TARGET=intel` y `e2e-backend` hacen `rsync --delete`
+> a rutas fijas en `macdata` (`PM_REMOTE_DIR=pm-containers`, `PM_REMOTE_SOLUTION_DIR=pm-solution`), que **no** se
+> derivan de `PROJECT`/`OFFSET`. Dos checkouts del sidecar (el central y un worktree) ejecutando contra `intel`
+> en paralelo se pisan ese contexto remoto aunque usen `PROJECT` distinto. Para correrlos a la vez, además de
+> `PROJECT`/`OFFSET` hay que fijar `PM_REMOTE_DIR` y `PM_REMOTE_SOLUTION_DIR` distintos por checkout. Los `wt-*`
+> sí aíslan el contexto de build por slot (`pm-solution-wt<N>`).
+
+## Rutas y worktrees
+
+El sidecar localiza los repos hermanos y su propio estado por una **raíz canónica** (`WRAPPER_DIR`), que se
+resuelve subiendo el árbol hasta el primer ancestro que contiene `gs-pl-pm-macops-sidecar/` (override:
+`PM_WRAPPER_DIR`). Por eso los verbos `make` funcionan igual desde el checkout central que desde un **git
+worktree del propio sidecar** (`pm-cc-wrapper/worktrees/<folder>`): la raíz no depende de la ubicación física
+del script.
+
+- **Estado compartido con el central.** El `.env` (`gs-pl-pm-macops-sidecar/.env`) y el registro de slots
+  (`.worktrees/slots.tsv`) se resuelven SIEMPRE en el **checkout central**, no en el worktree. Así un worktree
+  hereda credenciales/config y comparte la contabilidad de slots, sin fragmentarla ni colisionar en `macdata`.
+- **Qué código operan los `pm-*`/`legacy-*`.** Por defecto, el **central** (`pl-programa-maestro` /
+  `pl-pm-legacy`). Para apuntar a un **worktree de código**: `WT=<folder>` (worktree bajo `worktrees/<folder>`)
+  o `SOLUTION=<ruta>`; también se autodetecta si el comando se corre **dentro** de un worktree de código (su
+  toplevel git bajo `worktrees/*` con `PL.PM.sln`). Un worktree del propio sidecar (sin `PL.PM.sln`) NO se
+  confunde con la solución: cae al central.
 
 ## Configuración (`.env`)
 

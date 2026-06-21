@@ -4,7 +4,12 @@
 # Idempotente: verifica antes de levantar y NO relanza lo que ya esta arriba (salvo PM_LEGACY_FORCE=1).
 set -uo pipefail
 
-HERE="$(cd "$(dirname "$0")" && pwd)"                         # .../gs-pl-pm-macops-sidecar (pm.sh/Makefile co-ubicados)
+HERE="$(cd "$(dirname "$0")" && pwd -P)"                      # raiz del checkout del sidecar (central o worktree); pwd -P casa con git toplevel
+# Raiz del arbol (repos hermanos + sidecar central). Robusto ante un git worktree del sidecar: sube hasta el
+# ancestro con gs-pl-pm-macops-sidecar/ en vez de asumir "HERE/..". Override: PM_WRAPPER_DIR.
+_find_root(){ local d="$1"; while [ "$d" != "/" ]; do [ -d "$d/gs-pl-pm-macops-sidecar" ] && { printf '%s' "$d"; return 0; }; d="$(dirname "$d")"; done; return 1; }
+WRAPPER_DIR="${PM_WRAPPER_DIR:-$(_find_root "$HERE" || true)}"
+[ -n "$WRAPPER_DIR" ] || { printf 'ERROR: no se localizo la raiz del proyecto (ancestro con gs-pl-pm-macops-sidecar/); fija PM_WRAPPER_DIR\n' >&2; exit 1; }
 
 # --- Config (defaults; el Makefile traduce vars cortas a estas PM_LEGACY_*) ---
 MACDATA="${PM_LEGACY_MACDATA:-macdata}"                       # alias SSH de la mac Intel
@@ -18,7 +23,18 @@ DATATIER="${PM_LEGACY_DATATIER:-1}"                          # 0 = no gestionar 
 FORCE="${PM_LEGACY_FORCE:-0}"                                # 1 = rebuild/redeploy aunque ya este arriba
 HW_REMOTE="${PM_LEGACY_HW_REMOTE:-~/pm-host-windows}"        # checkout de host-windows EN macdata
 STAGE_REMOTE="${PM_LEGACY_STAGE_REMOTE:-~/pm-host-windows/artifacts/stage}"  # stage de fuente EN macdata
-SRC_LOCAL="${PM_LEGACY_SRC_LOCAL:-$HERE/../pl-pm-legacy}"     # fuente del legado EN M1 (repo aplanado: la solucion esta en la raiz)
+# Fuente del legado en el M1. Prioridad: PM_LEGACY_SRC_LOCAL explicito > WT=<folder> (worktree de codigo
+# legacy, validado por ProgramaMaestroPT.sln) > CWD dentro de un worktree legacy > central pl-pm-legacy.
+_resolve_legacy_src(){
+  [ -n "${PM_LEGACY_SRC_LOCAL:-}" ] && { printf '%s' "$PM_LEGACY_SRC_LOCAL"; return 0; }
+  if [ -n "${WT:-}" ] && [ -f "$WRAPPER_DIR/worktrees/$WT/ProgramaMaestroPT.sln" ]; then
+    printf '%s' "$WRAPPER_DIR/worktrees/$WT"; return 0
+  fi
+  local top; top="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  case "$top" in "$WRAPPER_DIR/worktrees/"*) [ -f "$top/ProgramaMaestroPT.sln" ] && { printf '%s' "$top"; return 0; } ;; esac
+  printf '%s' "$WRAPPER_DIR/pl-pm-legacy"
+}
+SRC_LOCAL="$(_resolve_legacy_src)"                           # fuente del legado EN M1 (central o worktree de codigo)
 
 APP_PATH="health.aspx"                                        # ruta de humo que publica deploy-iis.ps1 (raiz del site)
 
@@ -54,7 +70,9 @@ data_up(){
   log "data tier abajo -> levantando via pm.sh (TARGET=intel PROFILE=$PROFILE)"
   # El data tier del legado (Oracle ControlPiso + Infor LN con su seed) lo provisiona la solicitud
   # db-setup-containers; aqui solo se asegura que los contenedores/puertos esten arriba en intel.
-  make -C "$HERE" pm-run TARGET=intel REMOTE="$MACDATA" SQLHOST="$MACDATA" PROFILE="$PROFILE" \
+  # WRAPPER="$WRAPPER_DIR": propaga la raiz ya resuelta (honra el override PM_WRAPPER_DIR); sin esto el
+  # sub-make pisaria PM_WRAPPER_DIR='' y el data tier perderia el override en layout no estandar.
+  make -C "$HERE" pm-run WRAPPER="$WRAPPER_DIR" TARGET=intel REMOTE="$MACDATA" SQLHOST="$MACDATA" PROFILE="$PROFILE" \
     || die "fallo al levantar el data tier en intel"
 }
 
