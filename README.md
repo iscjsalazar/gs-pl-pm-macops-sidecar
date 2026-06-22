@@ -1,15 +1,19 @@
 # gs-pl-pm-macops-sidecar — orquestación local (data tier + API + legado)
 
-Carpeta única que reúne la maquinaria de CI/CD local del Programa Maestro. Un solo `Makefile` expone dos
+Carpeta única que reúne la maquinaria de CI/CD local del Programa Maestro. Un solo `Makefile` expone varias
 familias de verbos sobre el mismo data tier:
 
 - **`pm-*`** — data tier (SQL Server + Oracle + Service Bus emulador) + API real (`PL.PM.Bootstrapper.Api`) + pruebas de integración
   del backend `pl-programa-maestro`.
 - **`legacy-*`** — compilar y correr el legado `CargaPlantaPT_LN` en un host Windows headless (VM en `macdata`).
+- **`wt-*`** — aprovisionamiento aislado por worktree (un slot con su BD y API, sobre el SQL compartido de nvoslabs).
+- **`e2e-*`** — backend en modo E2E (`e2e-backend`) y **orquestación E2E completa** (`e2e-up`/`e2e-smoke`/`e2e-down`:
+  backend + legado con inyección de config + feature flag + smoke funcional legacy-driven).
 
-El `Makefile` es una capa fina; la lógica vive en bash: `pm.sh` + `lib/common.sh` (familia `pm-*`) y
-`legacy.sh` (familia `legacy-*`). El data tier es **compartido**: `legacy-data-up` lo levanta reusando
-`pm-run TARGET=intel`, y ambos consumen el mismo esquema/seed (provisto por la solicitud `db-setup-containers`).
+El `Makefile` es una capa fina; la lógica vive en bash: `pm.sh` + `lib/common.sh` (`pm-*`), `legacy.sh` (`legacy-*`),
+`wt.sh` + `lib/worktrees.sh` (`wt-*`) y `scripts/e2e.sh` (`e2e-*`). El data tier es **compartido**: `legacy-data-up`
+lo levanta reusando `pm-run TARGET=intel`, y ambos consumen el mismo esquema/seed (provisto por la solicitud
+`db-setup-containers`).
 
 ## Estructura
 
@@ -19,13 +23,17 @@ gs-pl-pm-macops-sidecar/
 ├── Makefile             # catalogo unico de verbos (pm-* / legacy-*)
 ├── .env.example         # plantilla (2 secciones: pm-* en la M1, legacy-* en macdata)
 ├── pm.sh                # driver del data tier + API (corre en la M1)
-├── lib/common.sh        # libreria de pm.sh (rutas, carga de .env, puertos, docker compose)
+├── wt.sh                # driver del aprovisionamiento por worktree (wt-*; slot + SQL compartido)
+├── legacy.sh            # driver del lanzamiento del legado (M1; orquesta por SSH)
+├── lib/
+│   ├── common.sh        # libreria comun (rutas, carga de .env, puertos, docker compose, helpers remotos)
+│   └── worktrees.sh     # logica de wt-* (slot, SQL compartido, seed, API por worktree)
 ├── remote-intel/
 │   └── bootstrap-intel.sh   # aprovisiona colima/docker en la mac Intel (una vez)
-├── legacy.sh            # driver del lanzamiento del legado (M1; orquesta por SSH)
+├── e2e/                 # Dockerfile de la imagen de la API en modo E2E
 ├── INSTALL-fusion.md    # instalar VMware Fusion (manual; brew lo deshabilitó)
 ├── packer/              # windows-server-core.pkr.hcl + Autounattend.xml.tmpl + provision/
-├── scripts/             # build-vm · vm-up · stage-app · build-app · deploy-app · deploy-iis.ps1 · diag · ...
+├── scripts/             # vm-up · stage-app · build-app · deploy-app · deploy-iis.ps1 · e2e-net-check · e2e.sh · diag · ...
 └── artifacts/           # TODO lo descargado/pesado (GITIGNORED; solo .gitkeep se versiona)
 ```
 
@@ -37,7 +45,9 @@ gs-pl-pm-macops-sidecar/
   contra esa API y asumen el data tier arriba.
 - En el **modo E2E** (`make e2e-backend`, Opción C), la API corre en su propio contenedor en `macdata`, unido a la
   red del data tier, de modo que el guest Windows del legado la alcanza por la pasarela NAT de VMware
-  (`172.16.128.1`). Ver §Comandos E2E.
+  (`172.16.128.1`). La **orquestación E2E completa** (`make e2e-up`) compone el backend (ruta wt), el legado con
+  inyección de config, el feature flag y un smoke funcional; **todo el runtime vive en `macdata`** (la M1 sólo
+  orquesta por SSH; el disparo del smoke va `macdata`→guest, sin túnel). Ver §Comandos — orquestación E2E completa.
 - El **legado** compila y corre en una VM Windows Server 2022 Core headless en `macdata`, operada por SSH; el
   acceso desde la M1 es por túnel SSH (ver §Comandos legado e `INSTALL-fusion.md`).
 - La solución (`pl-programa-maestro`) sólo **lee** variables de entorno (`ConnectionStrings__Planning`,
@@ -134,8 +144,10 @@ Prerrequisitos en `macdata`:
 - En el M1, `macdata` resoluble en `/etc/hosts` (ver §Requisito de host) para `make e2e-net-check` y para alcanzar
   la API por la LAN.
 
-La inyección de esa URL en el config del legado y el feature flag que deriva la carga al backend pertenecen a
-otras solicitudes (orquestación E2E y feature flag); aquí sólo se habilita la conectividad de red.
+La inyección de esa URL en el config del legado y la activación del feature flag las realiza la **orquestación
+E2E completa** (`make e2e-up`, ver §Comandos — orquestación E2E completa); aquí (`e2e-backend`) sólo se habilita
+la conectividad de red de la API. Nota: `e2e-up` usa la ruta **wt** (no `e2e-backend`); `e2e-backend` queda como
+levante mono del backend para validar conectividad.
 
 ## Comandos — aprovisionamiento por worktree (`wt-*`)
 
@@ -179,6 +191,62 @@ núcleo (sirven a la vía legada/E2E): quedan como follow-up.
 
 Prerrequisitos en `macdata`: el SQL compartido de nvoslabs corriendo (red `nvoslabsc3-sharedsql-dt`), `colima`
 del data tier activo y las imágenes base de .NET (`sdk:10.0`/`aspnet:10.0`) disponibles.
+
+## Comandos — orquestación E2E completa (`e2e-up` / `e2e-smoke` / `e2e-down`)
+
+`make e2e-up` **compone** los targets de tier ya existentes y agrega el *last-mile* del camino end-to-end:
+inyecta el wiring de aplicación al backend .NET 10 en el deploy del legado, activa el feature flag y corre un
+**smoke funcional legacy-driven**. Usa la ruta **wt** (backend por slot, ver §Comandos — aprovisionamiento por
+worktree). Es idempotente.
+
+**Topología (todo el runtime vive en `macdata`).** La M1 es **solo el orquestador**: ejecuta `make` y maneja por
+SSH. El backend (contenedor de la API), el SQL compartido, el bus, el data tier y la **VM Windows del legado**
+corren en `macdata`. El disparo del smoke va **`macdata` → guest directo** (`172.16.128.129:8080`); el túnel
+`localhost:18080` que abre `legacy-launch` es **solo para acceso humano a la UI**, el smoke no lo usa.
+
+**Puente SQL (socat).** El SQL compartido de nvoslabs se publica solo en el **loopback de `macdata`**
+(`127.0.0.1:60201`), inalcanzable desde la VM (que ve a `macdata` por la pasarela NAT `172.16.128.1`). `e2e-up`
+levanta un contenedor `pm-e2e-sqlbridge` (socat) unido a la red del SQL compartido, que publica
+`0.0.0.0:60211 → sqlserver:1433`; así el legado lee el feature flag en `172.16.128.1:60211`. Oracle ControlPiso
+ya está publicado en `0.0.0.0:1521` (alcanzable sin puente).
+
+**Inyección en el deploy.** Sobre el `Web.config`/`connections.config` **desplegado** en el guest (la frontera:
+el repo legado no conoce al wrapper), `deploy-iis.ps1` inyecta `backendBaseUrl` (appSettings) y `ConStrPm`
+(reemplazo de tokens `__SQL_PM_*__` en `Config\connections.config`, con override de catálogo a `pm_planning_wt<N>`
+para la ruta wt). Los valores viajan en base64 para no romper el quoting SSH→PowerShell.
+
+**Smoke funcional (sin navegador).** El WCF `generar_programa` corre con `authentication="None"` (REST sin auth),
+así que el smoke lo dispara con un POST HTTP desde `macdata`. Con el flag **ON**, el legado deriva la carga al
+backend (`POST api/v1/demand/backlog/load {"plant":"RT"}`) y la respuesta trae el body del backend en
+`MensajeTecnico`. Con el flag **OFF**, cae al SP Oracle `PGE950RT.PROCESOPRINCIPAL` sin tocar el backend. El smoke
+discrimina ON por `MensajeTecnico` y OFF por la ausencia de órdenes nuevas (robusto al volumen de datos).
+
+| Comando | Acción |
+| --- | --- |
+| `make e2e-up WT=<wt-pm> LEGACYSRC=<legacy-develop>` | Todo: `wt-up` (backend del slot) + puente SQL + `legacy-launch` con inyección + activar el flag ON + `e2e-net-check` + smoke. |
+| `make e2e-up ... LINEA=<cod> ANOF=<aaaa> SEMF=<sem>` | Params reales del disparo (el caso OFF/Oracle los exige; el ON los ignora). |
+| `make e2e-up ... FORCE=1` | Re-deploya el legado (re-inyecta el wiring; necesario si cambia el slot). |
+| `make e2e-smoke WT=<wt-pm>` | Solo el smoke funcional (ON→backend, OFF→Oracle); asume `e2e-up` ya dejó todo arriba. |
+| `make e2e-down WT=<wt-pm>` | Baja el túnel, la API del slot y el puente SQL; deja los singletons (data tier, SQL compartido, bus) intactos. |
+
+```bash
+make e2e-up WT=<wt-pm-develop> LEGACYSRC=<ruta-legacy-develop> LINEA=<cod> ANOF=<aaaa> SEMF=<sem>
+make e2e-smoke WT=<wt-pm-develop>     # re-corre solo el smoke
+make e2e-down  WT=<wt-pm-develop>     # cierra túnel/API/puente
+```
+
+Prerrequisitos:
+
+- **Fuentes en `origin/develop`**: `WT` es un worktree de `pl-programa-maestro` (con `PL.PM.sln`) y `LEGACYSRC`
+  la fuente del legado, **ambos en `origin/develop`** (traen el gateway y el feature flag de Fase 1; el `main`
+  local del legado o un `develop` desactualizado **no** los tienen). `e2e-up` aborta si la fuente legada no trae
+  `BL/CargaBackendGateway.cs`.
+- **Esquema del feature flag**: la API aplica las migraciones EF al arrancar (incluida `FeatureManagement`), así
+  que con un backend de `origin/develop` la tabla/vista del flag se crean solas. `e2e.sh` además asegura el
+  esquema de forma idempotente (`e2e_ensure_flag_schema`) como **red de seguridad** para builds desactualizados.
+- `macdata` con el SQL compartido de nvoslabs y la VM Windows arriba; imagen `alpine/socat` (se baja sola la
+  primera vez). Firewall de `macdata` que permita al guest el puerto del puente (`60211`); `e2e-up` valida
+  guest→SQL y aborta con guía si no pasa.
 
 ## Variables
 
