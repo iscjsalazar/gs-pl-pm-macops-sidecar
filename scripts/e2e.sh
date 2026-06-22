@@ -129,10 +129,11 @@ e2e_set_flag(){  # uso: e2e_set_flag <0|1>
   fi
 }
 
-# Conteo de ordenes RT en la BD del backend (el gateway mapea RES->RT). -1 ante error de consulta.
+# Conteo de ordenes en la BD del backend. El backend almacena la planta BASE (BasePlantCode mapea RT->RES),
+# no la etiqueta RT, asi que el conteo filtra Plant='RES'. -1 ante error de consulta.
 e2e_orders_count(){
   local pw n; pw="$(wt_shared_sql_password)" || { printf '%s' "-1"; return; }
-  n="$(wt_shared_scalar "$pw" "SET NOCOUNT ON; SELECT COUNT(*) FROM [$PM_PLANNING_DB].Demand.Orders WHERE Plant='RT';")"
+  n="$(wt_shared_scalar "$pw" "SET NOCOUNT ON; SELECT COUNT(*) FROM [$PM_PLANNING_DB].Demand.Orders WHERE Plant='RES';")"
   case "$n" in ''|*[!0-9]*) printf '%s' "-1" ;; *) printf '%s' "$n" ;; esac
 }
 
