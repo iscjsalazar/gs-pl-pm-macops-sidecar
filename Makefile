@@ -28,6 +28,16 @@
 #   make e2e-net-check                       # smoke de conectividad (M1 + guest -> backend/data tier)
 #   # Prereq: 'dotnet' (SDK .NET 10) y firewall abierto en macdata; 'macdata' resoluble en /etc/hosts del M1 (ver README).
 #
+# Orquestacion E2E completa (ruta wt: backend(slot) + legacy con inyeccion + flag + smoke funcional legacy-driven):
+#   make e2e-up    WT=<wt-pm> LEGACYSRC=<path-legacy-develop>   # todo: data tier + backend(slot) + puente SQL + legacy(+inyeccion) + flag ON + smoke
+#   make e2e-up    ... LINEA=<cod> ANOF=<aaaa> SEMF=<sem>       # params reales del disparo (el caso OFF/Oracle los exige)
+#   make e2e-up    ... FORCE=1                                  # re-deploya el legado (re-inyecta wiring; necesario si cambia el slot)
+#   make e2e-smoke WT=<wt-pm>                                   # solo el smoke funcional (ON->backend, OFF->Oracle)
+#   make e2e-down  WT=<wt-pm>                                   # baja tunel + API del slot + puente SQL (singletons intactos)
+#   # WT = worktree de pl-programa-maestro (PL.PM.sln) EN develop; LEGACYSRC = fuente del legado EN develop (trae el gateway de Fase 1).
+#   # El shared SQL (nvoslabs) solo escucha en loopback de macdata -> e2e-up levanta un puente socat (BRIDGEPORT=60211) para el guest.
+#   # Inyeccion en el deploy: backendBaseUrl (appSettings) + ConStrPm (Config\connections.config, catalogo pm_planning_wt<N>).
+#
 # Aprovisionamiento aislado por worktree (wt-*; SQL compartido de nvoslabs + bus PM-owned, en macdata):
 #   make wt-up WT=<folder>                    # aprovisiona el entorno del worktree (slot, seed, API); intel-only
 #   make wt-up WT=<folder> SOLUTION=<path>    # fuerza la raiz de la solucion del worktree (build de la API)
@@ -105,6 +115,26 @@ GUESTKEY  ?= ~/pm-host-windows/artifacts/ssh/id_pmwin
 E2E_ENV = $(PM_ENV) PM_GUEST_GATEWAY=$(GATEWAY) PM_GUEST_WINHOST=$(WINHOST) \
           PM_GUEST_KEY='$(GUESTKEY)' PM_E2E_DATATIER=$(DATATIER)
 
+# --- Variables orquestacion E2E (e2e-up/e2e-smoke/e2e-down): wt + legacy + flag + smoke funcional ---
+# Ruta wt: el backend corre por slot (WT=<worktree de pl-programa-maestro con PL.PM.sln); LEGACYSRC = fuente
+# del legado en develop (ProgramaMaestroPT.sln + el gateway). El shared SQL solo escucha en loopback de macdata
+# -> e2e-up levanta un puente (socat) en BRIDGEPORT para que el guest lea el flag. PLANTA/LINEA/ANOF/SEMF son
+# los parametros del disparo (LINEA/ANOF/SEMF solo los usa el camino Oracle/OFF). FLAGFINAL = estado del flag
+# al terminar. SQLPMHOST = override del host,puerto del SQL del flag (vacio = puente automatico).
+LEGACYSRC ?=
+PLANTA    ?= RES
+LINEA     ?=
+ANOF      ?= 0
+SEMF      ?= 0
+FLAGFINAL ?= on
+BRIDGEPORT?= 60211
+SQLPMHOST ?=
+
+E2E_ORCH_ENV = $(E2E_ENV) WT=$(WT) PM_E2E_LEGACY_SRC='$(LEGACYSRC)' PM_E2E_PLANTA=$(PLANTA) \
+               PM_E2E_LINEA='$(LINEA)' PM_E2E_ANOF=$(ANOF) PM_E2E_SEMF=$(SEMF) PM_E2E_FLAG_FINAL=$(FLAGFINAL) \
+               PM_E2E_TUNNEL=$(TUNNEL) PM_E2E_FORCE=$(FORCE) PM_E2E_BRIDGE_PORT=$(BRIDGEPORT) \
+               PM_E2E_SQL_PM_HOST='$(SQLPMHOST)'
+
 # --- Variables aprovisionamiento por worktree (wt-*) ---
 WT          ?=
 SLOTS       ?= 4
@@ -120,7 +150,7 @@ WT_ENV = $(PM_ENV) WT=$(WT) PM_WT_SLOTS=$(SLOTS) PM_WT_SOLUTION_DIR='$(SOLUTION)
 
 .PHONY: pm-run pm-watch pm-seed pm-api pm-api-down pm-test pm-test-clean pm-format pm-format-check pm-down pm-nuke pm-ps pm-logs pm-port pm-bootstrap-intel \
         wt-up wt-down wt-ls wt-status wt-seed-ln \
-        e2e-backend e2e-backend-down e2e-net-check \
+        e2e-backend e2e-backend-down e2e-net-check e2e-up e2e-smoke e2e-down \
         legacy-launch legacy-data-up legacy-vm-up legacy-build legacy-deploy legacy-diag legacy-diag-logs \
         legacy-tunnel legacy-status legacy-url legacy-down help
 
@@ -156,6 +186,18 @@ e2e-backend-down: ; $(E2E_ENV) ./pm.sh e2e-backend-down
 e2e-net-check:    override REMOTE  := macdata
 e2e-net-check:    override PROFILE := full
 e2e-net-check:    ; $(E2E_ENV) ./scripts/e2e-net-check.sh
+
+# --- orquestacion E2E completa (ruta wt): data tier + backend(slot) + puente SQL + legacy(+inyeccion) + flag + smoke ---
+# 'override' fija intel/macdata como en wt-up/e2e-backend (backend, SQL compartido y bus viven en macdata).
+e2e-up:    override TARGET  := intel
+e2e-up:    override REMOTE  := macdata
+e2e-up:    ; $(E2E_ORCH_ENV) ./scripts/e2e.sh up
+e2e-smoke: override TARGET  := intel
+e2e-smoke: override REMOTE  := macdata
+e2e-smoke: ; $(E2E_ORCH_ENV) ./scripts/e2e.sh smoke
+e2e-down:  override TARGET  := intel
+e2e-down:  override REMOTE  := macdata
+e2e-down:  ; $(E2E_ORCH_ENV) ./scripts/e2e.sh down
 
 # --- aprovisionamiento por worktree (wt-*): intel-only (SQL compartido + bus en macdata) ---
 # 'override TARGET' fuerza intel (el SQL compartido vive en el docker de macdata); REMOTE default macdata

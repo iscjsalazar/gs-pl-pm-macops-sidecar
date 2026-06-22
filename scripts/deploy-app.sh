@@ -17,11 +17,23 @@ PS_LOCAL="$HERE/scripts/deploy-iis.ps1"
 [ -f "$PS_LOCAL" ] || { echo "[deploy-app] no existe $PS_LOCAL" >&2; exit 1; }
 DBHOST="${PM_LEGACY_DBHOST:-172.16.128.1}"   # IP del data tier (Oracle) vista DESDE el guest (host del bridge)
 
+# --- E2E (solicitud e2e-launch-orchestration): inyeccion opcional del wiring al backend .NET 10. Los valores
+# viajan en base64 para no romper el quoting a traves de SSH -> PowerShell del guest. Vacio = no se pasan
+# (legacy-launch standalone: deploy-iis.ps1 solo repunta conStringOracle). ---
+_b64(){ printf '%s' "${1:-}" | base64 | tr -d '\n'; }
+EXTRA=""
+[ -n "${PM_LEGACY_BACKEND_URL:-}" ] && EXTRA="$EXTRA -BackendBaseUrlB64 $(_b64 "$PM_LEGACY_BACKEND_URL")"
+[ -n "${PM_LEGACY_SQL_PM_HOST:-}" ] && EXTRA="$EXTRA -SqlPmHostB64 $(_b64 "$PM_LEGACY_SQL_PM_HOST")"
+[ -n "${PM_LEGACY_SQL_PM_DB:-}"   ] && EXTRA="$EXTRA -SqlPmDbB64 $(_b64 "$PM_LEGACY_SQL_PM_DB")"
+[ -n "${PM_LEGACY_SQL_PM_USER:-}" ] && EXTRA="$EXTRA -SqlPmUserB64 $(_b64 "$PM_LEGACY_SQL_PM_USER")"
+[ -n "${PM_LEGACY_SQL_PM_PASS:-}" ] && EXTRA="$EXTRA -SqlPmPassB64 $(_b64 "$PM_LEGACY_SQL_PM_PASS")"
+[ -n "$EXTRA" ] && echo "[deploy-app] inyeccion E2E: backendBaseUrl=${PM_LEGACY_BACKEND_URL:-} ConStrPm=${PM_LEGACY_SQL_PM_HOST:-}/${PM_LEGACY_SQL_PM_DB:-} (password oculto)"
+
 echo "[deploy-app] copiando deploy-iis.ps1 al guest (site :$SITE_PORT, oracle $DBHOST)"
 scp -q -i "$KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$PS_LOCAL" Administrator@"$G":C:/deploy-iis.ps1
 
 echo "[deploy-app] ejecutando deploy en el guest (vdir ProgramaMaestroLN + conn string data tier)"
-SSHG "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\deploy-iis.ps1 -Port $SITE_PORT -OracleHost $DBHOST"
+SSHG "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\deploy-iis.ps1 -Port $SITE_PORT -OracleHost $DBHOST$EXTRA"
 
 echo "[deploy-app] verificando health en el guest"
 SSHG "powershell -NoProfile -Command \"(Invoke-WebRequest -UseBasicParsing http://localhost:$SITE_PORT/health.aspx).StatusCode\""

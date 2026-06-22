@@ -11,10 +11,29 @@ param(
   [int]$OraclePort  = 1521,
   [string]$OracleSid  = "XE",
   [string]$OracleUser = "pge_ctrlpiso",
-  [string]$OraclePass = "ctrlpiso"
+  [string]$OraclePass = "ctrlpiso",
+  # --- E2E (solicitud e2e-launch-orchestration): wiring opcional al backend .NET 10. Los valores viajan en
+  # base64 para evitar el quoting a traves de SSH -> PowerShell del guest. Vacio = no inyecta (legacy-launch
+  # standalone conserva el comportamiento previo: solo repunta conStringOracle). ---
+  [string]$BackendBaseUrlB64 = "",
+  [string]$SqlPmHostB64      = "",
+  [string]$SqlPmDbB64        = "",
+  [string]$SqlPmUserB64      = "",
+  [string]$SqlPmPassB64      = ""
 )
 $ErrorActionPreference = "Stop"
 Import-Module WebAdministration
+
+# Decodifica los parametros E2E (base64 -> UTF8). Una cadena vacia queda vacia (no inyecta).
+function FromB64([string]$s) {
+  if ([string]::IsNullOrEmpty($s)) { return "" }
+  return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($s))
+}
+$BackendBaseUrl = FromB64 $BackendBaseUrlB64
+$SqlPmHost      = FromB64 $SqlPmHostB64
+$SqlPmDb        = FromB64 $SqlPmDbB64
+$SqlPmUser      = FromB64 $SqlPmUserB64
+$SqlPmPass      = FromB64 $SqlPmPassB64
 
 # WCF Services > HTTP Activation: sin este feature IIS no registra el handler *.svc y TODAS las
 # llamadas WCF (WCFobtenerDatos.svc/*) dan 404 -> la capa de datos AJAX del legado no funciona.
@@ -30,6 +49,31 @@ $cs = "data source=(description=(address=(protocol=tcp)(host=$OracleHost)(port=$
 $node = $cfg.SelectSingleNode("//appSettings/add[@key='conStringOracle']")
 if ($node) { $node.SetAttribute('value', $cs); $cfg.Save($cfgPath); "conStringOracle -> host=$OracleHost port=$OraclePort sid=$OracleSid user=$OracleUser" }
 else { Write-Warning "appSettings/conStringOracle no encontrado en $cfgPath (no se repunta)" }
+
+# --- E2E: inyecta backendBaseUrl (appSettings) en el Web.config desplegado (mismo patron que conStringOracle).
+# El guest ve el backend por la pasarela NAT (p.ej. http://172.16.128.1:5180). ---
+if ($BackendBaseUrl -ne "") {
+  $bn = $cfg.SelectSingleNode("//appSettings/add[@key='backendBaseUrl']")
+  if ($bn) { $bn.SetAttribute('value', $BackendBaseUrl); $cfg.Save($cfgPath); "backendBaseUrl -> $BackendBaseUrl" }
+  else { Write-Warning "appSettings/backendBaseUrl no encontrado en $cfgPath (fuente legacy sin el wiring de Fase 1; sin inyectar)" }
+}
+
+# --- E2E: inyecta ConStrPm (connectionStrings via configSource) por reemplazo de tokens en el
+# Config\connections.config DESPLEGADO. El repo versiona placeholders __SQL_PM_*__ (sin credenciales ni host);
+# el valor real solo vive aqui, en el guest. El catalogo se sobreescribe para la ruta wt (pm_planning_wt<N>). ---
+if ($SqlPmHost -ne "") {
+  $connCfg = Join-Path $App "Config\connections.config"
+  if (Test-Path $connCfg) {
+    $txt = [System.IO.File]::ReadAllText($connCfg)
+    $txt = $txt.Replace('__SQL_PM_HOST__', $SqlPmHost)
+    $txt = $txt.Replace('__SQL_PM_USER__', $SqlPmUser)
+    $txt = $txt.Replace('__SQL_PM_PASSWORD__', $SqlPmPass)
+    if ($SqlPmDb -ne "") { $txt = $txt.Replace('Initial Catalog=pm_planning;', "Initial Catalog=$SqlPmDb;") }
+    $enc = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($connCfg, $txt, $enc)
+    "ConStrPm -> Server=$SqlPmHost; Catalog=$SqlPmDb; User=$SqlPmUser"
+  } else { Write-Warning "Config\connections.config no encontrado en $App (fuente legacy sin connectionStrings externalizado; ConStrPm sin inyectar)" }
+}
 
 # --- Raiz del site: carpeta minima con health.aspx (smoke sin BD) ---
 $root = "C:\inetpub\pmroot"

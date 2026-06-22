@@ -21,6 +21,13 @@ ORACLE_PORT="${PM_LEGACY_ORACLE_PORT:-1521}"                 # Oracle del data t
 PROFILE="${PM_LEGACY_PROFILE:-full}"                         # sql | full (el legado necesita Oracle ControlPiso)
 DATATIER="${PM_LEGACY_DATATIER:-1}"                          # 0 = no gestionar el data tier
 FORCE="${PM_LEGACY_FORCE:-0}"                                # 1 = rebuild/redeploy aunque ya este arriba
+# E2E (solicitud e2e-launch-orchestration): wiring opcional al backend .NET 10 que el deploy inyecta en el
+# Web.config/connections.config DESPLEGADO (la frontera: el repo legado no los conoce). Vacio = no inyecta.
+BACKEND_URL="${PM_LEGACY_BACKEND_URL:-}"                     # appSetting backendBaseUrl (URL del backend vista por el guest)
+SQL_PM_HOST="${PM_LEGACY_SQL_PM_HOST:-}"                     # ConStrPm: host,puerto del SQL del backend (alcanzable por el guest)
+SQL_PM_DB="${PM_LEGACY_SQL_PM_DB:-}"                         # ConStrPm: catalogo (pm_planning o pm_planning_wt<N>)
+SQL_PM_USER="${PM_LEGACY_SQL_PM_USER:-}"                     # ConStrPm: usuario
+SQL_PM_PASS="${PM_LEGACY_SQL_PM_PASS:-}"                     # ConStrPm: password
 HW_REMOTE="${PM_LEGACY_HW_REMOTE:-~/pm-host-windows}"        # checkout de host-windows EN macdata
 STAGE_REMOTE="${PM_LEGACY_STAGE_REMOTE:-~/pm-host-windows/artifacts/stage}"  # stage de fuente EN macdata
 # Fuente del legado en el M1. Prioridad: PM_LEGACY_SRC_LOCAL explicito > WT=<folder> (worktree de codigo
@@ -42,6 +49,8 @@ log(){ printf '== %s\n' "$*"; }
 warn(){ printf 'AVISO: %s\n' "$*" >&2; }
 die(){ printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 ssh_md(){ ssh "$MACDATA" "$@"; }
+# Escapa comillas simples para incrustar un valor en un comando remoto entre comillas simples.
+_esc(){ printf "%s" "${1//\'/\'\\\'\'}"; }
 
 # Health del legado consultado DESDE macdata hacia el guest (evita depender del tunel).
 guest_health(){ ssh_md "curl -s -o /dev/null -w '%{http_code}' --max-time 8 http://$WINHOST:$SITE_PORT/$APP_PATH" 2>/dev/null; }
@@ -106,8 +115,15 @@ deploy(){
     log "app ya sirviendo (health 200) -> se omite deploy (PM_LEGACY_FORCE=1 para forzar)"
     return 0
   fi
-  log "deploy a IIS del guest (site :$SITE_PORT)"
-  ssh_md "WINHOST=$WINHOST SITE_PORT=$SITE_PORT bash $HW_REMOTE/scripts/deploy-app.sh" || die "fallo el deploy"
+  log "deploy a IIS del guest (site :$SITE_PORT)${BACKEND_URL:+ + inyeccion backend ($BACKEND_URL)}"
+  # Propaga el wiring E2E opcional al deploy-app.sh remoto (vacio = no inyecta; deploy standalone intacto).
+  ssh_md "WINHOST=$WINHOST SITE_PORT=$SITE_PORT \
+    PM_LEGACY_BACKEND_URL='$(_esc "$BACKEND_URL")' \
+    PM_LEGACY_SQL_PM_HOST='$(_esc "$SQL_PM_HOST")' \
+    PM_LEGACY_SQL_PM_DB='$(_esc "$SQL_PM_DB")' \
+    PM_LEGACY_SQL_PM_USER='$(_esc "$SQL_PM_USER")' \
+    PM_LEGACY_SQL_PM_PASS='$(_esc "$SQL_PM_PASS")' \
+    bash $HW_REMOTE/scripts/deploy-app.sh" || die "fallo el deploy"
 }
 
 diag(){
