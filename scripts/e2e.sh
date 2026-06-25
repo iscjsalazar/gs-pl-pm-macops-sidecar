@@ -41,6 +41,10 @@ BRIDGE_IMAGE="${PM_E2E_BRIDGE_IMAGE:-alpine/socat}"
 
 VDIR="ProgramaMaestroLN"
 SVC_PATH="$VDIR/Services/WCFobtenerDatos.svc/generar_programa"
+SVC_STATUS_PATH="$VDIR/Services/WCFobtenerDatos.svc/obtener_estado_job"
+# Credenciales del login de solo-lectura pm_reader para ConStrJobsReader (seed planning/0301-jobs-reader-login.sql).
+JOBS_READER_USER="${PM_E2E_SQL_READER_USER:-pm_reader}"
+JOBS_READER_PASS="${PM_E2E_SQL_READER_PASS:-Pm_Reader_2026!}"
 
 elog(){ printf '== [e2e] %s\n' "$*"; }
 ewarn(){ printf 'AVISO [e2e]: %s\n' "$*" >&2; }
@@ -119,6 +123,24 @@ IF NOT EXISTS (SELECT 1 FROM [FeatureManagement].[FeatureFlags] WHERE [Key]='car
   fi
 }
 
+# Asegura el login de solo-lectura pm_reader + GRANT SELECT sobre el schema Jobs en la BD del slot, para que el
+# legado lea el estado de jobs via ConStrJobsReader. Refleja containers/sql/init/planning/0301-jobs-reader-login.sql
+# (idempotente). El schema Jobs lo crea la migracion EF del backend al arrancar (wt-up); el GRANT a nivel de
+# schema cubre las vistas vwBacklogLoadStatus/vwJobStatus creadas luego.
+e2e_ensure_jobs_reader(){
+  local pw; pw="$(wt_shared_sql_password)" || { ewarn "sin SA del SQL compartido: no se asegura pm_reader"; return 1; }
+  local sql="SET NOCOUNT ON;
+IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name=N'$JOBS_READER_USER') CREATE LOGIN [$JOBS_READER_USER] WITH PASSWORD=N'$(wt_esc "$JOBS_READER_PASS")', CHECK_POLICY=OFF;
+USE [$PM_PLANNING_DB];
+IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name=N'$JOBS_READER_USER') CREATE USER [$JOBS_READER_USER] FOR LOGIN [$JOBS_READER_USER];
+IF SCHEMA_ID(N'Jobs') IS NOT NULL GRANT SELECT ON SCHEMA::[Jobs] TO [$JOBS_READER_USER];"
+  if wt_shared_exec "$pw" "$sql" >/dev/null 2>&1; then
+    elog "login lector $JOBS_READER_USER asegurado + GRANT SELECT en schema Jobs ($PM_PLANNING_DB)"
+  else
+    ewarn "no se pudo asegurar $JOBS_READER_USER/GRANT en $PM_PLANNING_DB (¿schema Jobs aun no creado por la migracion?)"
+  fi
+}
+
 e2e_set_flag(){  # uso: e2e_set_flag <0|1>
   local v="$1" pw; pw="$(wt_shared_sql_password)" || { ewarn "sin SA del SQL compartido: no se fijo el flag"; return 1; }
   local sql="SET NOCOUNT ON; USE [$PM_PLANNING_DB]; UPDATE FeatureManagement.FeatureFlags SET IsEnabled=$v, UpdatedAt=SYSUTCDATETIME() WHERE [Key]='carga-backend' AND Plant='$PLANTA';"
@@ -145,6 +167,36 @@ e2e_trigger(){
   local url="http://${PM_GUEST_WINHOST}:${SITEPORT}/$SVC_PATH" body
   body="$(printf '{"planta":"%s","lineaFab":"%s","anof":%s,"semf":%s}' "$PLANTA" "$LINEA" "${ANOF:-0}" "${SEMF:-0}")"
   ssh -o ConnectTimeout=12 "$PM_REMOTE_SSH" "curl -s -m 120 -w '\n%{http_code}' -H 'Content-Type: application/json' -X POST --data '$(wt_esc "$body")' '$url'" 2>/dev/null
+}
+
+# Consulta obtener_estado_job en el legado (DESDE macdata) y extrae Datos.CurrentStatus. Valida de paso la
+# lectura por ConStrJobsReader (login pm_reader -> Jobs.vwBacklogLoadStatus). Vacio si no hay respuesta.
+e2e_job_status(){  # uso: e2e_job_status <jobId>
+  local url="http://${PM_GUEST_WINHOST}:${SITEPORT}/$SVC_STATUS_PATH" body resp
+  body="$(printf '{"jobId":"%s"}' "$1")"
+  resp="$(ssh -o ConnectTimeout=12 "$PM_REMOTE_SSH" "curl -s -m 30 -H 'Content-Type: application/json' -X POST --data '$(wt_esc "$body")' '$url'" 2>/dev/null)"
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$resp" | python3 -c "import sys,json
+try:
+  d=json.load(sys.stdin); r=d.get('obtener_estado_jobResult',d) if isinstance(d,dict) else {}
+  dd=(r.get('Datos') if isinstance(r,dict) else None) or {}
+  sys.stdout.write(str(dd.get('CurrentStatus') or ''))
+except Exception:
+  pass" 2>/dev/null
+  else
+    printf '%s' "$resp" | sed -n 's/.*"CurrentStatus":"\([^"]*\)".*/\1/p' | head -1
+  fi
+}
+
+# Pollea obtener_estado_job hasta un estado terminal (Completed/Failed/TimedOut) o timeout. Imprime el estado final.
+e2e_poll_job(){  # uso: e2e_poll_job <jobId> <timeout_s>
+  local jobid="$1" deadline="${2:-90}" waited=0 st=""
+  while [ "$waited" -lt "$deadline" ]; do
+    st="$(e2e_job_status "$jobid")"
+    case "$st" in Completed|Failed|TimedOut) printf '%s' "$st"; return 0 ;; esac
+    sleep 3; waited=$((waited+3))
+  done
+  printf '%s' "${st:-<sin-respuesta>}"
 }
 
 # Extrae un campo de generar_programaResult del JSON de respuesta WCF (python3 si existe; fallback grep).
@@ -175,22 +227,39 @@ cmd_smoke(){
   e2e_slot
   e2e_ensure_flag_schema
   e2e_params_warn
-  local pass=0 fail=0 before after resp code estatus mtec
+  local pass=0 fail=0 before after resp code estatus mtec jobid jst
 
-  elog "smoke ON: flag carga-backend/$PLANTA = ON; disparo legacy -> debe alcanzar el backend"
+  elog "smoke ON: flag carga-backend/$PLANTA = ON; disparo legacy -> backend async (jobId) + poll de estado"
   e2e_set_flag 1
   before="$(e2e_orders_count)"
   resp="$(e2e_trigger)"; code="${resp##*$'\n'}"; resp="${resp%$'\n'*}"
   estatus="$(e2e_json_field "$resp" Estatus)"; mtec="$(e2e_json_field "$resp" MensajeTecnico)"
-  after="$(e2e_orders_count)"
-  elog "  HTTP=$code Estatus=$estatus orders(RT) ${before}->${after} MensajeTecnico=$([ -n "$mtec" ] && echo 'presente(backend)' || echo 'vacio')"
-  if [ "$code" = "200" ] && e2e_estatus_ok "$estatus" && [ -n "$mtec" ]; then
-    elog "  [PASS] ON: el legado alcanzo el backend (MensajeTecnico = body del backend)"
-    if [ "${after:-0}" -gt "${before:-0}" ] 2>/dev/null; then elog "  [info] ordenes RT creadas: $(( after - before ))"
-    else ewarn "  ON alcanzo el backend pero sin delta de ordenes (¿sin backlog para lineaFab/anof/semf? es dato, no wiring)"; fi
+  jobid="$(e2e_json_field "$resp" Datos)"
+  if [ "$code" = "200" ] && [ "$estatus" = "2" ] && [ -n "$jobid" ]; then
+    # Camino async (1907): Estatus INFORMACION(2) + jobId en Datos. Pollea obtener_estado_job hasta terminal:
+    # valida de paso la lectura de estado por ConStrJobsReader (login pm_reader -> Jobs.vwBacklogLoadStatus).
+    elog "  disparo async aceptado (Estatus=INFORMACION jobId=$jobid); polleando obtener_estado_job ..."
+    jst="$(e2e_poll_job "$jobid" 120)"
+    after="$(e2e_orders_count)"
+    elog "  estado final del job=$jst   orders(RT) ${before}->${after}"
+    if [ "$jst" = "Completed" ]; then
+      elog "  [PASS] ON (async): job Completed; lectura de estado por ConStrJobsReader OK"
+      if [ "${after:-0}" -gt "${before:-0}" ] 2>/dev/null; then elog "  [info] ordenes RT creadas: $(( after - before ))"
+      else ewarn "  Completed sin delta de ordenes (¿sin backlog/diseno para lineaFab/anof/semf? es dato, no wiring)"; fi
+      pass=$((pass+1))
+    else
+      ewarn "  [FAIL] ON (async): el job no llego a Completed (estado=$jst). Revisa la API, el worker del job y ConStrJobsReader."
+      fail=$((fail+1))
+    fi
+  elif [ "$code" = "200" ] && e2e_estatus_ok "$estatus" && [ -n "$mtec" ]; then
+    # Camino sincrono (1903 sin 1907): Estatus EXITO + body del backend. Compat hacia atras.
+    after="$(e2e_orders_count)"
+    elog "  HTTP=$code Estatus=$estatus (sync) orders(RT) ${before}->${after} MensajeTecnico=presente(backend)"
+    elog "  [PASS] ON (sync): el legado alcanzo el backend (MensajeTecnico = body del backend)"
+    [ "${after:-0}" -gt "${before:-0}" ] 2>/dev/null && elog "  [info] ordenes RT creadas: $(( after - before ))"
     pass=$((pass+1))
   else
-    ewarn "  [FAIL] ON: no se confirmo el camino backend. Revisa el puente SQL (flag-read), backendBaseUrl y la salud de la API."
+    ewarn "  [FAIL] ON: no se confirmo el camino backend (HTTP=$code Estatus=$estatus jobId='${jobid:-}'). Revisa puente SQL (flag-read), backendBaseUrl y salud de la API."
     fail=$((fail+1))
   fi
 
@@ -254,14 +323,17 @@ cmd_up(){
   PM_LEGACY_SQL_PM_DB="$PM_PLANNING_DB" \
   PM_LEGACY_SQL_PM_USER="sa" \
   PM_LEGACY_SQL_PM_PASS="$pw" \
+  PM_LEGACY_SQL_READER_USER="$JOBS_READER_USER" \
+  PM_LEGACY_SQL_READER_PASS="$JOBS_READER_PASS" \
   make -C "$BASE_DIR" legacy-launch SOLUTION="$LEGACY_SRC" TUNNEL="$TUNNEL" FORCE="$FORCE" \
     || edie "fallo legacy-launch"
 
   elog "[4/7] validando guest -> SQL del flag (fail-fast del puente) ..."
   e2e_check_guest_sql
 
-  elog "[5/7] activando feature flag carga-backend/$PLANTA = ON ..."
+  elog "[5/7] activando feature flag carga-backend/$PLANTA = ON + login lector de jobs (pm_reader) ..."
   e2e_ensure_flag_schema
+  e2e_ensure_jobs_reader
   e2e_set_flag 1
 
   elog "[6/7] precondicion de red (e2e-net-check) ..."

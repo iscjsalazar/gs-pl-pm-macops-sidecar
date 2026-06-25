@@ -19,7 +19,9 @@ param(
   [string]$SqlPmHostB64      = "",
   [string]$SqlPmDbB64        = "",
   [string]$SqlPmUserB64      = "",
-  [string]$SqlPmPassB64      = ""
+  [string]$SqlPmPassB64      = "",
+  [string]$SqlReaderUserB64  = "",
+  [string]$SqlReaderPassB64  = ""
 )
 $ErrorActionPreference = "Stop"
 Import-Module WebAdministration
@@ -34,6 +36,8 @@ $SqlPmHost      = FromB64 $SqlPmHostB64
 $SqlPmDb        = FromB64 $SqlPmDbB64
 $SqlPmUser      = FromB64 $SqlPmUserB64
 $SqlPmPass      = FromB64 $SqlPmPassB64
+$SqlReaderUser  = FromB64 $SqlReaderUserB64
+$SqlReaderPass  = FromB64 $SqlReaderPassB64
 
 # WCF Services > HTTP Activation: sin este feature IIS no registra el handler *.svc y TODAS las
 # llamadas WCF (WCFobtenerDatos.svc/*) dan 404 -> la capa de datos AJAX del legado no funciona.
@@ -68,10 +72,18 @@ if ($SqlPmHost -ne "") {
     $txt = $txt.Replace('__SQL_PM_HOST__', $SqlPmHost)
     $txt = $txt.Replace('__SQL_PM_USER__', $SqlPmUser)
     $txt = $txt.Replace('__SQL_PM_PASSWORD__', $SqlPmPass)
+    # ConStrJobsReader (login de solo-lectura pm_reader; lectura del estado de jobs por SQL directo). Si no se
+    # proveen credenciales de lector, cae al login de la app (mismo patron que ConStrPm) para no dejar el
+    # placeholder sin resolver. Host y catalogo los comparte con ConStrPm (mismos tokens / mismo Initial Catalog).
+    $rdUser = if ($SqlReaderUser -ne "") { $SqlReaderUser } else { $SqlPmUser }
+    $rdPass = if ($SqlReaderPass -ne "") { $SqlReaderPass } else { $SqlPmPass }
+    $txt = $txt.Replace('__SQL_PM_READER_USER__', $rdUser)
+    $txt = $txt.Replace('__SQL_PM_READER_PASSWORD__', $rdPass)
     if ($SqlPmDb -ne "") { $txt = $txt.Replace('Initial Catalog=pm_planning;', "Initial Catalog=$SqlPmDb;") }
     $enc = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($connCfg, $txt, $enc)
     "ConStrPm -> Server=$SqlPmHost; Catalog=$SqlPmDb; User=$SqlPmUser"
+    "ConStrJobsReader -> Server=$SqlPmHost; Catalog=$SqlPmDb; User=$rdUser"
   } else { Write-Warning "Config\connections.config no encontrado en $App (fuente legacy sin connectionStrings externalizado; ConStrPm sin inyectar)" }
 }
 
