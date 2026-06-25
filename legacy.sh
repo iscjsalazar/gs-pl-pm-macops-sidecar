@@ -28,6 +28,8 @@ SQL_PM_HOST="${PM_LEGACY_SQL_PM_HOST:-}"                     # ConStrPm: host,pu
 SQL_PM_DB="${PM_LEGACY_SQL_PM_DB:-}"                         # ConStrPm: catalogo (pm_planning o pm_planning_wt<N>)
 SQL_PM_USER="${PM_LEGACY_SQL_PM_USER:-}"                     # ConStrPm: usuario
 SQL_PM_PASS="${PM_LEGACY_SQL_PM_PASS:-}"                     # ConStrPm: password
+SQL_READER_USER="${PM_LEGACY_SQL_READER_USER:-}"            # ConStrJobsReader: usuario (pm_reader; vacio = login de app)
+SQL_READER_PASS="${PM_LEGACY_SQL_READER_PASS:-}"            # ConStrJobsReader: password
 HW_REMOTE="${PM_LEGACY_HW_REMOTE:-~/pm-host-windows}"        # checkout de host-windows EN macdata
 STAGE_REMOTE="${PM_LEGACY_STAGE_REMOTE:-~/pm-host-windows/artifacts/stage}"  # stage de fuente EN macdata
 # Fuente del legado en el M1. Prioridad: PM_LEGACY_SRC_LOCAL explicito > WT=<folder> (worktree de codigo
@@ -123,6 +125,8 @@ deploy(){
     PM_LEGACY_SQL_PM_DB='$(_esc "$SQL_PM_DB")' \
     PM_LEGACY_SQL_PM_USER='$(_esc "$SQL_PM_USER")' \
     PM_LEGACY_SQL_PM_PASS='$(_esc "$SQL_PM_PASS")' \
+    PM_LEGACY_SQL_READER_USER='$(_esc "$SQL_READER_USER")' \
+    PM_LEGACY_SQL_READER_PASS='$(_esc "$SQL_READER_PASS")' \
     bash $HW_REMOTE/scripts/deploy-app.sh" || die "fallo el deploy"
 }
 

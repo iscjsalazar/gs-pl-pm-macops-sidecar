@@ -27,7 +27,10 @@ EXTRA=""
 [ -n "${PM_LEGACY_SQL_PM_DB:-}"   ] && EXTRA="$EXTRA -SqlPmDbB64 $(_b64 "$PM_LEGACY_SQL_PM_DB")"
 [ -n "${PM_LEGACY_SQL_PM_USER:-}" ] && EXTRA="$EXTRA -SqlPmUserB64 $(_b64 "$PM_LEGACY_SQL_PM_USER")"
 [ -n "${PM_LEGACY_SQL_PM_PASS:-}" ] && EXTRA="$EXTRA -SqlPmPassB64 $(_b64 "$PM_LEGACY_SQL_PM_PASS")"
-[ -n "$EXTRA" ] && echo "[deploy-app] inyeccion E2E: backendBaseUrl=${PM_LEGACY_BACKEND_URL:-} ConStrPm=${PM_LEGACY_SQL_PM_HOST:-}/${PM_LEGACY_SQL_PM_DB:-} (password oculto)"
+# ConStrJobsReader (login de solo-lectura pm_reader). Vacio = deploy-iis.ps1 cae al login de la app.
+[ -n "${PM_LEGACY_SQL_READER_USER:-}" ] && EXTRA="$EXTRA -SqlReaderUserB64 $(_b64 "$PM_LEGACY_SQL_READER_USER")"
+[ -n "${PM_LEGACY_SQL_READER_PASS:-}" ] && EXTRA="$EXTRA -SqlReaderPassB64 $(_b64 "$PM_LEGACY_SQL_READER_PASS")"
+[ -n "$EXTRA" ] && echo "[deploy-app] inyeccion E2E: backendBaseUrl=${PM_LEGACY_BACKEND_URL:-} ConStrPm=${PM_LEGACY_SQL_PM_HOST:-}/${PM_LEGACY_SQL_PM_DB:-} ConStrJobsReader user=${PM_LEGACY_SQL_READER_USER:-<app>} (passwords ocultos)"
 
 echo "[deploy-app] copiando deploy-iis.ps1 al guest (site :$SITE_PORT, oracle $DBHOST)"
 scp -q -i "$KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$PS_LOCAL" Administrator@"$G":C:/deploy-iis.ps1
