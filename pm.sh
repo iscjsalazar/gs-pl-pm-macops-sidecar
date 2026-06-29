@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Orquestador del data tier PM (SQL Server + Oracle) + API real para macOS.
-# Verbos: run [--watch] | seed | api | api-down | e2e-backend | e2e-backend-down | test | test-clean | format | format-check | down | nuke | ps | logs | port
+# Verbos: run [--watch] | migrate | seed | api | api-down | e2e-backend | e2e-backend-down | test | test-clean | format | format-check | down | nuke | ps | logs | port
 # Target: PM_TARGET=local (colima/desktop) | intel (rsync + docker compose en la mac Intel via SSH)
 #
-#   ./pm.sh run                 # levanta + seedea el data tier (local)
-#   ./pm.sh seed                # re-seed (idempotente; spike de D3)
+#   ./pm.sh run                 # levanta el data tier + migra EF (crea BD/DDL) + seedea data-only (local)
+#   ./pm.sh migrate             # aplica solo las migraciones EF (crea BD y DDL) contra la BD de producto
+#   ./pm.sh seed                # re-seed data-only (loaders idempotentes; requiere la BD ya migrada)
 #   ./pm.sh api                 # levanta la API real en ESTA mac (M1); salta si /health/live ya responde
 #   ./pm.sh api-down            # detiene la API levantada por 'api'
 #   # Modo E2E (Opción C): API co-localizada con el data tier en macdata, alcanzable por el guest (VM legado).
@@ -37,13 +38,20 @@ cmd_run() {
   [ "$PM_TARGET" = "local" ] && guard_concurrency
   echo "[pm] up data tier (perfil=$PM_PROFILE) ..."
   with_up_lock compose up -d sqlserver $( [ "$PM_PROFILE" = full ] && echo oracle sbsqledge servicebus )
+  cmd_migrate_inner   # EF crea la BD y el DDL ANTES del seed data-only (EF = dueno unico del DDL)
   cmd_seed_inner
   show_ports
   if [ "$WATCH" = "1" ]; then echo "[pm] --watch: logs (Ctrl-C corta)"; compose logs -f; fi
 }
 
-cmd_seed_inner() {     # re-corre el seeder de SQL (0102 dropea+crea -> idempotente)
-  echo "[pm] seed SQL (sqlseeder one-shot) ..."
+cmd_migrate_inner() {  # aplica las migraciones EF de la solucion contra la BD de producto del data tier
+  pm_ef_migrate "$(pm_planning_connstr)"
+}
+
+cmd_migrate() { prepare; cmd_migrate_inner; }
+
+cmd_seed_inner() {     # re-corre el seeder data-only (loaders idempotentes; el DDL ya lo creo EF)
+  echo "[pm] seed SQL data-only (sqlseeder one-shot; requiere migraciones EF ya aplicadas) ..."
   compose up sqlseeder --abort-on-container-exit --no-log-prefix
   if [ "$PM_PROFILE" = "full" ]; then
     echo "[pm] NOTA: re-seed de Oracle (sin nuke) es el spike de D3 -> pendiente en F3;"
@@ -192,6 +200,7 @@ cmd_format_check() {
 
 case "$VERB" in
   run)      cmd_run ;;
+  migrate)  cmd_migrate ;;
   seed)     cmd_seed ;;
   api)      cmd_api ;;
   api-down) cmd_api_down ;;
@@ -206,5 +215,5 @@ case "$VERB" in
   ps)       cmd_ps ;;
   logs)     cmd_logs ;;
   port)     cmd_port ;;
-  *) echo "uso: $0 {run [--watch]|seed|api|api-down|e2e-backend|e2e-backend-down|test|test-clean|format|format-check|down|nuke|ps|logs|port}"; exit 2 ;;
+  *) echo "uso: $0 {run [--watch]|migrate|seed|api|api-down|e2e-backend|e2e-backend-down|test|test-clean|format|format-check|down|nuke|ps|logs|port}"; exit 2 ;;
 esac

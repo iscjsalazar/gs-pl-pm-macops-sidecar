@@ -123,6 +123,10 @@ load_env() {
   # Puerto host del bus compartido: solo para debug desde la M1; la API lo alcanza por la red interna
   # (servicebus:5672). Default alto para no chocar con un bus pm-local en 5672.
   PM_WT_BUS_HOST_PORT="${PM_WT_BUS_HOST_PORT:-15672}"
+  # Imagen del contenedor de herramientas SQL (sqlcmd tools18 + bcp): no existe imagen standalone de
+  # mssql-tools18 en MCR, asi que se reusa la del motor (la trae en /opt/mssql-tools18/bin), pero como
+  # contenedor de tools aparte (no como motor). Tambien sirve contra un motor remoto/gestionado.
+  PM_SQLTOOLS_IMAGE="${PM_SQLTOOLS_IMAGE:-mcr.microsoft.com/mssql/server:2022-latest}"
   compute_ports
 }
 
@@ -157,13 +161,67 @@ compute_ports() {
     PM_ORACLE_HOST_PORT=$(( 1521 + PM_PORT_OFFSET ))
     PM_SB_HOST_PORT=$(( 5672 + PM_PORT_OFFSET ))
   fi
-  export PM_SQL_HOST_PORT PM_ORACLE_HOST_PORT PM_SB_HOST_PORT PM_SQL_SA_PASSWORD PM_ORACLE_PASSWORD PM_SB_SA_PASSWORD
+  export PM_SQL_HOST_PORT PM_ORACLE_HOST_PORT PM_SB_HOST_PORT PM_SQL_SA_PASSWORD PM_ORACLE_PASSWORD PM_SB_SA_PASSWORD PM_SQLTOOLS_IMAGE
 }
 
 # Connection string al Service Bus emulador (UseDevelopmentEmulator); la consume api/test por entorno.
 pm_servicebus_connstr() {
   printf 'Endpoint=sb://%s:%s;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;' \
     "$PM_SERVICEBUS_HOST" "$PM_SB_HOST_PORT"
+}
+
+# Espera a que el SQL del data tier acepte conexiones TCP (host/puerto de pm_planning_connstr) antes de
+# aplicar las migraciones EF. Sin sqlcmd local: prueba el socket con /dev/tcp del bash.
+pm_wait_sql() {
+  local host="$PM_TEST_SQL_HOST" port="$PM_SQL_HOST_PORT" i
+  echo "[pm] esperando a SQL en $host:$port ..." >&2
+  for i in $(seq 1 60); do
+    if (exec 3<>"/dev/tcp/$host/$port") 2>/dev/null; then
+      exec 3>&- 3<&- 2>/dev/null || true
+      echo "[pm] SQL acepta conexiones (~$((i * 2))s)" >&2
+      return 0
+    fi
+    sleep 2
+  done
+  echo "[pm] timeout esperando SQL en $host:$port" >&2
+  return 1
+}
+
+# Aplica las migraciones EF de la solucion ANTES del seed data-only: crean la BD de producto y el DDL de
+# todos los schemas (EF es el dueno unico del DDL). Build una vez y luego --no-build por contexto; la
+# connstring se pasa por --connection (sobreescribe la del factory de diseno) -> apunta a la BD destino
+# (local o por host remoto). Requiere dotnet + el tool dotnet-ef (manifest .config/dotnet-tools.json de la
+# solucion). Mismo comando que usa la pista de despliegue contra Azure SQL.
+pm_ef_migrate() {  # uso: pm_ef_migrate <connstr>
+  local cs="$1"
+  command -v dotnet >/dev/null 2>&1 || { echo "[pm] falta 'dotnet' en PATH (migraciones EF)" >&2; return 2; }
+  local sln="$PM_SOLUTION_DIR" api="src/PL.PM.Bootstrapper.Api" spec ctx proj attempt
+  pm_wait_sql || return 1
+  echo "[pm] EF migrate: aplicando migraciones (crea BD y DDL) antes del seed data-only ..." >&2
+  ( cd "$sln" && dotnet tool restore >/dev/null && dotnet build "$sln/PL.PM.sln" -c Debug --nologo -v q ) || {
+    echo "[pm] EF migrate: fallo el restore/build de la solucion" >&2; return 1; }
+  # El primer contexto crea la BD y prueba el login: reintenta para absorber la ventana entre "puerto
+  # abierto" (pm_wait_sql) y "login listo" del motor recien arrancado.
+  echo "[pm]   ef database update: PlanningDbContext (crea BD; espera login)" >&2
+  for attempt in 1 2 3 4 5 6; do
+    if ( cd "$sln" && dotnet ef database update --no-build \
+          --project "$sln/src/Modules/Planning/03.Infrastructure" --startup-project "$sln/$api" \
+          --context PlanningDbContext --connection "$cs" ); then
+      break
+    fi
+    [ "$attempt" = 6 ] && { echo "[pm] EF migrate: el motor no acepto la conexion/login tras varios intentos" >&2; return 1; }
+    echo "[pm]   SQL aun no acepta login (intento $attempt); reintenta en 5s ..." >&2
+    sleep 5
+  done
+  # Resto de contextos: la BD ya existe y el login funciona; un fallo aqui es genuino (falla rapido).
+  for spec in Demand Catalogs LoadSummary Jobs FeatureManagement; do
+    ctx="${spec}DbContext"; proj="src/Modules/${spec}/03.Infrastructure"
+    echo "[pm]   ef database update: $ctx" >&2
+    ( cd "$sln" && dotnet ef database update --no-build \
+        --project "$sln/$proj" --startup-project "$sln/$api" \
+        --context "$ctx" --connection "$cs" ) || {
+      echo "[pm] EF migrate: fallo 'dotnet ef database update' en $ctx" >&2; return 1; }
+  done
 }
 
 # NOTA (frontera wrapper/solucion): el orquestador NO escribe dentro de la solucion.
@@ -208,7 +266,7 @@ compose() {  # uso: compose <subcomando de docker compose...>
     local ctx=""; [ -n "$PM_REMOTE_DOCKER_CONTEXT" ] && ctx="--context $PM_REMOTE_DOCKER_CONTEXT"
     # vars por entorno (no .env en la solucion); PATH minimo en SSH no interactivo -> forzar /usr/local/bin.
     # shellcheck disable=SC2029
-    ssh "$PM_REMOTE_SSH" "export PATH=/usr/local/bin:\$PATH PM_SQL_SA_PASSWORD='$PM_SQL_SA_PASSWORD' PM_SQL_HOST_PORT='$PM_SQL_HOST_PORT' PM_ORACLE_HOST_PORT='$PM_ORACLE_HOST_PORT' PM_SB_SA_PASSWORD='$PM_SB_SA_PASSWORD' PM_SB_HOST_PORT='$PM_SB_HOST_PORT'; cd '$PM_REMOTE_DIR/compose' && docker $ctx compose -p '$PM_PROJECT' -f '$COMPOSE_FILE' ${PROFILE_FLAG:-} $*"
+    ssh "$PM_REMOTE_SSH" "export PATH=/usr/local/bin:\$PATH PM_SQL_SA_PASSWORD='$PM_SQL_SA_PASSWORD' PM_SQL_HOST_PORT='$PM_SQL_HOST_PORT' PM_ORACLE_HOST_PORT='$PM_ORACLE_HOST_PORT' PM_SB_SA_PASSWORD='$PM_SB_SA_PASSWORD' PM_SB_HOST_PORT='$PM_SB_HOST_PORT' PM_SQLTOOLS_IMAGE='$PM_SQLTOOLS_IMAGE'; cd '$PM_REMOTE_DIR/compose' && docker $ctx compose -p '$PM_PROJECT' -f '$COMPOSE_FILE' ${PROFILE_FLAG:-} $*"
   else
     ( cd "$COMPOSE_DIR" && docker --context "$PM_DOCKER_CONTEXT" compose -p "$PM_PROJECT" -f "$COMPOSE_FILE" ${PROFILE_FLAG:-} "$@" )
   fi
