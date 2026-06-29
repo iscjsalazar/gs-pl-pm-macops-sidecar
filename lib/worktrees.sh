@@ -126,50 +126,52 @@ wt_shared_sql_check() {
   wt_log "SQL compartido OK: red '$PM_SHARED_SQL_NETWORK', contenedor '$PM_SHARED_SQL_CONTAINER' (alias $PM_SHARED_SQL_HOST:$PM_SHARED_SQL_PORT)"
 }
 
-# Ejecuta una consulta T-SQL DENTRO del contenedor del SQL compartido (server-local, tools18). El SQL viaja
-# por STDIN (-i /dev/stdin) -> sin quoting de metacaracteres; la password por env ($SAPW) la expande el bash
-# del contenedor (correrla directa la expandiria la shell remota, donde $SAPW no existe -> login falla).
+# Ejecuta una consulta T-SQL desde un contenedor de herramientas DEDICADO (tools18), separado del motor: se
+# une a la red del SQL compartido y conecta por alias de red (no 'docker exec' dentro del motor; mismo patron
+# que sirve contra un motor remoto/gestionado). El SQL viaja por STDIN (-i /dev/stdin) -> sin quoting de
+# metacaracteres; la password por env ($SAPW) la expande el bash del contenedor. --entrypoint /bin/bash evita
+# el entrypoint del image (que arrancaria el motor).
 # uso: wt_shared_query <password> <sql> [flags-extra-de-sqlcmd]
 wt_shared_query() {
   local pw="$1" sql="$2" flags="${3:-}"
   local ctx; ctx="$(remote_docker_ctx)"
-  printf '%s' "$sql" | on_intel "docker $ctx exec -i -e SAPW='$(wt_esc "$pw")' '$PM_SHARED_SQL_CONTAINER' /bin/bash -c '/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"\$SAPW\" -C $flags -i /dev/stdin'"
+  printf '%s' "$sql" | on_intel "docker $ctx run --rm -i --network '$PM_SHARED_SQL_NETWORK' -e SAPW='$(wt_esc "$pw")' --entrypoint /bin/bash '$PM_SQLTOOLS_IMAGE' -c '/opt/mssql-tools18/bin/sqlcmd -S \"$PM_SHARED_SQL_HOST,$PM_SHARED_SQL_PORT\" -U sa -P \"\$SAPW\" -C $flags -i /dev/stdin'"
 }
 # Escalar (sin encabezado): retorna el valor trimmeado.
 wt_shared_scalar() { wt_shared_query "$1" "$2" "-h -1 -W" 2>/dev/null | tr -d ' \r\n'; }
 # DDL/idempotente: corta en error (-b).
 wt_shared_exec()   { wt_shared_query "$1" "$2" "-b"; }
 
-# Copia los assets de seed AL contenedor del SQL compartido: scripts (sql/init -> /pmseed) y CSV del grupo ln
-# (sql/data -> /pmdata, oracle/data -> /seed-ctrlpiso). El seed corre por 'docker exec' contra ese mismo
-# contenedor (localhost) con tools18, y el BULK INSERT (server-side) lee los CSV de su filesystem. Idempotente.
-# Los CSV del grupo ln van a /pmdata (overlay del contenedor), NO a /data: ese path es bind-mount al arbol
-# fuente del SQL de nvoslabs, y escribir ahi sobreescribiria sus CSV homonimos (p. ej. ttxpcf925116.csv).
+# Copia los CSV de seed AL motor del SQL compartido (sql/data -> /pmdata, oracle/data -> /seed-ctrlpiso): el
+# BULK INSERT corre server-side EN EL MOTOR, que lee los CSV de su filesystem. Los scripts (.sql) NO se copian
+# aqui: el contenedor de tools dedicado los monta por -v desde el arbol rsync'eado (wt_seed_group). Idempotente.
+# Los CSV van a /pmdata (overlay del contenedor), NO a /data: ese path es bind-mount al arbol fuente del SQL de
+# nvoslabs, y escribir ahi sobreescribiria sus CSV homonimos (p. ej. ttxpcf925116.csv).
 wt_push_seed_assets() {  # uso: wt_push_seed_assets   (requiere WT_REMOTE_CONTAINERS_ABS)
   local ctx; ctx="$(remote_docker_ctx)"
-  wt_log "copiando scripts + CSV de seed al contenedor del SQL compartido (/pmseed, /pmdata, /seed-ctrlpiso) ..."
+  wt_log "copiando CSV de seed al motor del SQL compartido (/pmdata, /seed-ctrlpiso; BULK INSERT server-side) ..."
   # mkdir como root (-u 0): el contenedor corre como 'mssql', que no puede crear dirs en /. docker cp ya
   # escribe como root; los archivos quedan world-readable -> el proceso de SQL (BULK INSERT server-side) los lee.
-  on_intel "docker $ctx exec -u 0 '$PM_SHARED_SQL_CONTAINER' mkdir -p /pmseed /pmdata /seed-ctrlpiso \
-    && docker $ctx cp '$WT_REMOTE_CONTAINERS_ABS/sql/init/.' '$PM_SHARED_SQL_CONTAINER:/pmseed' \
+  on_intel "docker $ctx exec -u 0 '$PM_SHARED_SQL_CONTAINER' mkdir -p /pmdata /seed-ctrlpiso \
     && docker $ctx cp '$WT_REMOTE_CONTAINERS_ABS/sql/data/.' '$PM_SHARED_SQL_CONTAINER:/pmdata' \
     && docker $ctx cp '$WT_REMOTE_CONTAINERS_ABS/oracle/data/.' '$PM_SHARED_SQL_CONTAINER:/seed-ctrlpiso'" \
-    || { wt_die "fallo al copiar los assets de seed al SQL compartido"; return 1; }
+    || { wt_die "fallo al copiar los CSV de seed al motor del SQL compartido"; return 1; }
 }
 
-# Aplica en orden los *.sql de un grupo (/pmseed/<group>) DENTRO del contenedor del SQL compartido con tools18
-# (el sqlcmd viejo de mssql-tools no acepta -v; tools18 si). El loop viaja por STDIN (bash -s) para evitar el
-# quoting anidado; los nombres de BD se pasan como sqlcmd vars (identificadores seguros, embebidos). El grupo
-# ln lee sus CSV de /pmdata (LN_CSV_DIR); el grupo planning ignora esa var (lee /seed-ctrlpiso embebido).
+# Aplica en orden los *.sql de un grupo (/pmseed/<group>) desde un contenedor de herramientas DEDICADO
+# (tools18, --entrypoint bash), separado del motor: los scripts se montan por -v desde el arbol rsync'eado en
+# macdata; sqlcmd conecta al motor por alias de red. El BULK INSERT corre server-side EN EL MOTOR, que lee los
+# CSV de su filesystem (copiados por wt_push_seed_assets: ln -> /pmdata, planning -> /seed-ctrlpiso). El loop
+# viaja por STDIN (bash -s) para evitar el quoting anidado; los nombres de BD van como sqlcmd vars.
 wt_seed_group() {  # uso: wt_seed_group <password> <ln|planning> <planning_db> <ln_db>
   local pw="$1" group="$2" pdb="$3" ldb="$4" ctx; ctx="$(remote_docker_ctx)"
   printf '%s\n' \
     'set -e' \
     "for f in \$(ls /pmseed/$group/*.sql | sort); do" \
     '  echo "[seed] aplica $(basename "$f")"' \
-    "  /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"\$SAPW\" -C -b -v PLANNING_DB=$pdb LN_DB=$ldb LN_CSV_DIR=/pmdata -i \"\$f\"" \
+    "  /opt/mssql-tools18/bin/sqlcmd -S \"$PM_SHARED_SQL_HOST,$PM_SHARED_SQL_PORT\" -U sa -P \"\$SAPW\" -C -b -v PLANNING_DB=$pdb LN_DB=$ldb LN_CSV_DIR=/pmdata -i \"\$f\"" \
     'done' \
-  | on_intel "docker $ctx exec -i -e SAPW='$(wt_esc "$pw")' '$PM_SHARED_SQL_CONTAINER' /bin/bash -s"
+  | on_intel "docker $ctx run --rm -i --network '$PM_SHARED_SQL_NETWORK' -v '$WT_REMOTE_CONTAINERS_ABS/sql/init:/pmseed:ro' -e SAPW='$(wt_esc "$pw")' --entrypoint /bin/bash '$PM_SQLTOOLS_IMAGE' -s"
 }
 
 # Asegura la referencia LN propia de PM (pm_erpln106) en el SQL compartido. Guarded seed-once: solo siembra
@@ -200,11 +202,11 @@ wt_ensure_ln_singleton() {  # uso: wt_ensure_ln_singleton <password>
   wt_log "referencia LN '$PM_WT_LN_DB' sembrada"
 }
 
-# Siembra la BD de producto del worktree (pm_planning_wt<N>) en el SQL compartido reusando el seeder de la
-# solucion (init.sh) con PM_SEED_LN=0 (omite el grupo ln; reusa pm_erpln106).
+# Siembra los datos de referencia de la BD de producto del worktree (pm_planning_wt<N>): grupo planning
+# data-only (el DDL ya lo creo la migracion EF al arrancar la API). Reusa la referencia LN pm_erpln106.
 wt_seed_planning() {  # uso: wt_seed_planning <password>
   local pw="$1"
-  wt_log "sembrando BD de producto '$PM_PLANNING_DB' en el SQL compartido (solo grupo planning; reusa $PM_WT_LN_DB) ..."
+  wt_log "seed data-only de '$PM_PLANNING_DB' en el SQL compartido (grupo planning; reusa $PM_WT_LN_DB) ..."
   wt_seed_group "$pw" planning "$PM_PLANNING_DB" "$PM_WT_LN_DB" \
     || { wt_die "fallo el seed de '$PM_PLANNING_DB'"; return 1; }
 }
@@ -316,9 +318,11 @@ cmd_wt_up() {
   # del singleton; los demas esperan y lo ven arriba). No usa el lock del registro para no serializar el seed/build.
   wt_lock bus wt_ensure_bus || return 1
 
-  # 3) per-worktree: seed de la BD de producto + API
-  wt_seed_planning "$pw" || return 1
+  # 3) per-worktree: API ANTES del seed. La API aplica las migraciones EF al arrancar (entorno
+  # IntegrationTest => !Production): crea la BD por-slot y el DDL de todos los schemas. Recien entonces
+  # corre el seed data-only de la BD de producto (los loaders requieren las tablas ya creadas por EF).
   wt_up_api "$pw" || return 1
+  wt_seed_planning "$pw" || return 1
 
   echo ""
   echo "[wt] worktree '$folder' (slot $slot) ARRIBA:"

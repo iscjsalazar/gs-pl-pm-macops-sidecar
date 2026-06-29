@@ -2,9 +2,10 @@
 # Capa fina; la logica vive en bash (pm.sh + lib/common.sh para pm-*, legacy.sh para legacy-*).
 #
 # Data tier + API + tests (pm-*):
-#   make pm-run                   # local: levanta + seedea SQL
+#   make pm-run                   # local: levanta el data tier + migra EF (crea BD/DDL) + seed data-only
 #   make pm-run PROFILE=full      # local: + Oracle + Service Bus emulador
-#   make pm-seed                  # re-seed idempotente (SQL)
+#   make pm-migrate               # aplica solo las migraciones EF (crea BD y DDL; EF = dueno del DDL)
+#   make pm-seed                  # re-seed data-only idempotente (requiere la BD ya migrada)
 #   make pm-api / pm-api-down     # levanta / detiene la API real en ESTA mac (M1)
 #   make pm-test                  # inner-loop: reusa la API si responde + dotnet test (default PROFILE=sql)
 #   make pm-test-clean            # GATE limpio: pm-run (up+seed) + API fresca + TODA la suite (fija PROFILE=full)
@@ -148,7 +149,7 @@ WT_ENV = $(PM_ENV) WT=$(WT) PM_WT_SLOTS=$(SLOTS) PM_WT_SOLUTION_DIR='$(SOLUTION)
          PM_SHARED_SQL_NETWORK=$(SHAREDSQL_NET) PM_SHARED_SQL_HOST=$(SHAREDSQL_HOST) \
          PM_SHARED_SQL_PORT=$(SHAREDSQL_PORT) PM_SHARED_SQL_PASSWORD='$(SHAREDSQL_PASSWORD)'
 
-.PHONY: pm-run pm-watch pm-seed pm-api pm-api-down pm-test pm-test-clean pm-format pm-format-check pm-down pm-nuke pm-ps pm-logs pm-port pm-bootstrap-intel \
+.PHONY: pm-run pm-watch pm-migrate pm-seed pm-api pm-api-down pm-test pm-test-clean pm-format pm-format-check pm-down pm-nuke pm-ps pm-logs pm-port pm-bootstrap-intel \
         wt-up wt-down wt-ls wt-status wt-seed-ln \
         e2e-backend e2e-backend-down e2e-net-check e2e-up e2e-smoke e2e-down \
         legacy-launch legacy-data-up legacy-vm-up legacy-build legacy-deploy legacy-diag legacy-diag-logs \
@@ -157,7 +158,8 @@ WT_ENV = $(PM_ENV) WT=$(WT) PM_WT_SLOTS=$(SLOTS) PM_WT_SOLUTION_DIR='$(SOLUTION)
 # --- data tier + API ---
 pm-run:      ; $(PM_ENV) ./pm.sh run
 pm-watch:    ; $(PM_ENV) ./pm.sh run --watch
-pm-seed:     ; $(PM_ENV) ./pm.sh seed
+pm-migrate:  ; $(PM_ENV) ./pm.sh migrate              # aplica solo las migraciones EF (crea BD y DDL)
+pm-seed:     ; $(PM_ENV) ./pm.sh seed                 # re-seed data-only (requiere la BD ya migrada)
 pm-api:      ; $(PM_ENV) ./pm.sh api
 pm-api-down: ; $(PM_ENV) ./pm.sh api-down
 pm-test:     ; $(PM_ENV) ./pm.sh test
