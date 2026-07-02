@@ -143,6 +143,14 @@ pm_ln_connstr() {
     "$PM_TEST_SQL_HOST" "$PM_SQL_HOST_PORT" "${PM_LN_DB:-erpln106}" "$PM_SQL_SA_PASSWORD"
 }
 
+# Connection string al Oracle del data tier (pge_ctrlpiso, perfil full); la consumen la fuente viva de
+# paridad (ConnectionStrings__CtrlPiso) y su prueba de integracion. Mismo formato que usa el legado.
+# Args opcionales: host y puerto (para contenedores en la red del data tier: 'oracle' 1521).
+pm_ctrlpiso_connstr() {
+  printf 'data source=(description=(address=(protocol=tcp)(host=%s)(port=%s))(connect_data=(sid=XE)));user id=pge_ctrlpiso;password=ctrlpiso;' \
+    "${1:-$PM_TEST_SQL_HOST}" "${2:-$PM_ORACLE_HOST_PORT}"
+}
+
 # URL base de la API real (la M1). Único punto de verdad del puerto de API.
 pm_api_base_url() { printf 'http://%s:%s' "$PM_API_HOST" "$PM_API_PORT"; }
 

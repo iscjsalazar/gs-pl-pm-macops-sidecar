@@ -76,10 +76,14 @@ cmd_api() {            # levanta la API real en ESTA mac (M1) apuntando al SQL d
   local logf="${TMPDIR:-/tmp}/pm-api-${PM_PROJECT}.log"
   # Con perfil full el bus emulador esta arriba: la API recibe su connection string por entorno (R10).
   local sbcs=""; [ "$PM_PROFILE" = "full" ] && sbcs="$(pm_servicebus_connstr)"
+  # Paridad: la suite de integracion usa fixtures CSV (Parity__LegacySource=csv). Para una corrida
+  # viva contra Oracle se relanza con PM_PARITY_LEGACY_SOURCE=oracle (requiere el perfil full).
+  local ctrlcs=""; [ "$PM_PROFILE" = "full" ] && ctrlcs="$(pm_ctrlpiso_connstr)"
   echo "[pm] api: levantando en $base (entorno IntegrationTest, sql $PM_TEST_SQL_HOST:$PM_SQL_HOST_PORT/$PM_PLANNING_DB, bus ${sbcs:+$PM_SERVICEBUS_HOST:$PM_SB_HOST_PORT}) ..."
-  # La solucion solo LEE ASPNETCORE_URLS / ConnectionStrings__* / ServiceBus__ConnectionString por entorno (frontera intacta).
+  # La solucion solo LEE ASPNETCORE_URLS / ConnectionStrings__* / ServiceBus__ConnectionString / Parity__* por entorno (frontera intacta).
   ASPNETCORE_ENVIRONMENT=IntegrationTest ASPNETCORE_URLS="$base" ConnectionStrings__Planning="$cs" \
     ConnectionStrings__Ln="$(pm_ln_connstr)" ServiceBus__ConnectionString="$sbcs" \
+    Parity__LegacySource="${PM_PARITY_LEGACY_SOURCE:-csv}" ConnectionStrings__CtrlPiso="$ctrlcs" \
     nohup dotnet run --project "$proj" -c Debug > "$logf" 2>&1 &
   echo $! > "$pidf"
   local i; for i in $(seq 1 90); do
@@ -124,12 +128,21 @@ cmd_api_e2e() {        # Opción C (E2E): construye la imagen de la API y la cor
   cs="$(pm_planning_connstr)"; cs=${cs//\'/\'\\\'\'}
   ln="$(pm_ln_connstr)";       ln=${ln//\'/\'\\\'\'}
   if [ "$PM_PROFILE" = "full" ]; then sbcs="$(pm_servicebus_connstr)"; sbcs=${sbcs//\'/\'\\\'\'}; fi
+  # Paridad en e2e: con perfil full la fuente viva apunta al 'oracle' del propio data tier (puerto
+  # interno); sin oracle en la red se cae a snapshots CSV. PM_PARITY_LEGACY_SOURCE lo sobreescribe.
+  local ctrlcs="" psrc
+  if [ "$PM_PROFILE" = "full" ]; then
+    psrc="${PM_PARITY_LEGACY_SOURCE:-oracle}"
+    ctrlcs="$(pm_ctrlpiso_connstr oracle 1521)"; ctrlcs=${ctrlcs//\'/\'\\\'\'}
+  else
+    psrc="${PM_PARITY_LEGACY_SOURCE:-csv}"
+  fi
   local dockerfile="$BASE_DIR/e2e/Dockerfile"
   echo "[pm] e2e-backend: build imagen $img (contexto $PM_REMOTE_SSH:$PM_REMOTE_SOLUTION_DIR; primera vez ~varios min) ..."
   on_intel "cd '$PM_REMOTE_SOLUTION_DIR' && docker $ctx build -t '$img' -f- ." < "$dockerfile" || { echo "[pm] e2e-backend: falló el build de la imagen" >&2; return 1; }
   echo "[pm] e2e-backend: run contenedor $cname (red $net; sql sqlserver:1433/$PM_PLANNING_DB${sbcs:+; bus servicebus:5672}; publica $PM_API_PORT->8080) ..."
   # La solución solo LEE ASPNETCORE_* / ConnectionStrings__* / ServiceBus__ConnectionString por entorno (frontera intacta).
-  on_intel "docker $ctx rm -f '$cname' >/dev/null 2>&1; docker $ctx run -d --name '$cname' --network '$net' -p $PM_API_PORT:8080 -e ASPNETCORE_ENVIRONMENT=IntegrationTest -e ConnectionStrings__Planning='$cs' -e ConnectionStrings__Ln='$ln' -e ServiceBus__ConnectionString='$sbcs' '$img'" || { echo "[pm] e2e-backend: falló el run del contenedor" >&2; return 1; }
+  on_intel "docker $ctx rm -f '$cname' >/dev/null 2>&1; docker $ctx run -d --name '$cname' --network '$net' -p $PM_API_PORT:8080 -e ASPNETCORE_ENVIRONMENT=IntegrationTest -e ConnectionStrings__Planning='$cs' -e ConnectionStrings__Ln='$ln' -e ServiceBus__ConnectionString='$sbcs' -e Parity__LegacySource='$psrc' -e ConnectionStrings__CtrlPiso='$ctrlcs' '$img'" || { echo "[pm] e2e-backend: falló el run del contenedor" >&2; return 1; }
   # Un solo ssh por iteracion: 0=API responde, 2=contenedor muerto (corte temprano), 1=aun arrancando.
   local i rc; for i in $(seq 1 150); do
     rc=0; on_intel "curl -fsS -o /dev/null '$hl' 2>/dev/null && exit 0; [ \"\$(docker $ctx inspect -f '{{.State.Running}}' '$cname' 2>/dev/null)\" = true ] && exit 1; exit 2" || rc=$?
@@ -167,8 +180,12 @@ cmd_test() {           # asegura la API real arriba (M1) y corre dotnet test con
   local args=(test "$PM_SOLUTION_DIR/$target")
   [ -n "${PM_TEST_FILTER:-}" ] && args+=(--filter "$PM_TEST_FILTER")
   local sbcs=""; [ "$PM_PROFILE" = "full" ] && sbcs="$(pm_servicebus_connstr)"
+  # Con perfil full viaja tambien la connstring Oracle del data tier: habilita la prueba de
+  # integracion de la fuente viva de paridad (sin ella esa prueba se salta).
+  local ctrlcs=""; [ "$PM_PROFILE" = "full" ] && ctrlcs="$(pm_ctrlpiso_connstr)"
   PM_API_BASE_URL="$base" PM_TEST_SQL="$cs" ConnectionStrings__Planning="$cs" \
-    ConnectionStrings__Ln="$(pm_ln_connstr)" ServiceBus__ConnectionString="$sbcs" dotnet "${args[@]}" "$@"
+    ConnectionStrings__Ln="$(pm_ln_connstr)" ServiceBus__ConnectionString="$sbcs" \
+    ConnectionStrings__CtrlPiso="$ctrlcs" dotnet "${args[@]}" "$@"
 }
 
 cmd_test_clean() {     # gate "limpio": data tier up+seed -> API fresca -> suite. PM_PROFILE=full y PM_API_FORCE=1 los fija el target pm-test-clean.

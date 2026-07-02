@@ -249,7 +249,8 @@ wt_up_api() {  # uso: wt_up_api <password>
     docker $ctx create --name '$cname' --network '$PM_SHARED_SQL_NETWORK' -p '$PM_API_PORT:8080' \
       -e ASPNETCORE_ENVIRONMENT=IntegrationTest \
       -e ConnectionStrings__Planning='$cs' -e ConnectionStrings__Ln='$ln' \
-      -e ServiceBus__ConnectionString='$sbcs' -e ServiceBus__SubscriptionPrefix='$WT_SB_PREFIX' '$img' >/dev/null \
+      -e ServiceBus__ConnectionString='$sbcs' -e ServiceBus__SubscriptionPrefix='$WT_SB_PREFIX' \
+      -e Parity__LegacySource=csv '$img' >/dev/null \
     && docker $ctx network connect '${PM_WT_BUS_PROJECT}_default' '$cname' \
     && docker $ctx start '$cname' >/dev/null" \
     || { wt_die "fallo el create/run del contenedor de la API"; return 1; }
