@@ -250,7 +250,7 @@ wt_up_api() {  # uso: wt_up_api <password>
       -e ASPNETCORE_ENVIRONMENT=IntegrationTest \
       -e ConnectionStrings__Planning='$cs' -e ConnectionStrings__Ln='$ln' \
       -e ServiceBus__ConnectionString='$sbcs' -e ServiceBus__SubscriptionPrefix='$WT_SB_PREFIX' \
-      -e Parity__LegacySource=csv '$img' >/dev/null \
+      -e Parity__LegacySource=csv $(pm_parity_env_flags) '$img' >/dev/null \
     && docker $ctx network connect '${PM_WT_BUS_PROJECT}_default' '$cname' \
     && docker $ctx start '$cname' >/dev/null" \
     || { wt_die "fallo el create/run del contenedor de la API"; return 1; }

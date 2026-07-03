@@ -2,7 +2,8 @@
 # Orquestador E2E local del camino Programa Maestro (solicitud e2e-launch-orchestration).
 # Compone los targets de tier ya existentes (wt-up, legacy-launch, e2e-net-check) y agrega el last-mile:
 # inyeccion del wiring de aplicacion al backend .NET 10 en el deploy del legado, activacion del feature flag
-# y un smoke funcional legacy-driven (sin navegador: el WCF generar_programa es REST sin auth).
+# y un smoke funcional legacy-driven de la validacion de paridad (los WCF ejecutar/obtener_estado/obtener_reporte
+# _paridad son REST sin auth). El intake flag-gated (OrdenesNuevasCargar_LN, load-async) es UI-driven -> navegador.
 #
 # Ruta: wt (backend por slot sobre el SQL compartido de nvoslabs). Ese SQL solo escucha en el loopback de
 # macdata, asi que e2e-up levanta un PUENTE (socat) para que el guest Windows lo alcance por la pasarela NAT.
@@ -40,8 +41,15 @@ BRIDGE_NAME="pm-e2e-sqlbridge"
 BRIDGE_IMAGE="${PM_E2E_BRIDGE_IMAGE:-alpine/socat}"
 
 VDIR="ProgramaMaestroLN"
-SVC_PATH="$VDIR/Services/WCFobtenerDatos.svc/generar_programa"
-SVC_STATUS_PATH="$VDIR/Services/WCFobtenerDatos.svc/obtener_estado_job"
+# Componentes WCF de la pantalla ValidacionParidad (260701-2323): disparo async + poll de estado + reporte.
+SVC_PARITY_RUN="$VDIR/Services/WCFobtenerDatos.svc/ejecutar_validacion_paridad"
+SVC_PARITY_STATUS="$VDIR/Services/WCFobtenerDatos.svc/obtener_estado_paridad"
+SVC_PARITY_REPORT="$VDIR/Services/WCFobtenerDatos.svc/obtener_reporte_paridad"
+# Slice del disparo de paridad (acotado): mismos parámetros que la pantalla; overridable por entorno.
+PARITY_LINEA="${PM_E2E_PARITY_LINEA:-PE9}"
+PARITY_ANOF="${PM_E2E_PARITY_ANOF:-2026}"
+PARITY_SEMF="${PM_E2E_PARITY_SEMF:-23}"
+PARITY_MODO="${PM_E2E_PARITY_MODO:-acotado}"
 # Credenciales del login de solo-lectura pm_reader para ConStrJobsReader (seed planning/0301-jobs-reader-login.sql).
 JOBS_READER_USER="${PM_E2E_SQL_READER_USER:-pm_reader}"
 JOBS_READER_PASS="${PM_E2E_SQL_READER_PASS:-Pm_Reader_2026!}"
@@ -161,132 +169,125 @@ e2e_orders_count(){
 
 # --- smoke funcional ---
 
-# Dispara generar_programa en el legado DESDE macdata hacia el guest (172.16.128.129:SITEPORT), sin tunel M1:
-# todo el runtime vive en macdata. Espejo de guest_health. Imprime "<body>\n<http_code>".
-e2e_trigger(){
-  local url="http://${PM_GUEST_WINHOST}:${SITEPORT}/$SVC_PATH" body
-  body="$(printf '{"planta":"%s","lineaFab":"%s","anof":%s,"semf":%s}' "$PLANTA" "$LINEA" "${ANOF:-0}" "${SEMF:-0}")"
-  ssh -o ConnectTimeout=12 "$PM_REMOTE_SSH" "curl -s -m 120 -w '\n%{http_code}' -H 'Content-Type: application/json' -X POST --data '$(wt_esc "$body")' '$url'" 2>/dev/null
+# --- smoke de paridad (componentes WCF de la pantalla ValidacionParidad, 260701-2323) ---
+
+# Dispara ejecutar_validacion_paridad en el legado DESDE macdata hacia el guest (sin tunel M1: el runtime
+# vive en macdata). Datos = jobId a pollear. Imprime "<body>\n<http_code>".
+e2e_parity_trigger(){
+  local url="http://${PM_GUEST_WINHOST}:${SITEPORT}/$SVC_PARITY_RUN" body
+  body="$(printf '{"planta":"%s","lineaFab":"%s","anof":%s,"semf":%s,"modo":"%s"}' \
+    "$PLANTA" "$PARITY_LINEA" "${PARITY_ANOF:-0}" "${PARITY_SEMF:-0}" "$PARITY_MODO")"
+  ssh -o ConnectTimeout=12 "$PM_REMOTE_SSH" "curl -s -m 60 -w '\n%{http_code}' -H 'Content-Type: application/json' -X POST --data '$(wt_esc "$body")' '$url'" 2>/dev/null
 }
 
-# Consulta obtener_estado_job en el legado (DESDE macdata) y extrae Datos.CurrentStatus. Valida de paso la
-# lectura por ConStrJobsReader (login pm_reader -> Jobs.vwBacklogLoadStatus). Vacio si no hay respuesta.
-e2e_job_status(){  # uso: e2e_job_status <jobId>
-  local url="http://${PM_GUEST_WINHOST}:${SITEPORT}/$SVC_STATUS_PATH" body resp
+# Extrae un campo escalar de <wrapper>Result del JSON WCF (python3 si existe; fallback grep).
+e2e_wcf_scalar(){  # uso: e2e_wcf_scalar <json> <wrapperResult> <campo>
+  local json="$1" wrap="$2" field="$3"
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$json" | python3 -c "import sys,json
+try:
+  d=json.load(sys.stdin); r=d.get('$wrap',d) if isinstance(d,dict) else {}
+  v=r.get('$field','') if isinstance(r,dict) else ''
+  sys.stdout.write('' if v is None else str(v))
+except Exception:
+  pass" 2>/dev/null
+  else
+    # Acepta valor comillado ("EXITO") o numerico sin comillas ("Estatus":1): el enum WCF (Estatus) serializa
+    # como numero (DataContractJsonSerializer sin EnumMember), no como string.
+    printf '%s' "$json" | sed -n "s/.*\"$field\":\"\\{0,1\\}\\([^\",}]*\\).*/\\1/p" | head -1
+  fi
+}
+
+# Consulta obtener_estado_paridad y extrae Datos.<campo> del run (CurrentStatus / Verdict). Valida de paso la
+# lectura por ConStrJobsReader (pm_reader -> Jobs.vwParityCheckRunStatus). Vacio si no hay respuesta.
+e2e_parity_status_field(){  # uso: e2e_parity_status_field <jobId> <campo>
+  local url="http://${PM_GUEST_WINHOST}:${SITEPORT}/$SVC_PARITY_STATUS" field="$2" body resp
   body="$(printf '{"jobId":"%s"}' "$1")"
   resp="$(ssh -o ConnectTimeout=12 "$PM_REMOTE_SSH" "curl -s -m 30 -H 'Content-Type: application/json' -X POST --data '$(wt_esc "$body")' '$url'" 2>/dev/null)"
   if command -v python3 >/dev/null 2>&1; then
     printf '%s' "$resp" | python3 -c "import sys,json
 try:
-  d=json.load(sys.stdin); r=d.get('obtener_estado_jobResult',d) if isinstance(d,dict) else {}
+  d=json.load(sys.stdin); r=d.get('obtener_estado_paridadResult',d) if isinstance(d,dict) else {}
   dd=(r.get('Datos') if isinstance(r,dict) else None) or {}
-  sys.stdout.write(str(dd.get('CurrentStatus') or ''))
+  sys.stdout.write(str(dd.get('$field') or ''))
 except Exception:
   pass" 2>/dev/null
   else
-    printf '%s' "$resp" | sed -n 's/.*"CurrentStatus":"\([^"]*\)".*/\1/p' | head -1
+    printf '%s' "$resp" | sed -n "s/.*\"$field\":\"\\([^\"]*\\)\".*/\\1/p" | head -1
   fi
 }
 
-# Pollea obtener_estado_job hasta un estado terminal (Completed/Failed/TimedOut) o timeout. Imprime el estado final.
-e2e_poll_job(){  # uso: e2e_poll_job <jobId> <timeout_s>
-  local jobid="$1" deadline="${2:-90}" waited=0 st=""
+# Pollea obtener_estado_paridad hasta un estado terminal (Completed/Failed/TimedOut) o timeout. Imprime el final.
+e2e_parity_poll(){  # uso: e2e_parity_poll <jobId> <timeout_s>
+  local jobid="$1" deadline="${2:-120}" waited=0 st=""
   while [ "$waited" -lt "$deadline" ]; do
-    st="$(e2e_job_status "$jobid")"
+    st="$(e2e_parity_status_field "$jobid" CurrentStatus)"
     case "$st" in Completed|Failed|TimedOut) printf '%s' "$st"; return 0 ;; esac
     sleep 3; waited=$((waited+3))
   done
   printf '%s' "${st:-<sin-respuesta>}"
 }
 
-# Extrae un campo de generar_programaResult del JSON de respuesta WCF (python3 si existe; fallback grep).
-e2e_json_field(){  # uso: e2e_json_field <json> <campo>
-  local json="$1" field="$2"
-  if command -v python3 >/dev/null 2>&1; then
-    printf '%s' "$json" | python3 -c "import sys,json
-try:
-  d=json.load(sys.stdin); r=d.get('generar_programaResult',d) if isinstance(d,dict) else {}
-  v=r.get('$field','') if isinstance(r,dict) else ''
-  sys.stdout.write('' if v is None else str(v))
-except Exception:
-  pass" 2>/dev/null
-  else
-    printf '%s' "$json" | sed -n "s/.*\"$field\":\"\\([^\"]*\\)\".*/\\1/p" | head -1
-  fi
+# Lee obtener_reporte_paridad (una lectura del ReportJson de la vista estable). Imprime "<body>\n<http_code>".
+e2e_parity_report(){  # uso: e2e_parity_report <jobId>
+  local url="http://${PM_GUEST_WINHOST}:${SITEPORT}/$SVC_PARITY_REPORT" body
+  body="$(printf '{"jobId":"%s"}' "$1")"
+  ssh -o ConnectTimeout=12 "$PM_REMOTE_SSH" "curl -s -m 30 -w '\n%{http_code}' -H 'Content-Type: application/json' -X POST --data '$(wt_esc "$body")' '$url'" 2>/dev/null
 }
 
 e2e_estatus_ok(){ [ "$1" = "1" ] || [ "$1" = "EXITO" ]; }
 
-e2e_params_warn(){
-  if [ -z "$LINEA" ] || [ "${ANOF:-0}" = "0" ] || [ "${SEMF:-0}" = "0" ]; then
-    ewarn "disparo con params por defecto (lineaFab='$LINEA' anof=$ANOF semf=$SEMF): el caso ON es robusto (el gateway solo usa la planta), pero el caso OFF (Oracle SP) puede no retornar EXITO sin lineaFab/anof/semf reales. Fija PM_E2E_LINEA/ANOF/SEMF."
-  fi
-}
-
 cmd_smoke(){
   e2e_slot
-  e2e_ensure_flag_schema
-  e2e_params_warn
-  local pass=0 fail=0 before after resp code estatus mtec jobid jst
+  local pass=0 fail=0 resp code estatus jobid pst verdict rbody rcode rest
 
-  elog "smoke ON: flag carga-backend/$PLANTA = ON; disparo legacy -> backend async (jobId) + poll de estado"
-  e2e_set_flag 1
-  before="$(e2e_orders_count)"
-  resp="$(e2e_trigger)"; code="${resp##*$'\n'}"; resp="${resp%$'\n'*}"
-  estatus="$(e2e_json_field "$resp" Estatus)"; mtec="$(e2e_json_field "$resp" MensajeTecnico)"
-  jobid="$(e2e_json_field "$resp" Datos)"
-  if [ "$code" = "200" ] && [ "$estatus" = "2" ] && [ -n "$jobid" ]; then
-    # Camino async (1907): Estatus INFORMACION(2) + jobId en Datos. Pollea obtener_estado_job hasta terminal:
-    # valida de paso la lectura de estado por ConStrJobsReader (login pm_reader -> Jobs.vwBacklogLoadStatus).
-    elog "  disparo async aceptado (Estatus=INFORMACION jobId=$jobid); polleando obtener_estado_job ..."
-    jst="$(e2e_poll_job "$jobid" 120)"
-    after="$(e2e_orders_count)"
-    elog "  estado final del job=$jst   orders(RT) ${before}->${after}"
-    if [ "$jst" = "Completed" ]; then
-      elog "  [PASS] ON (async): job Completed; lectura de estado por ConStrJobsReader OK"
-      if [ "${after:-0}" -gt "${before:-0}" ] 2>/dev/null; then elog "  [info] ordenes RT creadas: $(( after - before ))"
-      else ewarn "  Completed sin delta de ordenes (¿sin backlog/diseno para lineaFab/anof/semf? es dato, no wiring)"; fi
+  elog "smoke paridad (ValidacionParidad por componentes): ejecutar -> poll estado -> reporte; slice $PLANTA/$PARITY_LINEA/$PARITY_ANOF/$PARITY_SEMF ($PARITY_MODO)"
+
+  # 1) Disparo: ejecutar_validacion_paridad -> Datos = jobId (GUID); Estatus EXITO/INFORMACION segun el gateway.
+  resp="$(e2e_parity_trigger)"; code="${resp##*$'\n'}"; resp="${resp%$'\n'*}"
+  estatus="$(e2e_wcf_scalar "$resp" ejecutar_validacion_paridadResult Estatus)"
+  jobid="$(e2e_wcf_scalar "$resp" ejecutar_validacion_paridadResult Datos)"
+  if [ "$code" = "200" ] && printf '%s' "$jobid" | grep -qiE '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
+    elog "  [PASS] ejecutar_validacion_paridad aceptado (Estatus=$estatus jobId=$jobid)"
+    pass=$((pass+1))
+
+    # 2) Poll: obtener_estado_paridad hasta terminal (valida ConStrJobsReader -> Jobs.vwParityCheckRunStatus).
+    pst="$(e2e_parity_poll "$jobid" 180)"
+    verdict="$(e2e_parity_status_field "$jobid" Verdict)"
+    elog "  estado final del run=$pst   veredicto=${verdict:-<n/d>}"
+    if [ "$pst" = "Completed" ]; then
+      elog "  [PASS] obtener_estado_paridad: Completed (lectura por ConStrJobsReader OK)"
       pass=$((pass+1))
+
+      # 3) Reporte: obtener_reporte_paridad -> Estatus EXITO + reporte presente. En modo vivo contra un data
+      #    tier local sin corrida de MPSRT el veredicto puede ser DIFF (correcto, es dato): NO se asevera MATCH.
+      resp="$(e2e_parity_report "$jobid")"; rcode="${resp##*$'\n'}"; rbody="${resp%$'\n'*}"
+      rest="$(e2e_wcf_scalar "$rbody" obtener_reporte_paridadResult Estatus)"
+      if [ "$rcode" = "200" ] && e2e_estatus_ok "$rest"; then
+        elog "  [PASS] obtener_reporte_paridad: reporte recuperado (Estatus=$rest, veredicto=${verdict:-<n/d>})"
+        pass=$((pass+1))
+      else
+        ewarn "  [FAIL] obtener_reporte_paridad: sin reporte (HTTP=$rcode Estatus=$rest)."
+        fail=$((fail+1))
+      fi
     else
-      ewarn "  [FAIL] ON (async): el job no llego a Completed (estado=$jst). Revisa la API, el worker del job y ConStrJobsReader."
+      ewarn "  [FAIL] obtener_estado_paridad: el run no llego a Completed (estado=$pst). Revisa la API, el worker de paridad y ConStrJobsReader."
       fail=$((fail+1))
     fi
-  elif [ "$code" = "200" ] && e2e_estatus_ok "$estatus" && [ -n "$mtec" ]; then
-    # Camino sincrono (1903 sin 1907): Estatus EXITO + body del backend. Compat hacia atras.
-    after="$(e2e_orders_count)"
-    elog "  HTTP=$code Estatus=$estatus (sync) orders(RT) ${before}->${after} MensajeTecnico=presente(backend)"
-    elog "  [PASS] ON (sync): el legado alcanzo el backend (MensajeTecnico = body del backend)"
-    [ "${after:-0}" -gt "${before:-0}" ] 2>/dev/null && elog "  [info] ordenes RT creadas: $(( after - before ))"
-    pass=$((pass+1))
   else
-    ewarn "  [FAIL] ON: no se confirmo el camino backend (HTTP=$code Estatus=$estatus jobId='${jobid:-}'). Revisa puente SQL (flag-read), backendBaseUrl y salud de la API."
+    ewarn "  [FAIL] ejecutar_validacion_paridad: sin jobId GUID (HTTP=$code Estatus=$estatus Datos='${jobid:-}'). Revisa backendBaseUrl, salud de la API y ParityBackendGateway."
     fail=$((fail+1))
   fi
 
-  elog "smoke OFF: flag = OFF; disparo legacy -> fallback Oracle (PGE950RT), backend intacto"
-  e2e_set_flag 0
-  before="$(e2e_orders_count)"
-  resp="$(e2e_trigger)"; code="${resp##*$'\n'}"; resp="${resp%$'\n'*}"
-  estatus="$(e2e_json_field "$resp" Estatus)"; mtec="$(e2e_json_field "$resp" MensajeTecnico)"
-  after="$(e2e_orders_count)"
-  elog "  HTTP=$code Estatus=$estatus orders(RT) ${before}->${after} MensajeTecnico=$([ -n "$mtec" ] && echo presente || echo vacio)"
-  # Señal robusta de "tocó el backend" para OFF = se crearon ordenes (delta>0). MensajeTecnico NO sirve aqui:
-  # el error del SP Oracle (params/datos) tambien lo llena, sin que el backend se haya invocado.
-  local touched=0; [ "${after:-0}" -gt "${before:-0}" ] 2>/dev/null && touched=1
-  if [ "$touched" = "1" ]; then
-    ewarn "  [FAIL] OFF: el backend fue invocado con el flag OFF (delta de ordenes > 0): el legado no cayo al fallback."
-    fail=$((fail+1))
-  elif [ "$code" = "200" ] && e2e_estatus_ok "$estatus"; then
-    elog "  [PASS] OFF: fallback Oracle sin tocar el backend (Estatus EXITO, sin delta de ordenes)"
-    pass=$((pass+1))
-  else
-    ewarn "  [WARN] OFF: el backend NO fue invocado (correcto, sin delta de ordenes), pero el SP Oracle no retorno EXITO (HTTP=$code Estatus=$estatus). Suele ser lineaFab/anof/semf invalidos (dato), no wiring."
-  fi
+  # Intake (carga-backend): el cutover 260701-2259 movio el gate del flag a OrdenesNuevasCargar_LN (camino
+  # load-async), que es un postback de la pantalla + poll JS, SIN endpoint WCF REST directo; su smoke ON
+  # (flag ON -> load-async set-based) y OFF (flag OFF -> Oracle intacto, sin delta en Demand.Orders) se
+  # ejercita con navegador (validacion e2e de la solicitud), no headless. generar_programa quedo revertido a
+  # Oracle puro y ya no ejercita el flag, por lo que su antiguo smoke ON/OFF se retiro de aqui.
+  elog "intake carga-backend: flag-gated en OrdenesNuevasCargar_LN (load-async, UI-driven) -> cubierto por el smoke con navegador; no headless"
 
-  # Deja el flag en el estado final deseado (cutover ON por defecto).
-  case "$FLAG_FINAL" in on|1|ON) e2e_set_flag 1 ;; off|0|OFF) e2e_set_flag 0 ;; esac
   echo ""
-  elog "smoke E2E: $pass PASS / $fail FAIL"
+  elog "smoke E2E (paridad): $pass PASS / $fail FAIL"
   [ "$fail" -eq 0 ]
 }
 

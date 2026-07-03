@@ -142,7 +142,7 @@ cmd_api_e2e() {        # Opción C (E2E): construye la imagen de la API y la cor
   on_intel "cd '$PM_REMOTE_SOLUTION_DIR' && docker $ctx build -t '$img' -f- ." < "$dockerfile" || { echo "[pm] e2e-backend: falló el build de la imagen" >&2; return 1; }
   echo "[pm] e2e-backend: run contenedor $cname (red $net; sql sqlserver:1433/$PM_PLANNING_DB${sbcs:+; bus servicebus:5672}; publica $PM_API_PORT->8080) ..."
   # La solución solo LEE ASPNETCORE_* / ConnectionStrings__* / ServiceBus__ConnectionString por entorno (frontera intacta).
-  on_intel "docker $ctx rm -f '$cname' >/dev/null 2>&1; docker $ctx run -d --name '$cname' --network '$net' -p $PM_API_PORT:8080 -e ASPNETCORE_ENVIRONMENT=IntegrationTest -e ConnectionStrings__Planning='$cs' -e ConnectionStrings__Ln='$ln' -e ServiceBus__ConnectionString='$sbcs' -e Parity__LegacySource='$psrc' -e ConnectionStrings__CtrlPiso='$ctrlcs' '$img'" || { echo "[pm] e2e-backend: falló el run del contenedor" >&2; return 1; }
+  on_intel "docker $ctx rm -f '$cname' >/dev/null 2>&1; docker $ctx run -d --name '$cname' --network '$net' -p $PM_API_PORT:8080 -e ASPNETCORE_ENVIRONMENT=IntegrationTest -e ConnectionStrings__Planning='$cs' -e ConnectionStrings__Ln='$ln' -e ServiceBus__ConnectionString='$sbcs' -e Parity__LegacySource='$psrc' -e ConnectionStrings__CtrlPiso='$ctrlcs' $(pm_parity_env_flags) '$img'" || { echo "[pm] e2e-backend: falló el run del contenedor" >&2; return 1; }
   # Un solo ssh por iteracion: 0=API responde, 2=contenedor muerto (corte temprano), 1=aun arrancando.
   local i rc; for i in $(seq 1 150); do
     rc=0; on_intel "curl -fsS -o /dev/null '$hl' 2>/dev/null && exit 0; [ \"\$(docker $ctx inspect -f '{{.State.Running}}' '$cname' 2>/dev/null)\" = true ] && exit 1; exit 2" || rc=$?
