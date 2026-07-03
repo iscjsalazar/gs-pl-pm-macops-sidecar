@@ -107,6 +107,15 @@ load_env() {
   # 'e2e-backend' levanta el data tier (intel) antes de la API; 0 lo omite (asume data tier ya provisto).
   PM_E2E_DATATIER="${PM_E2E_DATATIER:-1}"
 
+  # --- Paridad: directorios del snapshot CSV y del store SQLite del resultado ---
+  # El backend por defecto usa el temp del proceso (Path.GetTempPath()); en las rutas contenerizadas (API
+  # e2e y slots wt) esos temp no coinciden con el host, asi que se fijan explicitos y overridables para
+  # estabilizarlos e inspeccionarlos. En modo vivo (oracle) el trigger genera el snapshotId; Default solo
+  # aplica a escenarios CSV. La ruta de red viva Oracle en slots wt queda diferida (R2 de 260702-1732).
+  PM_PARITY_SNAPSHOT_DIR="${PM_PARITY_SNAPSHOT_DIR:-/tmp/pl-pm-parity-snapshots}"
+  PM_PARITY_STORE_DIR="${PM_PARITY_STORE_DIR:-/tmp/pl-pm-parity}"
+  PM_PARITY_DEFAULT_SNAPSHOT_ID="${PM_PARITY_DEFAULT_SNAPSHOT_ID:-}"
+
   # --- Aprovisionamiento por worktree (verbos wt-*) ---
   # Un slot (0..N-1) es la unica perilla por worktree; de el se derivan proyecto/offset/BD/prefijo de bus.
   PM_WT_SLOTS="${PM_WT_SLOTS:-4}"                       # N de slots disponibles
@@ -154,6 +163,18 @@ pm_ln_connstr() {
 pm_ctrlpiso_connstr() {
   printf 'data source=(description=(address=(protocol=tcp)(host=%s)(port=%s))(connect_data=(sid=XE)));user id=pge_ctrlpiso;password=ctrlpiso;' \
     "${1:-$PM_TEST_SQL_HOST}" "${2:-$PM_ORACLE_HOST_PORT}"
+}
+
+# Flags '-e Parity__*' para 'docker run': directorios de snapshot/store (y DefaultSnapshotId si esta fijado).
+# Los consumen las rutas contenerizadas (API e2e y slots wt) para fijar donde el backend usaria el temp del
+# proceso. La solucion NO conoce al wrapper (solo lee Parity__* por entorno).
+pm_parity_env_flags() {
+  # Valores entre comillas simples (como los ConnectionStrings__* hermanos): el shell remoto de on_intel
+  # hace el word-splitting que separa los multiples '-e', asi que un directorio con espacios se protege aqui.
+  printf -- "-e Parity__SnapshotDirectory='%s' -e Parity__StoreDirectory='%s'" \
+    "$PM_PARITY_SNAPSHOT_DIR" "$PM_PARITY_STORE_DIR"
+  [ -n "${PM_PARITY_DEFAULT_SNAPSHOT_ID:-}" ] && printf -- " -e Parity__DefaultSnapshotId='%s'" "$PM_PARITY_DEFAULT_SNAPSHOT_ID"
+  printf '\n'
 }
 
 # URL base de la API real (la M1). Único punto de verdad del puerto de API.
