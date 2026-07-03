@@ -226,6 +226,15 @@ wt_ensure_bus() {
 
 # --- API por worktree ---
 
+# Verifica TEMPRANO (antes del rsync/build) que el puerto host de la API este libre en macdata: falla claro si
+# otro contenedor (distinto del propio pm-wt<slot>-api, que wt_up_api recrea) ya lo publica. Sin esto el
+# conflicto de bind solo aflora del 'docker run' tras el build completo (minutos). uso: requiere PM_API_PORT + WT_SLOT.
+wt_check_api_port_free() {
+  local ctx cname holder; ctx="$(remote_docker_ctx)"; cname="pm-wt${WT_SLOT}-api"
+  holder="$(on_intel "docker $ctx ps --filter 'publish=$PM_API_PORT' --format '{{.Names}}' 2>/dev/null" | tr -d '\r' | grep -v -x "$cname" | head -n1 || true)"
+  [ -z "$holder" ] || { wt_die "el puerto de API :$PM_API_PORT ya lo publica el contenedor '$holder' en $PM_REMOTE_SSH; baja ese stack, usa otro slot, o fuerza APIPORT=<puerto>"; return 1; }
+}
+
 # Construye la imagen de la API desde el CODIGO DEL WORKTREE y corre su contenedor unido al SQL compartido
 # y al bus. Connstrings por entorno; aislamiento del bus por prefijo de instancia wt<N>.
 wt_up_api() {  # uso: wt_up_api <password>
@@ -300,7 +309,15 @@ cmd_wt_up() {
   PM_CONTAINERS_DIR="$PM_SOLUTION_DIR/containers"; COMPOSE_DIR="$PM_CONTAINERS_DIR/compose"
   # Dir remoto por slot en macdata (aisla el contexto de build entre worktrees).
   PM_REMOTE_SOLUTION_DIR="pm-solution-wt${slot}"
-  wt_log "codigo de la API: $PM_SOLUTION_DIR -> $PM_REMOTE_SSH:$PM_REMOTE_SOLUTION_DIR"
+  # Dir remoto de containers/ POR SLOT (no el compartido 'pm-containers'): el seed enumera loaders de
+  # <este dir>/sql/init; un dir compartido lo repuebla un worktree concurrente basado en un commit viejo
+  # durante la ventana del build de la API, colando loaders stale (p. ej. 0204/0205 pre-C6). Aislar por slot
+  # garantiza que la enumeracion refleje SIEMPRE el arbol desplegado de ESTE worktree.
+  PM_REMOTE_DIR="pm-containers-wt${slot}"
+  wt_log "codigo de la API: $PM_SOLUTION_DIR -> $PM_REMOTE_SSH:$PM_REMOTE_SOLUTION_DIR; containers -> $PM_REMOTE_SSH:$PM_REMOTE_DIR"
+
+  # Falla temprana si el puerto de API del slot ya esta ocupado en macdata (antes del rsync/build).
+  wt_check_api_port_free || return 1
 
   local pw; pw="$(wt_shared_sql_password)" || return 1
 

@@ -88,7 +88,12 @@ load_env() {
   PM_SB_SA_PASSWORD="${PM_SB_SA_PASSWORD:-Sb_Local_2026!}"
   # API real (verb 'api'/'test'): corre en ESTA mac (M1). Puerto con offset por agente.
   PM_API_HOST="${PM_API_HOST:-127.0.0.1}"
-  PM_API_PORT="${PM_API_PORT:-$(( 5180 + PM_PORT_OFFSET ))}"
+  # Override explicito del puerto host de la API: PM_API_PORT ya trae el valor efectivo tras sourcear .env
+  # (env directo, o via make APIPORT -> PM_API_PORT, o pinneado en .env, honrado como cualquier otra clave).
+  # Se captura para que compute_ports lo distinga del valor derivado por slot; vacio => compute_ports deriva
+  # 5180 + PM_PORT_OFFSET (patron de los otros *_HOST_PORT). No se deriva aqui: en load_env el offset aun es 0;
+  # wt_derive fija el offset real del slot y re-llama compute_ports.
+  PM_API_PORT_OVERRIDE="${PM_API_PORT:-}"
   # --- API en macdata (verbo 'e2e-backend', Opcion C): la API corre en su PROPIO contenedor en la Intel,
   # unido a la red del data tier (resuelve sqlserver/oracle/servicebus por nombre) y publicando el puerto E2E ---
   # Dir donde se rsyncea la solucion en la Intel: sirve de CONTEXTO de build de la imagen de la API.
@@ -168,6 +173,15 @@ compute_ports() {
     PM_SQL_HOST_PORT=$(( 1433 + PM_PORT_OFFSET ))
     PM_ORACLE_HOST_PORT=$(( 1521 + PM_PORT_OFFSET ))
     PM_SB_HOST_PORT=$(( 5672 + PM_PORT_OFFSET ))
+  fi
+  # Puerto host de la API: override explicito del usuario (APIPORT/PM_API_PORT) o derivado del offset del slot
+  # (5180 + offset), recalculado aqui —no una sola vez en load_env— para reflejar el offset real que fija
+  # wt_derive por slot. Fuera de la rama ephemeral: la API siempre publica un puerto conocido (wt-up cura
+  # /health/live por el).
+  if [ -n "${PM_API_PORT_OVERRIDE:-}" ]; then
+    PM_API_PORT="$PM_API_PORT_OVERRIDE"
+  else
+    PM_API_PORT=$(( 5180 + PM_PORT_OFFSET ))
   fi
   export PM_SQL_HOST_PORT PM_ORACLE_HOST_PORT PM_SB_HOST_PORT PM_SQL_SA_PASSWORD PM_ORACLE_PASSWORD PM_SB_SA_PASSWORD PM_SQLTOOLS_IMAGE
 }
