@@ -415,6 +415,8 @@ wt_up_api() {  # uso: wt_up_api <password>
   wt_log "build imagen $img (contexto $PM_REMOTE_SSH:$PM_REMOTE_SOLUTION_DIR; primera vez ~varios min) ..."
   on_intel "cd '$PM_REMOTE_SOLUTION_DIR' && docker $ctx build -t '$img' -f- ." < "$BASE_DIR/e2e/Dockerfile" \
     || { wt_die "fallo el build de la imagen de la API del worktree"; return 1; }
+  # Retira las capas dangling que el rebuild del mismo tag deja huerfanas; evita que el disco del VM se sature.
+  on_intel "docker $ctx image prune -f" || true
   # connstrings vistas desde el contenedor: SQL por alias de la red compartida; bus por alias del singleton.
   local cs ln sbcs
   cs="Server=$PM_SHARED_SQL_HOST,$PM_SHARED_SQL_PORT;Database=$PM_PLANNING_DB;User Id=sa;Password=$pw;TrustServerCertificate=True"

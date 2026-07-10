@@ -446,6 +446,11 @@ del script.
   o `SOLUTION=<ruta>`; también se autodetecta si el comando se corre **dentro** de un worktree de código (su
   toplevel git bajo `worktrees/*` con `PL.PM.sln`). Un worktree del propio sidecar (sin `PL.PM.sln`) NO se
   confunde con la solución: cae al central.
+- **El checkout central no acumula diffs operativos sin commitear.** Un ajuste aplicado en caliente sobre el
+  central (un `prune`, un flag, un fix de script) se versiona de inmediato desde un worktree (commit + PR) o
+  queda registrado como pendiente rastreable; no se deja como cambio suelto en el árbol. El central se mantiene
+  en su rama de integración (`main`) sin `git status` sucio: un diff acumulado ahí lo ejecutan en silencio todas
+  las sesiones que invocan `make` desde el central, con código que no está en `origin`.
 
 ## Configuración (`.env`)
 
