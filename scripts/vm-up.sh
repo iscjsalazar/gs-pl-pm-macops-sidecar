@@ -23,7 +23,15 @@ if "$VMRUN" -T fusion list 2>/dev/null | grep -qF "$VMX"; then
   echo "[vm-up] VM ya corriendo -> no se relanza"
 else
   echo "[vm-up] iniciando VM headless: $VMX"
-  "$VMRUN" -T fusion start "$VMX" nogui || { echo "[vm-up] fallo al iniciar la VM" >&2; exit 1; }
+  # Dos sesiones pueden pasar el 'list' antes de que ninguna arranque: el 'start' del perdedor falla sobre una
+  # VM que YA esta corriendo. Se re-verifica el estado real antes de darlo por error.
+  if ! "$VMRUN" -T fusion start "$VMX" nogui; then
+    if "$VMRUN" -T fusion list 2>/dev/null | grep -qF "$VMX"; then
+      echo "[vm-up] el arranque fallo pero la VM aparece corriendo (otra sesion la levanto) -> se continua"
+    else
+      echo "[vm-up] fallo al iniciar la VM" >&2; exit 1
+    fi
+  fi
 fi
 
 echo "[vm-up] esperando SSH del guest $WINHOST:22 ..."

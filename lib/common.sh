@@ -117,8 +117,19 @@ load_env() {
   PM_PARITY_DEFAULT_SNAPSHOT_ID="${PM_PARITY_DEFAULT_SNAPSHOT_ID:-}"
 
   # --- Aprovisionamiento por worktree (verbos wt-*) ---
-  # Un slot (0..N-1) es la unica perilla por worktree; de el se derivan proyecto/offset/BD/prefijo de bus.
-  PM_WT_SLOTS="${PM_WT_SLOTS:-4}"                       # N de slots disponibles
+  # Un slot (0..N-1) es la unica perilla por worktree; de el se derivan proyecto/offset/BD/prefijo de bus,
+  # y ademas site IIS, tunel y Oracle del legado (ver README, tabla canonica por slot).
+  PM_WT_SLOTS="${PM_WT_SLOTS:-8}"                       # N de slots disponibles
+  # Oracle ControlPiso por slot (fase 2, lazy): solo se aprovisiona con PM_WT_ORACLE=1 (la via e2e-up lo enciende).
+  PM_WT_ORACLE="${PM_WT_ORACLE:-0}"                     # 1 = aprovisiona pm-wt<N>-oracle-1 y cablea la API a el
+  # Base dedicada del puerto host del Oracle per-slot. NO se usa 1521+offset (ver compute_ports).
+  PM_WT_ORACLE_PORT_BASE="${PM_WT_ORACLE_PORT_BASE:-15210}"
+  # Readiness del Oracle del slot: el init completo midio ~91 s en maquina descargada; 300 s cubre contencion.
+  PM_WT_ORACLE_READY_TIMEOUT="${PM_WT_ORACLE_READY_TIMEOUT:-300}"
+  # Frontend legado por slot: site IIS 8100+N en el guest, tunel 18100+N en la M1. Bloques dedicados: 8080+N
+  # chocaria con el singleton 'pm':8080 y 8080+N*10 con 'pmpub':8090.
+  PM_WT_SITE_PORT_BASE="${PM_WT_SITE_PORT_BASE:-8100}"
+  PM_WT_TUNNEL_PORT_BASE="${PM_WT_TUNNEL_PORT_BASE:-18100}"
   PM_WT_REGISTRY="${PM_WT_REGISTRY:-$SIDECAR_CENTRAL_DIR/.worktrees/slots.tsv}"   # registro compartido (checkout central); gitignored folder->slot
   # SQL compartido (reuso del de nvoslabs): la API y el seeder lo alcanzan uniendose a su red externa
   # (idiomatico, igual que los labs de nvoslabs) o, en su defecto, por el puerto publicado en loopback.
@@ -192,6 +203,10 @@ compute_ports() {
     PM_SB_HOST_PORT=0
   else
     PM_SQL_HOST_PORT=$(( 1433 + PM_PORT_OFFSET ))
+    # ATENCION: esta formula sirve a los stacks compose manuales (pm-run PROJECT=... OFFSET=...), NO al Oracle
+    # per-slot de wt-up. Con el offset de un slot chocaria con contenedores vivos: slot 0 -> 1521 es
+    # pm-local-oracle-1 y slot 5 (offset 50) -> 1571 es pm-arts-rt-oracle-1. El Oracle del slot usa una base
+    # dedicada, PM_WT_ORACLE_PORT_BASE (15210) + slot; ver wt_derive en lib/worktrees.sh.
     PM_ORACLE_HOST_PORT=$(( 1521 + PM_PORT_OFFSET ))
     PM_SB_HOST_PORT=$(( 5672 + PM_PORT_OFFSET ))
   fi

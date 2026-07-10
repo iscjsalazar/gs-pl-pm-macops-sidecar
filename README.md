@@ -27,13 +27,16 @@ gs-pl-pm-macops-sidecar/
 ├── legacy.sh            # driver del lanzamiento del legado (M1; orquesta por SSH)
 ├── lib/
 │   ├── common.sh        # libreria comun (rutas, carga de .env, puertos, docker compose, helpers remotos)
-│   └── worktrees.sh     # logica de wt-* (slot, SQL compartido, seed, API por worktree)
+│   └── worktrees.sh     # logica de wt-* (slot, SQL compartido, seed, API y Oracle por worktree)
+├── tools/
+│   └── guest-turn/      # turno exclusivo del guest legado singleton (mutex por mkdir; corre en la M1)
 ├── remote-intel/
 │   └── bootstrap-intel.sh   # aprovisiona colima/docker en la mac Intel (una vez)
 ├── e2e/                 # Dockerfile de la imagen de la API en modo E2E
 ├── INSTALL-fusion.md    # instalar VMware Fusion (manual; brew lo deshabilitó)
 ├── packer/              # windows-server-core.pkr.hcl + Autounattend.xml.tmpl + provision/
-├── scripts/             # vm-up · stage-app · build-app · deploy-app · deploy-iis.ps1 · e2e-net-check · e2e.sh · diag · ...
+├── scripts/             # vm-up · guest-lock · stage-app · build-app · deploy-app · deploy-iis.ps1
+│                        # site-down · sites-status · read-wiring · guest-mem · e2e-net-check · e2e.sh · diag · ...
 └── artifacts/           # TODO lo descargado/pesado (GITIGNORED; solo .gitkeep se versiona)
 ```
 
@@ -96,20 +99,51 @@ ya está arriba (usar `FORCE=1` para forzar rebuild/redeploy).
 | Comando | Acción |
 | --- | --- |
 | `make legacy-launch` | Todo: data tier (intel) + VM + build + deploy + túnel + URL. |
+| `make legacy-launch SLOT=<N>` | Igual, pero sobre el **sitio del slot** (`pm-wt<N>`:`8100+N`, árbol `C:\wt<N>`, túnel `18100+N`). |
 | `make legacy-data-up` | Asegura el data tier en intel (reusa `pm-run TARGET=intel`). |
 | `make legacy-vm-up` | Asegura la VM Windows (omite si ya corre). |
 | `make legacy-build` / `make legacy-deploy` | Compila en el guest / publica en IIS (omite si health 200, salvo `FORCE`). |
-| `make legacy-tunnel` / `make legacy-down` | Abre / cierra el túnel SSH M1 → guest. |
+| `make legacy-tunnel` / `make legacy-down` | Abre / cierra el túnel SSH M1 → guest (`legacy-down` libera además el turno del guest). |
+| `make legacy-site-down SLOT=<N>` | Desmonta el sitio del slot (site, pool, árbol, raíz, zip, scripts, regla de firewall) y su stage en `macdata`. **Nunca** opera el singleton. |
+| `make legacy-sites-status` | Lista los sitios `pm*` del guest cruzados con el registro de slots; marca huérfanos. |
+| `make legacy-turn-status` / `make legacy-turn-heartbeat` / `make legacy-turn-release` | Estado / refresco / liberación del turno exclusivo del guest singleton. |
 | `make legacy-status` / `make legacy-url` | Estado de cada pieza / URL y puertos de acceso. |
 | `make legacy-diag` / `make legacy-diag-logs` | Habilita log de errores detallado / vuelca errores ASP.NET. |
 
 ```bash
-make legacy-launch                         # lanzamiento end-to-end
+make legacy-launch                         # lanzamiento end-to-end (vía singleton)
+make legacy-launch SLOT=3                  # vía per-slot: site pm-wt3:8103, árbol C:\wt3, túnel 18103
 make legacy-launch FORCE=1                 # fuerza rebuild/redeploy
-make legacy-launch SITEPORT=8048 TUNNEL=18048   # puertos no-default
+make legacy-launch SITEPORT=8048 TUNNEL=18048   # puertos no-default (sobreescriben la derivación)
 make legacy-status                         # estado data tier / VM / app / túnel
-make legacy-down                           # cierra el túnel
+make legacy-down                           # cierra el túnel y libera el turno del guest
 ```
+
+### Dos vías, dos locks
+
+La **vía singleton** (sin `SLOT`) comparte un único sitio `pm`:8080, un único árbol `C:\src` y un único
+`Web.config`: el `stage` de una sesión borra el árbol de la otra y el `deploy` reescribe su configuración. Por eso
+está protegida por un **turno exclusivo** (`tools/guest-turn/guest-turn.sh`, mismo patrón que `deploy-turn`: mutex
+por `mkdir`, identidad por pid + `lstart`, heartbeat con TTL, reclamo por `mv` al *graveyard* — nunca `rm`). Una
+segunda sesión que intente `legacy-launch`/`build`/`deploy` sobre el singleton recibe **exit 3** y no toca nada. El
+turno se **mantiene** mientras la sesión usa el sitio y se libera con `make legacy-down` o `make legacy-turn-release`.
+
+A diferencia de `deploy-turn`, el reclamo automático exige que el **proceso dueño esté muerto**. Un turno cuyo
+heartbeat envejeció pero cuya dueña sigue viva **no se roba**: esa sesión probablemente esté navegando la UI, y
+desplegar encima le reescribiría el `Web.config` que está usando — justo lo que el lock existe para impedir. Un turno
+vivo pero abandonado se libera con `guest-turn.sh release --force --reason "<texto>"` (orden explícita del usuario,
+queda en la bitácora). `GUEST_TURN_STEAL_STALE=1` revierte la política.
+
+La **vía per-slot** (`SLOT=<N>`) no necesita turno: cada slot tiene sitio, árbol, raíz y configuración propios. Los
+árboles per-slot viven **fuera de `C:\src`** a propósito: `legacy.sh` reinstala en cada corrida los scripts del
+checkout que la invoca, así que un checkout desactualizado del sidecar ejecutaría el viejo
+`Remove-Item C:\src -Recurse` y arrasaría cualquier árbol anidado ahí, con sitios vivos apuntándole.
+
+En **ambas** vías, la sección `stage → build → deploy` la serializa un lock que vive en `macdata`
+(`scripts/guest-lock.sh`), no en la M1: MSBuild y sus nodos residentes, el `applicationHost.config` de IIS (los
+cmdlets de `WebAdministration` concurrentes fallan al *commitear*) y los vCPU de la VM son recursos compartidos por
+todos los sitios. Al vivir en `macdata`, el lock cubre también a sesiones de otras máquinas orquestadoras. Antes de
+reclamar un lock rancio consulta al guest: si hay un MSBuild vivo, **no** lo roba.
 
 ## Comandos — backend en modo E2E (`e2e-*`, Opción C)
 
@@ -157,7 +191,34 @@ singleton; por worktree levanta una BD de producto y un contenedor de API constr
 worktree**. Es **intel-only** (el SQL compartido y el bus viven en `macdata`); `make` fuerza `TARGET=intel`,
 `REMOTE=macdata`.
 
-Del slot `N` se derivan: proyecto `pm-wt<N>`, API `:5180+N*10`, BD `pm_planning_wt<N>` y prefijo de bus `wt<N>`.
+Del slot `N` se derivan **todos** los recursos de la sesión: el backend, su BD, su Oracle ControlPiso y el sitio IIS del legado. Es el contrato «qué slot es mío»; `make wt-info WT=<folder>` lo imprime instanciado.
+
+### Tabla canónica por slot
+
+| Recurso | Valor por slot | Alcance |
+| --- | --- | --- |
+| Proyecto compose | `pm-wt<N>` | per-slot |
+| Contenedor API | `pm-wt<N>-api` en `5180+N*10` | per-slot |
+| BD de planning | `pm_planning_wt<N>` (en el SQL compartido) | per-slot |
+| Prefijo de bus | `wt<N>` (broker singleton) | per-slot lógico |
+| Dirs remotos de build | `pm-solution-wt<N>` / `pm-containers-wt<N>` | per-slot |
+| Contenedor Oracle | `pm-wt<N>-oracle-1` en `15210+N` | per-slot (lazy, `ORACLE=1`) |
+| Volumen Oracle | `pm-wt<N>_pm-oracle-data` | per-slot |
+| Red compose | `pm-wt<N>_default` | per-slot |
+| Site y app pool IIS | `pm-wt<N>` con binding `8100+N` | per-slot |
+| Árbol fuente en el guest | `C:\wt<N>\CargaPlantaPT_LN` | per-slot |
+| Raíz del site (health) | `C:\inetpub\pmroot-wt<N>` | per-slot |
+| Túnel SSH en esta M1 | `18100+N` | per-slot |
+| Regla de firewall | `PM site pm-wt<N>` | per-slot |
+| Vdir de la aplicación | `ProgramaMaestroLN` | **invariante** (el legado hardcodea la raíz virtual absoluta) |
+| Motor SQL Server, bus, puente `60211`, `pm_erpln106` | singletons administrados | compartidos |
+| Site `pm`:8080, `pmpub`:8090, `pm-local-oracle-1`:1521 | vía legada / standalone | compartidos |
+
+**Bloques de puertos reservados** (`SLOTS=8`, slots `0..7`): API `5180–5250` (stride 10), sitios `8100–8107`, túneles `18100–18107`, Oracle `15210–15217`. Fuera de esos bloques y por tanto intocables: `8080`/`8090` (sites legados), `1521` (`pm-local-oracle-1`), `1571` (`pm-arts-rt-oracle-1`), `60201` (SQL compartido en loopback), `60211` (puente), `60140`/`60141` (nvoslabs).
+
+Conviven **dos strides** a propósito: `N*10` para la API (herencia de `PM_PORT_OFFSET`) y `+1` para sitio, túnel y Oracle (bloques dedicados). No se unifican: cambiar el de la API rompería los slots vivos.
+
+La fórmula `1521+offset` de `compute_ports` (`lib/common.sh`) sirve a los stacks compose manuales (`pm-run PROJECT=… OFFSET=…`), **no** al Oracle per-slot: con el offset de un slot chocaría con `pm-local-oracle-1` (slot 0 → 1521) y con `pm-arts-rt-oracle-1` (slot 5 → 1571).
 
 > **Dos sentidos de "worktree" (distintos).** Estos verbos `wt-*` aprovisionan el **runtime** por worktree
 > (un slot con su BD, puertos y contenedor de API). El "worktree" que aprovisionan es un **git worktree del
@@ -170,24 +231,49 @@ Del slot `N` se derivan: proyecto `pm-wt<N>`, API `:5180+N*10`, BD `pm_planning_
 | Comando | Acción |
 | --- | --- |
 | `make wt-up WT=<folder>` | Asigna el slot, asegura los singletons (SQL compartido alcanzable, referencia LN `pm_erpln106`, bus `pm-shared`), siembra `pm_planning_wt<N>`, construye y corre `pm-wt<N>-api`; imprime los endpoints. |
+| `make wt-up WT=<folder> ORACLE=1` | Además aprovisiona el Oracle ControlPiso propio del slot (`pm-wt<N>-oracle-1`) y cablea la API a él (`Parity__LegacySource=oracle`). La vía `e2e-up` siempre lo enciende. |
 | `make wt-up WT=<folder> SOLUTION=<path>` | Fuerza la raíz de la solución del worktree (contexto de build de la API). |
-| `make wt-down WT=<folder>` | Baja la API y la BD del worktree y libera el slot; deja los singletons compartidos intactos. |
+| `make wt-down WT=<folder>` | Baja API, Oracle (contenedor **y volumen**) y BD del worktree; verifica su ausencia y sólo entonces libera el slot. Deja los singletons compartidos intactos. |
+| `make wt-info WT=<folder>` | Imprime la derivación completa del slot: API, BD, bus, Oracle, site IIS, túnel, rutas del guest. |
 | `make wt-ls` | Lista el registro de slots (`folder → slot`). |
-| `make wt-status` | Estado de los contenedores PM por worktree y del bus. |
+| `make wt-status` | Estado de los contenedores PM por worktree (API y Oracle) y del bus. |
+| `make wt-gc` / `make wt-gc FORCE=1` | Cruza los cuatro planos (registro · contenedores API · contenedores Oracle · sites IIS y túneles) y lista los huérfanos; con `FORCE=1` los retira. |
 | `make wt-seed-ln` | Asegura la referencia LN compartida `pm_erpln106` (paso deliberado de una vez; idempotente). |
 
 ```bash
 make wt-up WT=feat_pm_mi-solicitud      # aprovisiona; WT se autodetecta con git rev-parse dentro del worktree
+make wt-info WT=feat_pm_mi-solicitud     # "qué slot es mío": puertos, contenedores y rutas del guest
 make wt-status                           # contenedores pm-wt* + bus pm-shared
-make wt-down WT=feat_pm_mi-solicitud     # baja API + BD del worktree; libera el slot
+make wt-down WT=feat_pm_mi-solicitud     # baja API + Oracle + BD del worktree; libera el slot
 ```
 
 El **slot** se asigna desde un registro gitignored `.worktrees/slots.tsv` (lock por `mkdir`, slot libre más bajo,
 autodetección por `git rev-parse --show-toplevel`). La conexión al SQL compartido es parametrizable
 (`SHAREDSQL_NET`/`HOST`/`PORT`/`PASSWORD`; default red `nvoslabsc3-sharedsql-dt`, `sqlserver:1433`, password
 autodescubierta del contenedor). La referencia LN propia de PM se siembra una sola vez con guard de completitud
-(no re-siembra si ya está poblada). **Oracle ControlPiso por worktree y el legado multi-sitio** no entran en este
-núcleo (sirven a la vía legada/E2E): quedan como follow-up.
+(no re-siembra si ya está poblada).
+
+**Oracle ControlPiso por slot (perezoso).** Sólo lo aprovisiona `ORACLE=1`, porque sólo lo necesita un slot con
+frontend: el camino con el feature flag **OFF** ejecuta `PGE950RT` y **escribe** en ControlPiso, así que un Oracle
+singleton contaminaría a las demás sesiones. `wt-up` verifica el *readiness* real (sqlplus + `maquinas_pm` poblada +
+el puerto publicado coincide) en **cada** corrida, no sólo cuando crea el contenedor: un init abortado a medias deja
+el contenedor `Running` con el schema incompleto. Si un slot tiene Oracle vivo y llega `ORACLE=0`, `wt-up` **adopta**
+el wiring Oracle con aviso en vez de recrear la API en modo `csv` (divergencia silenciosa). El contenedor se crea con
+`--restart=no`: uno de un slot ya liberado no debe resucitar tras un reinicio del docker y robarle el puerto al
+siguiente dueño; la recuperación es re-correr `wt-up … ORACLE=1`.
+
+**Teardown del Oracle.** `wt-down` destruye contenedor **y volumen** a propósito (el slot se recicla y los datos
+quedaron mutados), por nombre y no por `compose down` (que depende del árbol remoto del worktree y se tragaría el
+fallo), y **verifica la ausencia antes de liberar el slot**: si algo sobrevive, el slot no se libera.
+
+**Operación (reglas).** El `health.aspx` comparte pool con la aplicación, así que **no se le hace polling en bucle**:
+eso mata el *idle-timeout* de 20 min que sostiene el presupuesto de RAM del guest. El orden canónico de cierre es
+`e2e-down` **antes** de `wt-down` (el primero necesita el slot que el segundo libera); si se invierte, `e2e-down`
+degrada con aviso y el rescate es `make legacy-site-down SLOT=<N>`. Un slot reutilizado, o conservado con
+`PM_E2E_KEEP_FRONT=1`, exige `FORCE=1` en el siguiente `e2e-up` para re-inyectar el wiring.
+
+**Topes operativos.** Guest Windows: ~0.3–0.8 GiB por `w3wp` activo más 1–2 GiB del MSBuild en vuelo. colima
+(24 GiB, headroom ~9.3 GiB): ~1.5 GiB por slot E2E (API 0.26–1.47 + XE ~0.7) ⇒ 3–4 Oracles per-slot concurrentes.
 
 Prerrequisitos en `macdata`: el SQL compartido de nvoslabs corriendo (red `nvoslabsc3-sharedsql-dt`), `colima`
 del data tier activo y las imágenes base de .NET (`sdk:10.0`/`aspnet:10.0`) disponibles.
@@ -223,17 +309,34 @@ discrimina ON por `MensajeTecnico` y OFF por la ausencia de órdenes nuevas (rob
 
 | Comando | Acción |
 | --- | --- |
-| `make e2e-up WT=<wt-pm> LEGACYSRC=<legacy-develop>` | Todo: `wt-up` (backend del slot) + puente SQL + `legacy-launch` con inyección + activar el flag ON + `e2e-net-check` + smoke. |
+| `make e2e-up WT=<wt-pm> LEGACYSRC=<legacy-develop>` | Todo: `wt-up ORACLE=1` (backend **y Oracle** del slot) + puente SQL + `legacy-launch SLOT=<N>` con inyección + verificación del wiring desplegado + activar el flag ON + `e2e-net-check` + smoke. |
 | `make e2e-up ... LINEA=<cod> ANOF=<aaaa> SEMF=<sem>` | Params reales del disparo (el caso OFF/Oracle los exige; el ON los ignora). |
-| `make e2e-up ... FORCE=1` | Re-deploya el legado (re-inyecta el wiring; necesario si cambia el slot). |
-| `make e2e-smoke WT=<wt-pm>` | Solo el smoke funcional (ON→backend, OFF→Oracle); asume `e2e-up` ya dejó todo arriba. |
-| `make e2e-down WT=<wt-pm>` | Baja el túnel, la API del slot y el puente SQL; deja los singletons (data tier, SQL compartido, bus) intactos. |
+| `make e2e-up ... FORCE=1` | Re-deploya el legado (re-inyecta el wiring; necesario si el slot se reutiliza o se conservó el sitio). |
+| `make e2e-smoke WT=<wt-pm>` | Solo el smoke funcional; dispara contra el **sitio del slot** (`8100+N`). Asume `e2e-up` ya dejó todo arriba. |
+| `make e2e-down WT=<wt-pm>` | Baja el túnel y el **sitio del slot**, y luego API + Oracle + BD del slot (`wt-down`). El puente y los demás singletons quedan intactos. |
+| `make e2e-down ... PM_E2E_KEEP_FRONT=1` | Conserva el sitio del legado (reusarlo exige `FORCE=1` en el siguiente `e2e-up`). |
+| `make e2e-down ... PM_E2E_BRIDGE_DOWN=1` | Baja también el puente `60211`. **Compartido**: bajarlo hace que los demás slots lean el flag como OFF. |
+| `make e2e-oracle-counts WT=<wt-pm>` | Fotografía de las tablas que muta `PGE950RT` en el Oracle **del slot** y en el singleton `pm-local-oracle-1`, más las filas de menú de ambos. Es el instrumento de evidencia del aislamiento: se corre antes y después de una carga con el flag OFF. |
 
 ```bash
 make e2e-up WT=<wt-pm-develop> LEGACYSRC=<ruta-legacy-develop> LINEA=<cod> ANOF=<aaaa> SEMF=<sem>
 make e2e-smoke WT=<wt-pm-develop>     # re-corre solo el smoke
-make e2e-down  WT=<wt-pm-develop>     # cierra túnel/API/puente
+make e2e-down  WT=<wt-pm-develop>     # cierra túnel + sitio + API + Oracle del slot
 ```
+
+**Aislamiento del camino OFF.** `e2e-up` siempre enciende el Oracle del slot y le apunta el `conStringOracle` del
+sitio, así que una carga con el flag **OFF** (que ejecuta `PGE950RT` y muta `ordenes`, `tipge951`,
+`ordenes_nuevas_pm_t` y `resumen_carga_pm`) sólo toca `pm-wt<N>-oracle-1`. `pm-local-oracle-1` queda intacto.
+
+**Verificación del wiring.** El valor efectivo de `backendBaseUrl` / `conStringOracle` / `ConStrPm` sólo existe en
+el guest (el repo versiona *placeholders*). Como el `deploy` se omite cuando el health responde 200, `e2e-up` **lee**
+el wiring realmente desplegado (`scripts/read-wiring.sh`) y, si diverge, re-despliega con `FORCE=1` en vez de correr
+el smoke sobre el Oracle o el backend de otra sesión.
+
+El `ORACLEPORT` del slot viaja como **variable de make** (`make legacy-launch … ORACLEPORT=<puerto>`), nunca por
+entorno: `LEGACY_ENV` expande `PM_LEGACY_ORACLE_PORT=$(ORACLEPORT)` como prefijo de la línea de comando de cada
+receta `legacy-*`, así que un valor pasado por env se pisaría en silencio y **todos** los frontends acabarían
+apuntando al Oracle singleton `:1521`.
 
 Prerrequisitos:
 
