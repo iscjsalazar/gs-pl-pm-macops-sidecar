@@ -275,9 +275,11 @@ e2e_ensure_flag_schema(){
 IF SCHEMA_ID(N'FeatureManagement') IS NULL EXEC('CREATE SCHEMA [FeatureManagement]');
 IF OBJECT_ID(N'FeatureManagement.FeatureFlags') IS NULL CREATE TABLE [FeatureManagement].[FeatureFlags]([Key] nvarchar(128) NOT NULL,[Plant] nvarchar(16) NOT NULL,[IsEnabled] bit NOT NULL,[Description] nvarchar(512) NULL,[UpdatedAt] datetime2 NOT NULL,CONSTRAINT [PK_FeatureFlags] PRIMARY KEY ([Key],[Plant]));
 IF OBJECT_ID(N'FeatureManagement.vwFeatureFlags') IS NULL EXEC('CREATE VIEW [FeatureManagement].[vwFeatureFlags] AS SELECT [Key],[Plant],[IsEnabled],[Description],[UpdatedAt] FROM [FeatureManagement].[FeatureFlags]');
-IF NOT EXISTS (SELECT 1 FROM [FeatureManagement].[FeatureFlags] WHERE [Key]='carga-backend' AND [Plant]='$PLANTA') INSERT INTO [FeatureManagement].[FeatureFlags]([Key],[Plant],[IsEnabled],[Description],[UpdatedAt]) VALUES (N'carga-backend',N'$PLANTA',0,N'Deriva la carga del Programa Maestro al backend .NET 10 (planta RES/RT) en vez del SP Oracle PGE950RT.',SYSUTCDATETIME());"
+IF NOT EXISTS (SELECT 1 FROM [FeatureManagement].[FeatureFlags] WHERE [Key]='carga-backend' AND [Plant]='$PLANTA') INSERT INTO [FeatureManagement].[FeatureFlags]([Key],[Plant],[IsEnabled],[Description],[UpdatedAt]) VALUES (N'carga-backend',N'$PLANTA',0,N'Deriva la carga del Programa Maestro al backend .NET 10 (planta RES/RT) en vez del SP Oracle PGE950RT.',SYSUTCDATETIME());
+IF NOT EXISTS (SELECT 1 FROM [FeatureManagement].[FeatureFlags] WHERE [Key]='login-skip-password' AND [Plant]='$PLANTA') INSERT INTO [FeatureManagement].[FeatureFlags]([Key],[Plant],[IsEnabled],[Description],[UpdatedAt]) VALUES (N'login-skip-password',N'$PLANTA',1,N'PRUEBAS: permite login con contrasena vacia para agilizar la validacion viva. NUNCA se habilita en dev/prod.',SYSUTCDATETIME());
+ELSE UPDATE [FeatureManagement].[FeatureFlags] SET IsEnabled=1,UpdatedAt=SYSUTCDATETIME() WHERE [Key]='login-skip-password' AND [Plant]='$PLANTA';"
   if wt_shared_exec "$pw" "$sql" >/dev/null 2>&1; then
-    elog "esquema del feature flag asegurado en $PM_PLANNING_DB (puente temporal; ver follow-up del seed)"
+    elog "esquema del feature flag asegurado en $PM_PLANNING_DB (carga-backend + login-skip-password=ON [solo pruebas])"
   else
     ewarn "no se pudo asegurar el esquema del flag en $PM_PLANNING_DB"
   fi
