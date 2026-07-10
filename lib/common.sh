@@ -250,21 +250,46 @@ pm_wait_sql() {
 # connstring se pasa por --connection (sobreescribe la del factory de diseno) -> apunta a la BD destino
 # (local o por host remoto). Requiere dotnet + el tool dotnet-ef (manifest .config/dotnet-tools.json de la
 # solucion). Mismo comando que usa la pista de despliegue contra Azure SQL.
+# Descubre los contextos EF migrables de la solucion. Cada modulo que tiene migraciones deja un
+# src/Modules/<Mod>/03.Infrastructure/Persistence/Migrations/<Ctx>ModelSnapshot.cs: ese archivo es la
+# declaracion de que <Ctx> se migra, y su ruta da el --project. El descubrimiento sustituye a la lista
+# hardcodeada de modulos: un modulo nuevo entra solo, y ninguno queda sin DDL en silencio (un schema sin
+# crear se manifiesta tarde, como "Invalid object name" del loader data-only).
+# Imprime "<ruta-proyecto-relativa> <ContextName>" por contexto, en orden estable.
+pm_ef_contexts() {
+  local sln="$PM_SOLUTION_DIR" snap ctx proj
+  for snap in "$sln"/src/Modules/*/03.Infrastructure/Persistence/Migrations/*DbContextModelSnapshot.cs; do
+    [ -e "$snap" ] || continue
+    ctx="$(basename "$snap")"; ctx="${ctx%ModelSnapshot.cs}"
+    proj="${snap%/Persistence/Migrations/*}"; proj="${proj#"$sln"/}"
+    printf '%s %s\n' "$proj" "$ctx"
+  done | sort -u
+}
+
 pm_ef_migrate() {  # uso: pm_ef_migrate <connstr>
   local cs="$1"
   command -v dotnet >/dev/null 2>&1 || { echo "[pm] falta 'dotnet' en PATH (migraciones EF)" >&2; return 2; }
-  local sln="$PM_SOLUTION_DIR" api="src/PL.PM.Bootstrapper.Api" spec ctx proj attempt
+  local sln="$PM_SOLUTION_DIR" api="src/PL.PM.Bootstrapper.Api" ctx proj attempt
+  local contexts boot_line boot_ctx boot_proj
+  contexts="$(pm_ef_contexts)"
+  [ -n "$contexts" ] || {
+    echo "[pm] EF migrate: ningun contexto con migraciones bajo $sln/src/Modules" >&2; return 1; }
   pm_wait_sql || return 1
   echo "[pm] EF migrate: aplicando migraciones (crea BD y DDL) antes del seed data-only ..." >&2
+  echo "[pm]   contextos: $(printf '%s\n' "$contexts" | awk '{printf "%s ", $2}')" >&2
   ( cd "$sln" && dotnet tool restore >/dev/null && dotnet build "$sln/PL.PM.sln" -c Debug --nologo -v q ) || {
     echo "[pm] EF migrate: fallo el restore/build de la solucion" >&2; return 1; }
-  # El primer contexto crea la BD y prueba el login: reintenta para absorber la ventana entre "puerto
-  # abierto" (pm_wait_sql) y "login listo" del motor recien arrancado.
-  echo "[pm]   ef database update: PlanningDbContext (crea BD; espera login)" >&2
+  # Un contexto abre la marcha: crea la BD y prueba el login, reintentando para absorber la ventana entre
+  # "puerto abierto" (pm_wait_sql) y "login listo" del motor recien arrancado. Planning es el dueno del
+  # schema base; si no existiera, sirve el primero del orden estable.
+  boot_line="$(printf '%s\n' "$contexts" | grep -m1 '^src/Modules/Planning/' || true)"
+  [ -n "$boot_line" ] || boot_line="$(printf '%s\n' "$contexts" | head -1)"
+  boot_proj="${boot_line% *}"; boot_ctx="${boot_line##* }"
+  echo "[pm]   ef database update: $boot_ctx (crea BD; espera login)" >&2
   for attempt in 1 2 3 4 5 6; do
     if ( cd "$sln" && dotnet ef database update --no-build \
-          --project "$sln/src/Modules/Planning/03.Infrastructure" --startup-project "$sln/$api" \
-          --context PlanningDbContext --connection "$cs" ); then
+          --project "$sln/$boot_proj" --startup-project "$sln/$api" \
+          --context "$boot_ctx" --connection "$cs" ); then
       break
     fi
     [ "$attempt" = 6 ] && { echo "[pm] EF migrate: el motor no acepto la conexion/login tras varios intentos" >&2; return 1; }
@@ -272,14 +297,17 @@ pm_ef_migrate() {  # uso: pm_ef_migrate <connstr>
     sleep 5
   done
   # Resto de contextos: la BD ya existe y el login funciona; un fallo aqui es genuino (falla rapido).
-  for spec in Demand Catalogs LoadSummary Jobs FeatureManagement; do
-    ctx="${spec}DbContext"; proj="src/Modules/${spec}/03.Infrastructure"
+  while read -r proj ctx; do
+    [ -n "$ctx" ] || continue
+    [ "$ctx" = "$boot_ctx" ] && continue
     echo "[pm]   ef database update: $ctx" >&2
     ( cd "$sln" && dotnet ef database update --no-build \
         --project "$sln/$proj" --startup-project "$sln/$api" \
         --context "$ctx" --connection "$cs" ) || {
       echo "[pm] EF migrate: fallo 'dotnet ef database update' en $ctx" >&2; return 1; }
-  done
+  done <<EOF
+$contexts
+EOF
 }
 
 # NOTA (frontera wrapper/solucion): el orquestador NO escribe dentro de la solucion.
