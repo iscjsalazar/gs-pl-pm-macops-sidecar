@@ -34,31 +34,44 @@
 #   make e2e-up    ... LINEA=<cod> ANOF=<aaaa> SEMF=<sem>       # params reales del disparo (el caso OFF/Oracle los exige)
 #   make e2e-up    ... FORCE=1                                  # re-deploya el legado (re-inyecta wiring; necesario si cambia el slot)
 #   make e2e-smoke WT=<wt-pm>                                   # solo el smoke funcional (ON->backend, OFF->Oracle)
-#   make e2e-down  WT=<wt-pm>                                   # baja tunel + API del slot + puente SQL (singletons intactos)
+#   make e2e-down  WT=<wt-pm>                                   # baja tunel + site + API + Oracle del slot (singletons intactos)
+#   make e2e-oracle-counts WT=<wt-pm>                           # conteos de PGE950RT en el Oracle del slot Y en el singleton
+#                                                               #   (evidencia de aislamiento: corre antes y despues de una carga OFF)
 #   # WT = worktree de pl-programa-maestro (PL.PM.sln) EN develop; LEGACYSRC = fuente del legado EN develop (trae el gateway de Fase 1).
 #   # El shared SQL (nvoslabs) solo escucha en loopback de macdata -> e2e-up levanta un puente socat (BRIDGEPORT=60211) para el guest.
 #   # Inyeccion en el deploy: backendBaseUrl (appSettings) + ConStrPm (Config\connections.config, catalogo pm_planning_wt<N>).
 #
 # Aprovisionamiento aislado por worktree (wt-*; SQL compartido de nvoslabs + bus PM-owned, en macdata):
 #   make wt-up WT=<folder>                    # aprovisiona el entorno del worktree (slot, seed, API); intel-only
+#   make wt-up WT=<folder> ORACLE=1           # + Oracle ControlPiso propio del slot (lazy; la via e2e-up lo enciende)
 #   make wt-up WT=<folder> SOLUTION=<path>    # fuerza la raiz de la solucion del worktree (build de la API)
-#   make wt-down WT=<folder>                  # baja API + BD del worktree; libera el slot (singletons intactos)
+#   make wt-down WT=<folder>                  # baja API + Oracle + BD del worktree; libera el slot (singletons intactos)
+#   make wt-info WT=<folder>                  # imprime la derivacion COMPLETA del slot ("que slot es mio")
 #   make wt-ls                                # lista el registro de slots (folder -> slot)
 #   make wt-status                            # estado de los contenedores PM por worktree y del bus
+#   make wt-gc / make wt-gc FORCE=1           # cruza registro/API/Oracle/sites: lista (o retira) huerfanos
 #   make wt-seed-ln                           # asegura la referencia LN compartida (pm_erpln106) una vez
-#   # Slot 0..N-1 (N=SLOTS, default 4) -> proyecto pm-wt<N>, API :5180+N*10, BD pm_planning_wt<N>, bus prefix wt<N>.
+#   # Slot 0..N-1 (N=SLOTS, default 8) -> proyecto pm-wt<N>, API :5180+N*10, BD pm_planning_wt<N>, bus prefix wt<N>,
+#   #   site IIS pm-wt<N>::8100+N, tunel :18100+N, Oracle pm-wt<N>-oracle-1::15210+N. Ver README (tabla canonica).
 #   # Vars del SQL compartido (override): SHAREDSQL_NET/HOST/PORT/PASSWORD (default red nvoslabsc3-sharedsql-dt, sqlserver:1433).
 #   # WT se autodetecta con git rev-parse si se corre dentro del worktree. Requiere REMOTE=macdata.
 #
 # Legado CargaPlantaPT_LN (legacy-*; data tier solo en intel/macdata):
 #   make legacy-launch                       # todo: data tier (intel) + VM + build + deploy + tunel + URL
 #   make legacy-launch FORCE=1               # fuerza rebuild/redeploy aunque ya este arriba
-#   make legacy-launch SITEPORT=8048 TUNNEL=18048   # puertos no-default
+#   make legacy-launch SLOT=3                # via per-slot: site pm-wt3:8103, arbol C:\wt3, tunel 18103
+#   make legacy-launch SITEPORT=8048 TUNNEL=18048   # puertos no-default (sobreescriben la derivacion)
 #   make legacy-launch DATATIER=0            # no gestiona el data tier (asume ya provisto)
 #   make legacy-status                       # estado de data tier / VM / app / tunel
 #   make legacy-url                          # imprime URL y puertos de acceso
 #   make legacy-build / legacy-deploy / legacy-vm-up / legacy-data-up / legacy-tunnel
-#   make legacy-down                         # cierra el tunel SSH
+#   make legacy-down                         # cierra el tunel SSH y libera el turno del guest singleton
+#   make legacy-site-down SLOT=3             # desmonta el site per-slot del guest (nunca el singleton)
+#   make legacy-sites-status                 # sites 'pm*' del guest cruzados con el registro de slots
+#   make legacy-turn-status / legacy-turn-release   # turno exclusivo del guest singleton (site pm:8080, C:\src)
+#   # Via SINGLETON (sin SLOT): un solo site/arbol/Web.config -> tomado por 'guest-turn' (una sesion a la vez).
+#   # Via PER-SLOT (SLOT=N): sites paralelos, sin turno. En ambas, stage->build->deploy lo serializa un lock
+#   #   que vive en macdata (scripts/guest-lock.sh): MSBuild, IIS y los vCPU de la VM son compartidos.
 #
 # Data tier COMPARTIDO: legacy-data-up lo levanta via pm-run (TARGET=intel). El perfil del legado se
 # controla con LEGACY_PROFILE (default full: requiere Oracle ControlPiso); el de pm con PROFILE (default sql).
@@ -89,19 +102,28 @@ PM_ENV = PM_TARGET=$(TARGET) PM_PROFILE=$(PROFILE) PM_PROJECT=$(PROJECT) \
          WT=$(WT) PM_SOLUTION_DIR='$(SOLUTION)' PM_WRAPPER_DIR='$(WRAPPER)'
 
 # --- Variables legado (legacy-*) ---
+# SLOT vacio = via singleton (site 'pm':8080, arbol C:\src). SLOT=<N> = via per-slot (site 'pm-wt<N>':8100+N).
+# SITEPORT/TUNNEL vacios = los deriva legacy.sh del slot (8100+N / 18100+N) o usa el default singleton
+# (8080/18080). Fijarlos a mano solo para puertos no-default.
+# ATENCION (contrato duro): estas asignaciones son un PREFIJO de la linea de comando, asi que GANAN sobre el
+# entorno heredado. Un valor per-slot (p. ej. el puerto del Oracle del slot) debe viajar como VARIABLE DE MAKE
+# (make legacy-launch ORACLEPORT=15213), nunca por env: el env se pisa aqui en silencio.
 MACDATA       ?= macdata
 WINHOST       ?= 172.16.128.129
-SITEPORT      ?= 8080
-TUNNEL        ?= 18080
+SLOT          ?=
+SITEPORT      ?=
+TUNNEL        ?=
 SQLPORT       ?= 1433
 ORACLEPORT    ?= 1521
+DBHOST        ?= 172.16.128.1
 LEGACY_PROFILE?= full
 DATATIER      ?= 1
 FORCE         ?= 0
 MAX           ?= 40
 
-LEGACY_ENV = PM_LEGACY_MACDATA=$(MACDATA) PM_LEGACY_WINHOST=$(WINHOST) PM_LEGACY_SITE_PORT=$(SITEPORT) \
-             PM_LEGACY_TUNNEL_PORT=$(TUNNEL) PM_LEGACY_SQL_PORT=$(SQLPORT) PM_LEGACY_ORACLE_PORT=$(ORACLEPORT) \
+LEGACY_ENV = PM_LEGACY_MACDATA=$(MACDATA) PM_LEGACY_WINHOST=$(WINHOST) PM_LEGACY_SLOT=$(SLOT) \
+             PM_LEGACY_SITE_PORT=$(SITEPORT) PM_LEGACY_TUNNEL_PORT=$(TUNNEL) \
+             PM_LEGACY_SQL_PORT=$(SQLPORT) PM_LEGACY_ORACLE_PORT=$(ORACLEPORT) PM_LEGACY_DBHOST=$(DBHOST) \
              PM_LEGACY_PROFILE=$(LEGACY_PROFILE) PM_LEGACY_DATATIER=$(DATATIER) PM_LEGACY_FORCE=$(FORCE) \
              WT=$(WT) PM_LEGACY_SRC_LOCAL='$(SOLUTION)' PM_WRAPPER_DIR='$(WRAPPER)'
 
@@ -131,29 +153,35 @@ FLAGFINAL ?= on
 BRIDGEPORT?= 60211
 SQLPMHOST ?=
 
+# PM_E2E_SITE_PORT: e2e.sh ya lo leia pero nadie lo exportaba (el smoke disparaba siempre contra :8080).
 E2E_ORCH_ENV = $(E2E_ENV) WT=$(WT) PM_E2E_LEGACY_SRC='$(LEGACYSRC)' PM_E2E_PLANTA=$(PLANTA) \
                PM_E2E_LINEA='$(LINEA)' PM_E2E_ANOF=$(ANOF) PM_E2E_SEMF=$(SEMF) PM_E2E_FLAG_FINAL=$(FLAGFINAL) \
-               PM_E2E_TUNNEL=$(TUNNEL) PM_E2E_FORCE=$(FORCE) PM_E2E_BRIDGE_PORT=$(BRIDGEPORT) \
-               PM_E2E_SQL_PM_HOST='$(SQLPMHOST)'
+               PM_E2E_TUNNEL='$(TUNNEL)' PM_E2E_SITE_PORT='$(SITEPORT)' PM_E2E_FORCE=$(FORCE) \
+               PM_E2E_BRIDGE_PORT=$(BRIDGEPORT) PM_E2E_SQL_PM_HOST='$(SQLPMHOST)'
 
 # --- Variables aprovisionamiento por worktree (wt-*) ---
+# SLOTS: 8 slots (0..7) -> bloques reservados API 5180+N*10, site 8100+N, tunel 18100+N, Oracle 15210+N.
+# ORACLE=1: aprovisiona el Oracle ControlPiso propio del slot (lazy; la via e2e-up lo enciende siempre).
 WT          ?=
-SLOTS       ?= 4
+SLOTS       ?= 8
+ORACLE      ?= 0
 SOLUTION    ?=
 SHAREDSQL_NET   ?=
 SHAREDSQL_HOST  ?=
 SHAREDSQL_PORT  ?=
 SHAREDSQL_PASSWORD ?=
 
-WT_ENV = $(PM_ENV) WT=$(WT) PM_WT_SLOTS=$(SLOTS) PM_WT_SOLUTION_DIR='$(SOLUTION)' \
+WT_ENV = $(PM_ENV) WT=$(WT) PM_WT_SLOTS=$(SLOTS) PM_WT_ORACLE=$(ORACLE) PM_WT_GC_FORCE=$(FORCE) \
+         PM_WT_SOLUTION_DIR='$(SOLUTION)' \
          PM_SHARED_SQL_NETWORK=$(SHAREDSQL_NET) PM_SHARED_SQL_HOST=$(SHAREDSQL_HOST) \
          PM_SHARED_SQL_PORT=$(SHAREDSQL_PORT) PM_SHARED_SQL_PASSWORD='$(SHAREDSQL_PASSWORD)'
 
 .PHONY: pm-run pm-watch pm-migrate pm-seed pm-api pm-api-down pm-test pm-test-clean pm-format pm-format-check pm-down pm-nuke pm-ps pm-logs pm-port pm-bootstrap-intel \
-        wt-up wt-down wt-ls wt-status wt-seed-ln \
-        e2e-backend e2e-backend-down e2e-net-check e2e-up e2e-smoke e2e-down \
+        wt-up wt-down wt-ls wt-info wt-status wt-gc wt-seed-ln \
+        e2e-backend e2e-backend-down e2e-net-check e2e-up e2e-smoke e2e-down e2e-oracle-counts \
         legacy-launch legacy-data-up legacy-vm-up legacy-build legacy-deploy legacy-diag legacy-diag-logs \
-        legacy-tunnel legacy-status legacy-url legacy-down help
+        legacy-tunnel legacy-status legacy-url legacy-down legacy-site-down legacy-sites-status \
+        legacy-turn-status legacy-turn-heartbeat legacy-turn-release help
 
 # --- data tier + API ---
 pm-run:      ; $(PM_ENV) ./pm.sh run
@@ -200,6 +228,9 @@ e2e-smoke: ; $(E2E_ORCH_ENV) ./scripts/e2e.sh smoke
 e2e-down:  override TARGET  := intel
 e2e-down:  override REMOTE  := macdata
 e2e-down:  ; $(E2E_ORCH_ENV) ./scripts/e2e.sh down
+e2e-oracle-counts: override TARGET := intel
+e2e-oracle-counts: override REMOTE := macdata
+e2e-oracle-counts: ; $(E2E_ORCH_ENV) ./scripts/e2e.sh oracle-counts
 
 # --- aprovisionamiento por worktree (wt-*): intel-only (SQL compartido + bus en macdata) ---
 # 'override TARGET' fuerza intel (el SQL compartido vive en el docker de macdata); REMOTE default macdata
@@ -213,10 +244,14 @@ wt-down:    ; $(WT_ENV) ./wt.sh down
 wt-status:  override TARGET := intel
 wt-status:  REMOTE := macdata
 wt-status:  ; $(WT_ENV) ./wt.sh status
+wt-gc:      override TARGET := intel
+wt-gc:      REMOTE := macdata
+wt-gc:      ; $(WT_ENV) ./wt.sh gc
 wt-seed-ln: override TARGET := intel
 wt-seed-ln: REMOTE := macdata
 wt-seed-ln: ; $(WT_ENV) ./wt.sh seed-ln
 wt-ls:      ; $(WT_ENV) ./wt.sh ls
+wt-info:    ; $(WT_ENV) ./wt.sh info
 
 # --- legado ---
 legacy-launch:    ; $(LEGACY_ENV) ./legacy.sh launch
@@ -230,5 +265,10 @@ legacy-tunnel:    ; $(LEGACY_ENV) ./legacy.sh tunnel
 legacy-status:    ; $(LEGACY_ENV) ./legacy.sh status
 legacy-url:       ; $(LEGACY_ENV) ./legacy.sh url
 legacy-down:      ; $(LEGACY_ENV) ./legacy.sh down
+legacy-site-down:    ; $(LEGACY_ENV) ./legacy.sh site-down
+legacy-sites-status: ; $(LEGACY_ENV) ./legacy.sh sites-status
+legacy-turn-status:    ; $(LEGACY_ENV) ./legacy.sh turn-status
+legacy-turn-heartbeat: ; $(LEGACY_ENV) ./legacy.sh turn-heartbeat
+legacy-turn-release:   ; $(LEGACY_ENV) ./legacy.sh turn-release
 
 help: ; @grep -E '^#' Makefile | sed 's/^# \{0,1\}//'
