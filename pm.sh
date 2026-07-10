@@ -140,6 +140,8 @@ cmd_api_e2e() {        # Opción C (E2E): construye la imagen de la API y la cor
   local dockerfile="$BASE_DIR/e2e/Dockerfile"
   echo "[pm] e2e-backend: build imagen $img (contexto $PM_REMOTE_SSH:$PM_REMOTE_SOLUTION_DIR; primera vez ~varios min) ..."
   on_intel "cd '$PM_REMOTE_SOLUTION_DIR' && docker $ctx build -t '$img' -f- ." < "$dockerfile" || { echo "[pm] e2e-backend: falló el build de la imagen" >&2; return 1; }
+  # Retira las capas dangling que el rebuild del mismo tag deja huerfanas; evita que el disco del VM se sature.
+  on_intel "docker $ctx image prune -f" || true
   echo "[pm] e2e-backend: run contenedor $cname (red $net; sql sqlserver:1433/$PM_PLANNING_DB${sbcs:+; bus servicebus:5672}; publica $PM_API_PORT->8080) ..."
   # La solución solo LEE ASPNETCORE_* / ConnectionStrings__* / ServiceBus__ConnectionString por entorno (frontera intacta).
   on_intel "docker $ctx rm -f '$cname' >/dev/null 2>&1; docker $ctx run -d --name '$cname' --network '$net' -p $PM_API_PORT:8080 -e ASPNETCORE_ENVIRONMENT=IntegrationTest -e ConnectionStrings__Planning='$cs' -e ConnectionStrings__Ln='$ln' -e ServiceBus__ConnectionString='$sbcs' -e Parity__LegacySource='$psrc' -e ConnectionStrings__CtrlPiso='$ctrlcs' $(pm_parity_env_flags) '$img'" || { echo "[pm] e2e-backend: falló el run del contenedor" >&2; return 1; }
