@@ -195,15 +195,33 @@ cmd_test() {           # asegura la API real arriba (M1) y corre dotnet test con
 
 cmd_test_clean() {     # gate "limpio" POR SLOT: aprovisiona el data tier del slot (API fresca + BD + seed +
                        # Oracle/bus), migra determinista por el puente y corre la suite contra la API del slot.
-                       # El singleton pm-local queda DEPRECADO como ambiente de validacion (doc canonico §5): sin
-                       # un worktree con slot el comando falla claro pidiendo wt-up (lo hace wt_resolve_folder).
+                       # El singleton pm-local queda DEPRECADO como ambiente de validacion (doc canonico §5) y el
+                       # gate es slot-mandatorio: sin WT o sin slot asignado en el registro falla en seco (exit 2)
+                       # pidiendo 'make wt-up WT=<worktree>'; el gate NO aprovisiona slots por si mismo.
   # Carga perezosa de la capa de worktrees SOLO para este verbo (aprovisionamiento del slot, puente SQL,
   # derivacion): asi el resto de verbos de pm.sh no heredan su trap INT/TERM ni su superficie.
   . "$(dirname "${BASH_SOURCE[0]}")/lib/worktrees.sh"
+  # Guard slot-mandatorio: corta ANTES de cualquier aprovisionamiento, compose, SSH o build. La consulta del
+  # registro es READ-ONLY (wt_slot_lookup: sin wt_registry_lock de escritura ni asignacion de slot nuevo).
+  local gate_folder gate_slot
+  if ! gate_folder="$(wt_resolve_folder 2>/dev/null)"; then
+    echo "[pm] test-clean: falta WT: el gate corre SIEMPRE sobre el slot del worktree (process-e2e-local-slots.md). Usa: make pm-test-clean WT=<worktree> (aprovisiona antes con make wt-up WT=<worktree>)" >&2
+    return 2
+  fi
+  gate_slot="$(wt_slot_lookup "$gate_folder")"
+  if [ -z "$gate_slot" ]; then
+    if [ ! -f "$WRAPPER_DIR/worktrees/$gate_folder/PL.PM.sln" ]; then
+      echo "[pm] test-clean: el worktree '$gate_folder' no resuelve (no existe $WRAPPER_DIR/worktrees/$gate_folder con marcador PL.PM.sln); revisa WT=<worktree de pl-programa-maestro>" >&2
+    else
+      echo "[pm] test-clean: el worktree $gate_folder no tiene slot asignado: corre primero make wt-up WT=$gate_folder (el gate no aprovisiona slots por si mismo)" >&2
+    fi
+    return 2
+  fi
   wt_require_intel || return 1
-  # 1) Aprovisiona el slot: asigna slot (o reusa el suyo), recrea la API del slot (frescura = el analogo de
-  #    APIFORCE) y siembra la BD. Deja en scope los globals del slot que fija wt_derive: PM_PLANNING_DB
-  #    (pm_planning_wt<N>), PM_PORT_OFFSET, PM_API_PORT (5180+N*10), PM_ORACLE_HOST_PORT (15210+N), WT_SB_PREFIX.
+  # 1) Aprovisiona el slot: reusa el slot ya asignado (el guard de arriba garantiza que existe en el registro),
+  #    recrea la API del slot (frescura = el analogo de APIFORCE) y siembra la BD. Deja en scope los globals del
+  #    slot que fija wt_derive: PM_PLANNING_DB (pm_planning_wt<N>), PM_PORT_OFFSET, PM_API_PORT (5180+N*10),
+  #    PM_ORACLE_HOST_PORT (15210+N), WT_SB_PREFIX.
   echo "[pm] test-clean: aprovisionando el data tier del slot (wt-up) ..."
   cmd_wt_up || return 1
   # 2) Host M1-resoluble hacia macdata: el mDNS del host Intel, NUNCA el alias 'macdata' (D36). Override por SQLHOST.

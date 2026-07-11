@@ -8,7 +8,7 @@
 #   make pm-seed                  # re-seed data-only idempotente (requiere la BD ya migrada)
 #   make pm-api / pm-api-down     # levanta / detiene la API real en ESTA mac (M1)
 #   make pm-test                  # inner-loop: reusa la API si responde + dotnet test (default PROFILE=sql)
-#   make pm-test-clean WT=<worktree>   # GATE limpio POR SLOT: wt-up (slot API+BD+seed+Oracle) + migrate por puente + suite
+#   [WT obligatorio] make pm-test-clean WT=<worktree>   # GATE limpio POR SLOT: wt-up (slot API+BD+seed+Oracle) + migrate por puente + suite; sin WT/slot falla (exit 2)
 #   make pm-test FILTER='FullyQualifiedName~RtSync'   # acota por filtro (inner-loop)
 #   make pm-test APIFORCE=1                            # relanza la API (api-down+api) antes de testear; no reusa
 #   make pm-format               # formatea los .cs modificados vs develop (delega a scripts/format.sh in-repo)
