@@ -35,6 +35,7 @@
 #   make e2e-up    ... LINEA=<cod> ANOF=<aaaa> SEMF=<sem>       # params reales del disparo (el caso OFF/Oracle los exige)
 #   make e2e-up    ... FORCE=1                                  # re-deploya el legado (re-inyecta wiring; necesario si cambia el slot)
 #   make e2e-smoke WT=<wt-pm>                                   # solo el smoke funcional (ON->backend, OFF->Oracle)
+#   make e2e-url   WT=<wt-pm>                                   # reimprime la URL de acceso del slot (re-levanta el tunel si murio)
 #   make e2e-down  WT=<wt-pm>                                   # baja tunel + site + API + Oracle del slot (singletons intactos)
 #   make e2e-oracle-counts WT=<wt-pm>                           # conteos de PGE950RT en el Oracle del slot Y en el singleton
 #                                                               #   (evidencia de aislamiento: corre antes y despues de una carga OFF)
@@ -182,7 +183,7 @@ WT_ENV = $(PM_ENV) WT=$(WT) PM_WT_SLOTS=$(SLOTS) PM_WT_ORACLE=$(ORACLE) PM_WT_GC
 
 .PHONY: pm-run pm-watch pm-migrate pm-seed pm-api pm-api-down pm-test pm-test-clean pm-unit pm-format pm-format-check pm-down pm-nuke pm-ps pm-logs pm-port pm-bootstrap-intel \
         wt-up wt-down wt-ls wt-info wt-status wt-gc wt-seed-ln \
-        e2e-backend e2e-backend-down e2e-net-check e2e-up e2e-smoke e2e-down e2e-oracle-counts \
+        e2e-backend e2e-backend-down e2e-net-check e2e-up e2e-smoke e2e-url e2e-down e2e-oracle-counts \
         legacy-launch legacy-data-up legacy-vm-up legacy-build legacy-deploy legacy-diag legacy-diag-logs \
         legacy-tunnel legacy-status legacy-url legacy-down legacy-site-down legacy-sites-status \
         legacy-turn-status legacy-turn-heartbeat legacy-turn-release help
@@ -232,6 +233,9 @@ e2e-up:    ; $(E2E_ORCH_ENV) ./scripts/e2e.sh up
 e2e-smoke: override TARGET  := intel
 e2e-smoke: override REMOTE  := macdata
 e2e-smoke: ; $(E2E_ORCH_ENV) ./scripts/e2e.sh smoke
+e2e-url:   override TARGET  := intel
+e2e-url:   override REMOTE  := macdata
+e2e-url:   ; $(E2E_ORCH_ENV) ./scripts/e2e.sh url
 e2e-down:  override TARGET  := intel
 e2e-down:  override REMOTE  := macdata
 e2e-down:  ; $(E2E_ORCH_ENV) ./scripts/e2e.sh down
