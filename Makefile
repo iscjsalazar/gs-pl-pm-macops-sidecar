@@ -22,10 +22,10 @@
 #   # Vars del bus/Ln: PM_LN_DB (erpln106), PM_SERVICEBUS_HOST, PM_SB_HOST_PORT (5672+OFFSET), PM_SB_SA_PASSWORD.
 #
 # Backend en modo E2E (Opción C; API co-localizada con el data tier en macdata, alcanzable por el guest legado):
-#   make e2e-backend                         # data tier (intel) + API en macdata; imprime la URL guest (172.16.128.1:5180)
-#   make e2e-backend DATATIER=0              # solo la API (asume el data tier ya arriba)
-#   make e2e-backend APIFORCE=1              # relanza la API en macdata (no reusa la que esté arriba)
-#   make e2e-backend-down                    # detiene la API E2E en macdata
+#   [DEPRECADO] make e2e-backend                         # data tier (intel) + API en macdata; imprime la URL guest (172.16.128.1:5180)
+#   [DEPRECADO] make e2e-backend DATATIER=0              # solo la API (asume el data tier ya arriba)
+#   [DEPRECADO] make e2e-backend APIFORCE=1              # relanza la API en macdata (no reusa la que esté arriba)
+#   [DEPRECADO] make e2e-backend-down                    # detiene la API E2E en macdata
 #   make e2e-net-check                       # smoke de conectividad (M1 + guest -> backend/data tier)
 #   # Prereq: 'dotnet' (SDK .NET 10) y firewall abierto en macdata; 'macdata' resoluble en /etc/hosts del M1 (ver README).
 #

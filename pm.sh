@@ -258,8 +258,9 @@ case "$VERB" in
   seed)     cmd_seed ;;
   api)      cmd_api ;;
   api-down) cmd_api_down ;;
-  e2e-backend)      cmd_e2e_backend ;;
-  e2e-backend-down) cmd_api_e2e_down ;;
+  # Tombstones (deprecacion activa): cortan ANTES de cualquier accion; cmd_e2e_backend/cmd_api_e2e_down permanecen hasta el follow-up de retiro.
+  e2e-backend)      echo "[pm] [DEPRECADO] e2e-backend esta deprecado (process-e2e-local-slots.md §5: no aisla nada; la via por slots la sustituye). Usa: make wt-up WT=<worktree>. Retiro del codigo: follow-up." >&2; exit 2 ;;
+  e2e-backend-down) echo "[pm] [DEPRECADO] e2e-backend-down esta deprecado. El analogo por slot es: make wt-down WT=<worktree>." >&2; exit 2 ;;
   test)       cmd_test "$@" ;;
   test-clean) cmd_test_clean "$@" ;;
   format)       cmd_format "$@" ;;
