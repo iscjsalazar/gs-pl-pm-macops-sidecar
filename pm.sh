@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Orquestador del data tier PM (SQL Server + Oracle) + API real para macOS.
-# Verbos: run [--watch] | migrate | seed | api | api-down | e2e-backend | e2e-backend-down | test | test-clean | format | format-check | down | nuke | ps | logs | port
+# Verbos: run [--watch] | migrate | seed | api | api-down | e2e-backend | e2e-backend-down | test | test-clean | unit | format | format-check | down | nuke | ps | logs | port
 # Target: PM_TARGET=local (colima/desktop) | intel (rsync + docker compose en la mac Intel via SSH)
 #
 #   ./pm.sh run                 # levanta el data tier + migra EF (crea BD/DDL) + seedea data-only (local)
@@ -16,6 +16,7 @@
 #   PM_API_FORCE=1 ./pm.sh test # relanza la API (api-down+api) antes de testear; no reusa la que este arriba
 #   PM_TEST_PROJECT=tests/PL.PM.IntegrationTests/PL.PM.IntegrationTests.csproj ./pm.sh test   # un proyecto
 #   PM_TEST_FILTER='FullyQualifiedName~RtSync' ./pm.sh test                                    # un filtro
+#   ./pm.sh unit                # unit tests puros (*.UnitTests): sin API, sin Docker, sin data tier; PM_TEST_FILTER acota
 #   ./pm.sh down / nuke         # baja el data tier (conserva / borra volumenes)
 #   # Data tier en la mac Intel + API en esta mac (el alias 'macdata' debe resolver como host p/ BD/AMQP: ver README):
 #   PM_TARGET=intel PM_REMOTE_SSH=macdata PM_TEST_SQL_HOST=macdata ./pm.sh run
@@ -249,6 +250,37 @@ cmd_test_clean() {     # gate "limpio" POR SLOT: aprovisiona el data tier del sl
   PM_SKIP_API=1 cmd_test "$@"
 }
 
+cmd_unit() {           # unit tests puros (*.UnitTests): 100% locales en esta mac, sin API, sin Docker y sin
+                       # data tier (contrato: gs-pl-pm-guidelines/testing.md). Anti-molde vs cmd_test: NO asegura
+                       # la API ni exporta variables de conexion (nada de PM_API_BASE_URL / ConnectionStrings__* /
+                       # ServiceBus__* / PM_TEST_SQL*): la suite queda verde con el data tier apagado.
+  command -v dotnet >/dev/null 2>&1 || { echo "[pm] falta 'dotnet' en PATH" >&2; return 2; }
+  # Descubrimiento por convencion: tests/*.UnitTests/*.csproj bajo la raiz de la solucion (resolve_solution_dir,
+  # via load_env: PM_SOLUTION_DIR explicito > WT=<worktree> > CWD en un worktree de codigo > checkout central).
+  local projects=() p
+  while IFS= read -r p; do projects+=("$p"); done \
+    < <(find "$PM_SOLUTION_DIR/tests" -maxdepth 2 -name '*.UnitTests.csproj' 2>/dev/null | sort)
+  if [ "${#projects[@]}" -eq 0 ]; then
+    echo "[pm] unit: ningun *.UnitTests.csproj bajo $PM_SOLUTION_DIR/tests; la raiz resuelta no parece la solucion pl-programa-maestro (revisa WT=<worktree> / PM_SOLUTION_DIR)" >&2
+    return 2
+  fi
+  local args=(); [ -n "${PM_TEST_FILTER:-}" ] && args+=(--filter "$PM_TEST_FILTER")
+  echo "[pm] unit: ${#projects[@]} proyectos *.UnitTests bajo $PM_SOLUTION_DIR/tests (filtro: ${PM_TEST_FILTER:-<todos>})"
+  # Corre TODOS los proyectos aunque alguno falle (reporte completo); exit !=0 si CUALQUIERA fallo.
+  local run=0 green=0 red=0 failed=""
+  for p in "${projects[@]}"; do
+    run=$((run+1))
+    echo "[pm] unit: dotnet test ${p#"$PM_SOLUTION_DIR/"} ..."
+    if dotnet test "$p" -v minimal ${args[@]+"${args[@]}"}; then
+      green=$((green+1))
+    else
+      red=$((red+1)); failed="$failed ${p#"$PM_SOLUTION_DIR/"}"
+    fi
+  done
+  echo "[pm] unit: proyectos corridos=$run verdes=$green rojos=$red${failed:+ (fallaron:$failed)}"
+  [ "$red" -eq 0 ] || return 1
+}
+
 cmd_down() { echo "[pm] down (conserva volumenes y VM) ..."; compose down; }
 cmd_nuke() { echo "[pm] nuke (borra contenedores+volumenes; NO la VM colima) ..."; compose down --volumes --remove-orphans; }
 cmd_ps()   { compose ps; }
@@ -281,6 +313,7 @@ case "$VERB" in
   e2e-backend-down) echo "[pm] [DEPRECADO] e2e-backend-down esta deprecado. El analogo por slot es: make wt-down WT=<worktree>." >&2; exit 2 ;;
   test)       cmd_test "$@" ;;
   test-clean) cmd_test_clean "$@" ;;
+  unit)       cmd_unit ;;
   format)       cmd_format "$@" ;;
   format-check) cmd_format_check "$@" ;;
   down)     cmd_down ;;
@@ -288,5 +321,5 @@ case "$VERB" in
   ps)       cmd_ps ;;
   logs)     cmd_logs ;;
   port)     cmd_port ;;
-  *) echo "uso: $0 {run [--watch]|migrate|seed|api|api-down|e2e-backend|e2e-backend-down|test|test-clean|format|format-check|down|nuke|ps|logs|port}"; exit 2 ;;
+  *) echo "uso: $0 {run [--watch]|migrate|seed|api|api-down|e2e-backend|e2e-backend-down|test|test-clean|unit|format|format-check|down|nuke|ps|logs|port}"; exit 2 ;;
 esac
