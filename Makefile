@@ -8,7 +8,7 @@
 #   make pm-seed                  # re-seed data-only idempotente (requiere la BD ya migrada)
 #   make pm-api / pm-api-down     # levanta / detiene la API real en ESTA mac (M1)
 #   make pm-test                  # inner-loop: reusa la API si responde + dotnet test (default PROFILE=sql)
-#   make pm-test-clean            # GATE limpio: pm-run (up+seed) + API fresca + TODA la suite (fija PROFILE=full)
+#   make pm-test-clean WT=<worktree>   # GATE limpio POR SLOT: wt-up (slot API+BD+seed+Oracle) + migrate por puente + suite
 #   make pm-test FILTER='FullyQualifiedName~RtSync'   # acota por filtro (inner-loop)
 #   make pm-test APIFORCE=1                            # relanza la API (api-down+api) antes de testear; no reusa
 #   make pm-format               # formatea los .cs modificados vs develop (delega a scripts/format.sh in-repo)
@@ -191,9 +191,11 @@ pm-seed:     ; $(PM_ENV) ./pm.sh seed                 # re-seed data-only (requi
 pm-api:      ; $(PM_ENV) ./pm.sh api
 pm-api-down: ; $(PM_ENV) ./pm.sh api-down
 pm-test:     ; $(PM_ENV) ./pm.sh test
-pm-test-clean: PROFILE  := full
-pm-test-clean: APIFORCE := 1
-pm-test-clean: ; $(PM_ENV) ./pm.sh test-clean
+pm-test-clean: override TARGET := intel        # el data tier del slot vive en macdata (como wt-up)
+pm-test-clean: REMOTE  := macdata
+pm-test-clean: PROFILE := full
+pm-test-clean: ORACLE  := 1                     # gate full: aprovisiona el Oracle ControlPiso del slot
+pm-test-clean: ; $(WT_ENV) ./pm.sh test-clean   # gate limpio POR SLOT (WT=<worktree pl-programa-maestro>)
 pm-format:       ; $(PM_ENV) ./pm.sh format          # formatea .cs modificados vs develop (delega a scripts/format.sh in-repo)
 pm-format-check: ; $(PM_ENV) ./pm.sh format-check    # gate de formato changed-vs-develop (delega a scripts/format-check.sh)
 pm-down:     ; $(PM_ENV) ./pm.sh down

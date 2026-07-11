@@ -183,44 +183,13 @@ cmd_oracle_counts(){
 
 # --- puente SQL (socat) para que el guest alcance el SQL compartido (loopback de macdata) ---
 
-# Un contenedor socat unido a la red del SQL compartido publica 0.0.0.0:BRIDGE_PORT -> sqlserver:1433, asi el
-# guest lo ve por la pasarela NAT (172.16.128.1:BRIDGE_PORT). Idempotente.
-#
-# El puente es COMPARTIDO por todos los slots. El 'docker rm -f' incondicional que hacia esta funcion mataba el
-# puente recien creado por otra sesion (blip del 60211 -> los demas frontends leen el flag como OFF en
-# silencio). Ahora: se crea SOLO si esta ausente, bajo lock, y ante 'name already in use' se adopta el ajeno.
-_e2e_bridge_up_locked(){
-  local ctx; ctx="$(remote_docker_ctx)"
-  if on_intel "[ \"\$(docker $ctx inspect -f '{{.State.Running}}' '$BRIDGE_NAME' 2>/dev/null)\" = true ]" 2>/dev/null; then
-    elog "puente SQL ya arriba ($BRIDGE_NAME en :$BRIDGE_PORT)"; return 0
-  fi
-  # Existe pero no corre (o quedo a medias): recrearlo es seguro, nadie lo esta usando.
-  on_intel "docker $ctx inspect '$BRIDGE_NAME' >/dev/null 2>&1 && docker $ctx rm -f '$BRIDGE_NAME' >/dev/null 2>&1; true"
-  elog "puente SQL: asegurando imagen $BRIDGE_IMAGE ..."
-  on_intel "docker $ctx image inspect '$BRIDGE_IMAGE' >/dev/null 2>&1 || docker $ctx pull '$BRIDGE_IMAGE'" \
-    || edie "no se pudo obtener la imagen del puente ($BRIDGE_IMAGE); macdata sin internet? fija PM_E2E_BRIDGE_IMAGE a una imagen socat presente"
-  elog "puente SQL: $BRIDGE_NAME (red $PM_SHARED_SQL_NETWORK; publica $BRIDGE_PORT -> $PM_SHARED_SQL_HOST:$PM_SHARED_SQL_PORT) ..."
-  if ! on_intel "docker $ctx run -d --name '$BRIDGE_NAME' --network '$PM_SHARED_SQL_NETWORK' -p '$BRIDGE_PORT:1433' --restart unless-stopped '$BRIDGE_IMAGE' TCP-LISTEN:1433,fork,reuseaddr TCP:$PM_SHARED_SQL_HOST:$PM_SHARED_SQL_PORT >/dev/null"; then
-    # Carrera con otra sesion: si el suyo quedo corriendo, se adopta en vez de fallar.
-    if on_intel "[ \"\$(docker $ctx inspect -f '{{.State.Running}}' '$BRIDGE_NAME' 2>/dev/null)\" = true ]" 2>/dev/null; then
-      elog "puente SQL lo creo otra sesion en paralelo; se adopta ($BRIDGE_NAME)"
-      return 0
-    fi
-    edie "fallo al levantar el puente SQL ($BRIDGE_NAME)"
-  fi
-}
-e2e_bridge_up(){ wt_lock bridge _e2e_bridge_up_locked; }
-
-# Opt-in: por default el puente queda arriba como singleton administrado (mismo trato que el bus). Bajarlo
-# desde un e2e-down cortaria la lectura del flag de TODOS los demas slots.
-e2e_bridge_down(){
-  if [ "$BRIDGE_DOWN" != "1" ]; then
-    elog "puente SQL conservado ($BRIDGE_NAME; singleton compartido). PM_E2E_BRIDGE_DOWN=1 para bajarlo."
-    return 0
-  fi
-  local ctx; ctx="$(remote_docker_ctx)"
-  on_intel "docker $ctx rm -f '$BRIDGE_NAME' >/dev/null 2>&1; true" && elog "puente SQL bajado ($BRIDGE_NAME)"
-}
+# El puente SQL vive factorizado en lib/worktrees.sh (wt_bridge_up/_down): lo comparten esta via e2e y el gate
+# por slot (pm.sh test-clean). Estos shims preservan los nombres/call-sites de este driver; la config (nombre,
+# puerto, imagen, PM_E2E_BRIDGE_DOWN) sigue viajando por las mismas variables PM_E2E_BRIDGE_* que lee la lib.
+# wt_bridge_up usa wt_die (return); este driver aborta el flujo si el puente no queda arriba (paridad con el
+# 'edie' original), porque sin puente el legado leeria el flag como OFF en silencio.
+e2e_bridge_up(){ wt_bridge_up || edie "no se pudo asegurar el puente SQL ($BRIDGE_NAME)"; }
+e2e_bridge_down(){ wt_bridge_down; }
 
 # Prueba TCP desde el guest hacia un host:puerto de macdata (pasarela NAT). Aborta si no conecta.
 e2e_check_guest_tcp(){  # uso: e2e_check_guest_tcp <host> <puerto> <etiqueta>

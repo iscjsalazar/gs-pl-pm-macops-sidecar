@@ -12,7 +12,7 @@
 #   PM_TARGET=intel PM_REMOTE_SSH=macdata ./pm.sh e2e-backend       # data tier (intel) + API en macdata
 #   PM_TARGET=intel PM_REMOTE_SSH=macdata ./pm.sh e2e-backend-down  # detiene la API E2E en macdata
 #   ./pm.sh test                # asegura la API arriba y corre dotnet test (toda la suite) contra ella
-#   ./pm.sh test-clean          # gate limpio: run (up+seed) + API fresca + suite (perfil full / force los fija el Makefile)
+#   WT=<worktree> ./pm.sh test-clean   # gate limpio POR SLOT: wt-up (slot API+BD+seed+Oracle) + migrate por puente + suite
 #   PM_API_FORCE=1 ./pm.sh test # relanza la API (api-down+api) antes de testear; no reusa la que este arriba
 #   PM_TEST_PROJECT=tests/PL.PM.IntegrationTests/PL.PM.IntegrationTests.csproj ./pm.sh test   # un proyecto
 #   PM_TEST_FILTER='FullyQualifiedName~RtSync' ./pm.sh test                                    # un filtro
@@ -185,15 +185,47 @@ cmd_test() {           # asegura la API real arriba (M1) y corre dotnet test con
   # Con perfil full viaja tambien la connstring Oracle del data tier: habilita la prueba de
   # integracion de la fuente viva de paridad (sin ella esa prueba se salta).
   local ctrlcs=""; [ "$PM_PROFILE" = "full" ] && ctrlcs="$(pm_ctrlpiso_connstr)"
+  # ServiceBus__SubscriptionPrefix aisla los topics/subscriptions del bus compartido por slot (wt<N>). En modo
+  # slot (cmd_test_clean) lo fija wt_derive; en la via singleton (pm-test) va vacio = sin prefijo.
   PM_API_BASE_URL="$base" PM_TEST_SQL="$cs" ConnectionStrings__Planning="$cs" \
     ConnectionStrings__Ln="$(pm_ln_connstr)" ServiceBus__ConnectionString="$sbcs" \
+    ServiceBus__SubscriptionPrefix="${WT_SB_PREFIX:-}" \
     ConnectionStrings__CtrlPiso="$ctrlcs" dotnet "${args[@]}" "$@"
 }
 
-cmd_test_clean() {     # gate "limpio": data tier up+seed -> API fresca -> suite. PM_PROFILE=full y PM_API_FORCE=1 los fija el target pm-test-clean.
-  echo "[pm] test-clean: ambiente limpio (data tier up+seed -> API fresca -> suite; perfil $PM_PROFILE)"
-  cmd_run
-  cmd_test "$@"
+cmd_test_clean() {     # gate "limpio" POR SLOT: aprovisiona el data tier del slot (API fresca + BD + seed +
+                       # Oracle/bus), migra determinista por el puente y corre la suite contra la API del slot.
+                       # El singleton pm-local queda DEPRECADO como ambiente de validacion (doc canonico §5): sin
+                       # un worktree con slot el comando falla claro pidiendo wt-up (lo hace wt_resolve_folder).
+  # Carga perezosa de la capa de worktrees SOLO para este verbo (aprovisionamiento del slot, puente SQL,
+  # derivacion): asi el resto de verbos de pm.sh no heredan su trap INT/TERM ni su superficie.
+  . "$(dirname "${BASH_SOURCE[0]}")/lib/worktrees.sh"
+  wt_require_intel || return 1
+  # 1) Aprovisiona el slot: asigna slot (o reusa el suyo), recrea la API del slot (frescura = el analogo de
+  #    APIFORCE) y siembra la BD. Deja en scope los globals del slot que fija wt_derive: PM_PLANNING_DB
+  #    (pm_planning_wt<N>), PM_PORT_OFFSET, PM_API_PORT (5180+N*10), PM_ORACLE_HOST_PORT (15210+N), WT_SB_PREFIX.
+  echo "[pm] test-clean: aprovisionando el data tier del slot (wt-up) ..."
+  cmd_wt_up || return 1
+  # 2) Host M1-resoluble hacia macdata: el mDNS del host Intel, NUNCA el alias 'macdata' (D36). Override por SQLHOST.
+  local m1host="$PM_TEST_SQL_HOST"
+  case "$m1host" in ""|127.0.0.1|localhost|macdata) m1host="macbook-pro-de-diana.local" ;; esac
+  # 3) Puente 60211 -> SQL compartido (idempotente, adopt-if-present, bajo wt_lock bridge; factorizado en lib/).
+  local bport pw; bport="$(wt_bridge_port)"
+  wt_bridge_up || return 1
+  pw="$(wt_shared_sql_password)" || return 1
+  # 4) Redirige los helpers de connstring/test hacia el slot: BD del slot por el puente, SA del SQL compartido,
+  #    Oracle/bus/API del slot por el host M1-resoluble. PM_PLANNING_DB/PM_API_PORT/PM_ORACLE_HOST_PORT/WT_SB_PREFIX
+  #    ya los fijo wt_derive dentro de cmd_wt_up.
+  PM_TEST_SQL_HOST="$m1host"; PM_SQL_HOST_PORT="$bport"; PM_SQL_SA_PASSWORD="$pw"
+  PM_SERVICEBUS_HOST="$m1host"; PM_SB_HOST_PORT="$PM_WT_BUS_HOST_PORT"; PM_API_HOST="$m1host"
+  echo "[pm] test-clean: slot -> BD $PM_PLANNING_DB via puente $m1host:$bport | API $m1host:$PM_API_PORT | Oracle $m1host:$PM_ORACLE_HOST_PORT | bus $m1host:$PM_SB_HOST_PORT prefix ${WT_SB_PREFIX:-<none>}"
+  # 5) Migraciones EF deterministas contra la BD del slot por el puente (pm_ef_migrate descubre los 7 contextos,
+  #    incluye FeatureManagement -> absorbe el puente temporal e2e_ensure_flag_schema). Idempotente sobre lo que
+  #    la API ya aplico al arrancar; garantiza el esquema completo antes de la suite.
+  pm_ef_migrate "$(pm_planning_connstr)" || return 1
+  # 6) Suite contra la API del slot (ya arriba: PM_SKIP_API=1 evita relanzar una API local). cmd_test arma la
+  #    superficie de env del slot (PM_API_BASE_URL, ConnectionStrings__*, ServiceBus__* + SubscriptionPrefix).
+  PM_SKIP_API=1 cmd_test "$@"
 }
 
 cmd_down() { echo "[pm] down (conserva volumenes y VM) ..."; compose down; }

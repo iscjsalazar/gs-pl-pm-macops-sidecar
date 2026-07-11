@@ -279,6 +279,52 @@ wt_ensure_bus() {
     || { wt_die "fallo al levantar el bus PM-owned"; return 1; }
 }
 
+# --- Puente SQL compartido (socat: macdata:<port> -> shared SQL:1433) ---
+
+# Singleton administrado (mismo trato que el bus). Publica el SQL compartido (nvoslabs) en un puerto de macdata
+# para que lo alcancen el guest (pasarela NAT 172.16.128.1:<port>) y la M1 (macbook-pro-de-diana.local:<port>).
+# Lo comparten la via e2e (scripts/e2e.sh) y el gate por slot (pm.sh test-clean). Config por entorno, compatible
+# con la via e2e: PM_E2E_BRIDGE_PORT / _NAME / _IMAGE.
+wt_bridge_port()  { printf '%s' "${PM_E2E_BRIDGE_PORT:-60211}"; }
+wt_bridge_name()  { printf '%s' "${PM_E2E_BRIDGE_NAME:-pm-e2e-sqlbridge}"; }
+wt_bridge_image() { printf '%s' "${PM_E2E_BRIDGE_IMAGE:-alpine/socat}"; }
+
+# Idempotente, adopt-if-present, bajo 'wt_lock bridge'. El puente es COMPARTIDO: un 'docker rm -f' incondicional
+# mataria el puente recien creado por otra sesion (blip del 60211 -> los demas frontends leen el flag como OFF).
+# Se crea SOLO si esta ausente y ante 'name already in use' se adopta el ajeno.
+_wt_bridge_up_locked() {
+  local ctx port name image; ctx="$(remote_docker_ctx)"
+  port="$(wt_bridge_port)"; name="$(wt_bridge_name)"; image="$(wt_bridge_image)"
+  if on_intel "[ \"\$(docker $ctx inspect -f '{{.State.Running}}' '$name' 2>/dev/null)\" = true ]" 2>/dev/null; then
+    wt_log "puente SQL ya arriba ($name en :$port)"; return 0
+  fi
+  # Existe pero no corre (o quedo a medias): recrearlo es seguro, nadie lo esta usando.
+  on_intel "docker $ctx inspect '$name' >/dev/null 2>&1 && docker $ctx rm -f '$name' >/dev/null 2>&1; true"
+  wt_log "puente SQL: asegurando imagen $image ..."
+  on_intel "docker $ctx image inspect '$image' >/dev/null 2>&1 || docker $ctx pull '$image'" \
+    || { wt_die "no se pudo obtener la imagen del puente ($image); macdata sin internet? fija PM_E2E_BRIDGE_IMAGE a una imagen socat presente"; return 1; }
+  wt_log "puente SQL: $name (red $PM_SHARED_SQL_NETWORK; publica $port -> $PM_SHARED_SQL_HOST:$PM_SHARED_SQL_PORT) ..."
+  if ! on_intel "docker $ctx run -d --name '$name' --network '$PM_SHARED_SQL_NETWORK' -p '$port:1433' --restart unless-stopped '$image' TCP-LISTEN:1433,fork,reuseaddr TCP:$PM_SHARED_SQL_HOST:$PM_SHARED_SQL_PORT >/dev/null"; then
+    # Carrera con otra sesion: si el suyo quedo corriendo, se adopta en vez de fallar.
+    if on_intel "[ \"\$(docker $ctx inspect -f '{{.State.Running}}' '$name' 2>/dev/null)\" = true ]" 2>/dev/null; then
+      wt_log "puente SQL lo creo otra sesion en paralelo; se adopta ($name)"; return 0
+    fi
+    wt_die "fallo al levantar el puente SQL ($name)"; return 1
+  fi
+}
+wt_bridge_up() { wt_lock bridge _wt_bridge_up_locked; }
+
+# Opt-in (PM_E2E_BRIDGE_DOWN=1): por default el puente queda arriba como singleton administrado. Bajarlo desde
+# un e2e-down/gate cortaria la lectura del flag de TODOS los demas slots.
+wt_bridge_down() {
+  local ctx name; name="$(wt_bridge_name)"
+  if [ "${PM_E2E_BRIDGE_DOWN:-0}" != "1" ]; then
+    wt_log "puente SQL conservado ($name; singleton compartido). PM_E2E_BRIDGE_DOWN=1 para bajarlo."; return 0
+  fi
+  ctx="$(remote_docker_ctx)"
+  on_intel "docker $ctx rm -f '$name' >/dev/null 2>&1; true" && wt_log "puente SQL bajado ($name)"
+}
+
 # --- Oracle ControlPiso por worktree (lazy: solo con PM_WT_ORACLE=1) ---
 
 # La imagen wnameless/oracle-xe-11g-r2 no exporta ORACLE_HOME ni sqlplus en el PATH del contenedor.
