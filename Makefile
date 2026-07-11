@@ -224,7 +224,7 @@ pm-logs:     ; $(PM_ENV) ./pm.sh logs
 pm-port:     ; $(PM_ENV) ./pm.sh port
 pm-bootstrap-intel: ; @test -n "$(REMOTE)" || { echo "falta REMOTE=<host-ssh-intel>"; exit 2; }; ssh $(REMOTE) 'bash -s' < remote-intel/bootstrap-intel.sh
 
-# --- backend en modo E2E (Opción C): API en macdata, alcanzable por el guest ---
+# --- backend en modo E2E (Opción C, DEPRECADA): API en macdata, alcanzable por el guest ---
 # 'override' fija el contrato del modo E2E aun frente a un override de línea de comando (TARGET/REMOTE/PROFILE
 # deben ser intel/macdata/full); el host del SQL en E2E lo fuerza el driver (pm.sh cmd_api_e2e), no esta capa.
 e2e-backend:      override TARGET  := intel
