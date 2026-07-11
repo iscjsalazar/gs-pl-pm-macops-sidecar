@@ -66,14 +66,14 @@ gs-pl-pm-macops-sidecar/
 | `make pm-seed` | Re-siembra el SQL (idempotente). |
 | `make pm-api` / `make pm-api-down` | Levanta / detiene la API real en esta máquina (M1). |
 | `make pm-test` | Inner-loop: reusa la API si responde y corre `dotnet test` (default `PROFILE=sql`; acota con `FILTER=`/`TESTPROJECT=`, fuerza API con `APIFORCE=1`). |
-| `make pm-test-clean` | **Gate** limpio: `pm-run` (up+seed) + API fresca (`api-down`+`api`) + toda la suite con `PROFILE=full` (Oracle + bus). |
+| `make pm-test-clean WT=<worktree>` | **Gate** por slot: reusa `cmd_wt_up` (API fresca + BD `pm_planning_wt<N>` + seed + Oracle/bus del slot) + `pm_ef_migrate` por el puente SQL `60211` + toda la suite (`PROFILE=full`). Fuerza `TARGET=intel REMOTE=macdata ORACLE=1`; sustituye al singleton `pm-local` como ambiente de validación. |
 | `make pm-down` / `make pm-nuke` | Baja el data tier (conserva / borra volúmenes). |
 | `make pm-ps` / `make pm-logs` / `make pm-port` | Estado / logs / puertos publicados del data tier. |
 | `make pm-bootstrap-intel REMOTE=macdata` | Aprovisiona colima/docker en la mac Intel (una vez). |
 
 ```bash
-# Gate (check verde): ambiente limpio de cero
-make pm-test-clean
+# Gate (check verde) por slot: ambiente limpio del slot del worktree
+make pm-test-clean WT=<worktree>
 
 # Inner-loop: data tier arriba + iterar tests (rápido, sql)
 make pm-run
@@ -84,11 +84,11 @@ make pm-test TESTPROJECT=tests/PL.PM.IntegrationTests/PL.PM.IntegrationTests.csp
 # Data tier en la mac Intel (macdata) + API en esta máquina
 #   requiere 'macdata' resoluble como host (ver §Requisito de host)
 make pm-run TARGET=intel REMOTE=macdata SQLHOST=macdata
-make pm-test-clean SQLHOST=macdata
+make pm-test SQLHOST=macdata
 
 # Dos stacks en paralelo (offset desplaza puertos de SQL/Oracle/API/bus)
 make pm-run PROJECT=pm-ag2 OFFSET=10
-make pm-test-clean PROJECT=pm-ag2 OFFSET=10
+make pm-test PROJECT=pm-ag2 OFFSET=10
 ```
 
 ## Comandos — legado `CargaPlantaPT_LN` (`legacy-*`)
@@ -127,6 +127,9 @@ está protegida por un **turno exclusivo** (`tools/guest-turn/guest-turn.sh`, mi
 por `mkdir`, identidad por pid + `lstart`, heartbeat con TTL, reclamo por `mv` al *graveyard* — nunca `rm`). Una
 segunda sesión que intente `legacy-launch`/`build`/`deploy` sobre el singleton recibe **exit 3** y no toca nada. El
 turno se **mantiene** mientras la sesión usa el sitio y se libera con `make legacy-down` o `make legacy-turn-release`.
+`guest-turn.sh status` reporta **siempre** la edad de retención y, superado `GUEST_TURN_HOLD_WARN` (default 14400 s / 4 h),
+imprime `AVISO: RETENCION PROLONGADA` con el comando de rescate (`release` propio; `release --force --reason` ajeno);
+el aviso está cableado también en `make legacy-sites-status` y en `make wt-gc`.
 
 A diferencia de `deploy-turn`, el reclamo automático exige que el **proceso dueño esté muerto**. Un turno cuyo
 heartbeat envejeció pero cuya dueña sigue viva **no se roba**: esa sesión probablemente esté navegando la UI, y
@@ -160,7 +163,7 @@ API recibe su configuración sólo por entorno (`ASPNETCORE_*`, `ConnectionStrin
 | `make e2e-backend DATATIER=0` | Sólo la API (asume el data tier ya arriba y su red creada). |
 | `make e2e-backend APIFORCE=1` | Recrea el contenedor de la API (no reusa el que esté arriba). |
 | `make e2e-backend-down` | Elimina el contenedor de la API E2E en `macdata`. |
-| `make e2e-net-check` | Smoke de conectividad: M1 → data tier/API y guest → backend/data tier (`PROFILE=full`). |
+| `make e2e-net-check` | Smoke de conectividad: M1 → data tier/API y guest → backend/data tier (`PROFILE=full`). En modo slot (con `WT` / dentro de `e2e-up`) hace **SKIP** de los checks del data tier por offset en vez de fallar sobre puertos inexistentes en la vía wt. |
 
 ```bash
 make e2e-backend            # data tier (intel) + contenedor de la API en macdata; guest -> http://172.16.128.1:5180
@@ -237,7 +240,7 @@ La fórmula `1521+offset` de `compute_ports` (`lib/common.sh`) sirve a los stack
 | `make wt-info WT=<folder>` | Imprime la derivación completa del slot: API, BD, bus, Oracle, site IIS, túnel, rutas del guest, y la sección **Presupuesto** (topes reales: disco/RAM de la VM colima, `docker` reclamable, contadores del guest, slots vivos). |
 | `make wt-ls` | Lista el registro de slots (`folder → slot`) y una línea de resumen de presupuesto (disco libre de la VM colima + slots vivos/`SLOTS`). |
 | `make wt-status` | Estado de los contenedores PM por worktree (API y Oracle) y del bus. |
-| `make wt-gc` / `make wt-gc FORCE=1` | Cruza los cuatro planos (registro · contenedores API · contenedores Oracle · sites IIS y túneles) y lista los huérfanos; con `FORCE=1` los retira. |
+| `make wt-gc` / `make wt-gc FORCE=1` | Cruza los cuatro planos (registro · contenedores API · contenedores Oracle · sites IIS y túneles) y lista los huérfanos; con `FORCE=1` los retira. Toma snapshot del registro bajo `wt_registry_lock` y acota el barrido de túneles por `PM_WT_SLOTS_MAX` (mantiene fuera el túnel singleton `18080` y el puente `60211`). Retorna exit≠0 si no pudo limpiar un huérfano (0 si nada). Guard crítico: si el registro es no legible o no adquiere el lock, con `FORCE=1` **aborta sin retirar** (evita `docker rm -f` en masa de sesiones vivas). |
 | `make wt-seed-ln` | Asegura la referencia LN compartida `pm_erpln106` (paso deliberado de una vez; idempotente). |
 
 ```bash
@@ -403,6 +406,9 @@ los drivers. Los puertos del data tier se derivan en un solo lugar (`compute_por
 
 Env-only (sin var `make` corta, se pasa por entorno): `PM_WT_MIN_DISK_GB` (default `6`) — umbral del gate de disco
 de `wt-up` sobre la VM colima; ver §Topes operativos. Ej.: `PM_WT_MIN_DISK_GB=8 make wt-up WT=<folder>`.
+`PM_WT_SLOTS_MAX` (default `8`) — cota superior del bloque de slots/túneles que escanea `wt-gc` (mantiene el túnel
+singleton `18080` y el puente `60211` fuera de la detección de huérfanos). `GUEST_TURN_HOLD_WARN` (default `14400`,
+segundos) — umbral del aviso de retención prolongada del turno del guest.
 
 ### Variables de entorno del bus / Ln (data tier `full`)
 
@@ -429,8 +435,10 @@ pasarela NAT (`172.16.128.1`), no por la IP LAN del M1: no hace falta tocar el f
 
 ## Gate vs inner-loop
 
-- **`make pm-test-clean`** es el **gate**: levanta+seedea el data tier, relanza la API fresca y corre toda la
-  suite con `PROFILE=full` (Oracle + Service Bus). Único comando para "¿pasa todo en limpio?".
+- **`make pm-test-clean WT=<worktree>`** es el **gate por slot**: reusa el aprovisionamiento del slot (API fresca
+  + BD `pm_planning_wt<N>` + seed + Oracle/bus del slot) + `pm_ef_migrate` por el puente `60211`, y corre toda la
+  suite con `PROFILE=full` (Oracle + Service Bus). Único comando para "¿pasa todo en limpio?" en el slot aislado;
+  fuerza `TARGET=intel REMOTE=macdata ORACLE=1` y sustituye al singleton `pm-local` como ambiente de validación.
 - **`make pm-test`** es el **inner-loop**: rápido, `PROFILE=sql`, reusa la API arriba; acota con
   `FILTER=`/`TESTPROJECT=` (o `APIFORCE=1` para relanzar la API). La suite de mensajería sólo corre con `full`.
 
