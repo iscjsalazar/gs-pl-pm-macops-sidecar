@@ -29,6 +29,7 @@ case "$SLOT" in
   '') : ;;
   *[!0-9]*) printf 'ERROR: PM_LEGACY_SLOT no numerico: %s\n' "$SLOT" >&2; exit 2 ;;
 esac
+SINGLETON="${PM_LEGACY_SINGLETON:-0}"                         # 1 = escape deliberado a la via singleton en launch/build/deploy
 
 # Bases de puertos dedicadas por slot. NO se derivan de 8080/1521: 8080+N choca con el singleton 'pm':8080 y
 # 8080+N*10 con 'pmpub':8090; 1521+offset choca con pm-local-oracle-1 (slot 0) y pm-arts-rt-oracle-1 (slot 5).
@@ -144,6 +145,23 @@ sync_lock_script(){
   ssh_md "mkdir -p $HW_REMOTE/scripts" || true
   rsync -a -e ssh "$HERE/scripts/guest-lock.sh" "$MACDATA:$HW_REMOTE/scripts/guest-lock.sh" \
     || die "fallo el sync de guest-lock.sh hacia $MACDATA"
+}
+
+# --- Guard de SLOT en launch/build/deploy ------------------------------------
+# Sin SLOT estos verbos fallan en seco ANTES de tomar guest-turn y de cualquier accion remota: la via
+# singleton esta deprecada (process-e2e-local-slots.md §5). El escape SINGLETON=1 la habilita deliberadamente
+# con warning y sin alterar su comportamiento (toma y RETIENE guest-turn).
+require_slot(){
+  local verb="$1"
+  [ -n "$SLOT" ] && return 0
+  if [ "$SINGLETON" = "1" ]; then
+    warn "[VIA LEGADA] corriendo sobre el singleton (site pm:8080, arbol C:\\src): toma y retiene guest-turn hasta make legacy-down / make legacy-turn-release (deprecada por process-e2e-local-slots.md §5)"
+    return 0
+  fi
+  printf 'ERROR: falta SLOT: usa make legacy-%s SLOT=<N> (deriva el slot de tu worktree con make wt-info WT=<wt>).\n' "$verb" >&2
+  printf '       La via singleton (site pm:8080, arbol C:\\src) esta deprecada (process-e2e-local-slots.md §5) y\n' >&2
+  printf '       ademas toma y RETIENE guest-turn; para usarla deliberadamente: make legacy-%s SINGLETON=1\n' "$verb" >&2
+  exit 2
 }
 
 # --- Turno del guest singleton (lock en la M1) -------------------------------
@@ -441,11 +459,11 @@ EOF
 }
 
 case "${1:-}" in
-  launch)   launch ;;
+  launch)   require_slot launch; launch ;;
   data-up)  data_up ;;
   vm-up)    vm_up ;;
-  build)    guest_turn_acquire; stage_build; guest_lock_release ;;
-  deploy)   guest_turn_acquire; deploy; guest_lock_release ;;
+  build)    require_slot build; guest_turn_acquire; stage_build; guest_lock_release ;;
+  deploy)   require_slot deploy; guest_turn_acquire; deploy; guest_lock_release ;;
   diag)     diag ;;
   diag-logs) diag_logs ;;
   tunnel)   tunnel_up ;;
