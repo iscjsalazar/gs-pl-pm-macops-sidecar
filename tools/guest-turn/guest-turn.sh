@@ -41,6 +41,12 @@ POLL_SECONDS=10
 # 'release --force --reason "<texto>"', que exige orden explicita del usuario y queda en la bitacora.
 STEAL_STALE="${GUEST_TURN_STEAL_STALE:-0}"
 
+# Edad de RETENCION del turno (ahora - acquired_epoch), independiente del heartbeat: una duena viva pero
+# abandonada sostiene el turno sin limite (por diseno launch/build/deploy lo retienen hasta down/release).
+# Superado este umbral, 'status', 'legacy.sh sites-status' y 'wt-gc' lo marcan como retencion prolongada e
+# imprimen el comando de rescate. Solo AVISA: no reintroduce el robo automatico a una duena viva.
+GUEST_TURN_HOLD_WARN="${GUEST_TURN_HOLD_WARN:-14400}"   # 4 h: el doble de la validacion mas larga observada
+
 info() { printf '\033[1;34m==>\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; exit "${2:-1}"; }
@@ -63,6 +69,10 @@ Subcomandos:
       pero abandonado.
   status
       Muestra si el turno esta libre u ocupado (duena, tag, edades, vitalidad).
+      Marca RETENCION PROLONGADA si la edad de retencion supera ${GUEST_TURN_HOLD_WARN}s.
+  hold-warn
+      Imprime el aviso de retencion prolongada (si aplica) para embeberlo en
+      sites-status / wt-gc; vacio si esta libre o por debajo del umbral.
   heartbeat
       Refresca el heartbeat del turno propio (sesiones largas de uso del site).
   check-held-by-me
@@ -150,6 +160,28 @@ lock_dir_age() {
   echo $(( $(date +%s) - m ))
 }
 
+# Edad de retencion del turno actual (ahora - acquired_epoch). 0 si no hay epoch (lock viejo o sin owner).
+hold_age() {
+  [ -n "${OWNER_EPOCH:-}" ] || { echo 0; return; }
+  echo $(( $(date +%s) - OWNER_EPOCH ))
+}
+
+# Imprime (a stdout) el aviso de retencion prolongada si el turno lleva tomado mas de GUEST_TURN_HOLD_WARN;
+# nada si esta libre o por debajo del umbral. Self-contained (lee el owner). Lo consumen el verbo 'hold-warn'
+# (para sites-status y wt-gc) y 'print_status'. Solo avisa; el rescate exige orden explicita del usuario.
+print_hold_warn() {
+  read_owner 2>/dev/null || return 0
+  local age; age=$(hold_age)
+  [ "$age" -gt "$GUEST_TURN_HOLD_WARN" ] 2>/dev/null || return 0
+  printf 'RETENCION PROLONGADA del turno del guest: %ss tomado por %s (umbral %ss).\n' \
+    "$age" "${OWNER_TAG:-?}" "$GUEST_TURN_HOLD_WARN"
+  if owner_is_me; then
+    printf '  es ESTA sesion; si ya no usas el site: %s release\n' "$SCRIPT_NAME"
+  else
+    printf '  rescate (solo con orden explicita del usuario): %s release --force --reason "<texto>"\n' "$SCRIPT_NAME"
+  fi
+}
+
 log_event() {
   printf '%s | %-13s | tag=%s pid=%s user=%s | %s\n' \
     "$(date '+%Y-%m-%d %H:%M:%S')" "$1" "${2:-?}" "${SESSION_PID:-$$}" "$(id -un)" "${3:-}" >> "$LOG_FILE"
@@ -199,6 +231,9 @@ print_status() {
   echo "  heartbeat : hace ${hb}s (TTL ${HEARTBEAT_TTL}s)"
   if owner_is_me; then
     echo "  nota      : el turno pertenece a ESTA sesion"
+  fi
+  if [ "$(hold_age)" -gt "$GUEST_TURN_HOLD_WARN" ] 2>/dev/null; then
+    echo "  AVISO     : RETENCION PROLONGADA (> ${GUEST_TURN_HOLD_WARN}s). Rescate (orden explicita): $SCRIPT_NAME release --force --reason \"<texto>\""
   fi
 }
 
@@ -320,6 +355,7 @@ case "$CMD" in
   acquire)          cmd_acquire "$@" ;;
   release)          cmd_release "$@" ;;
   status)           print_status ;;
+  hold-warn)        print_hold_warn ;;
   heartbeat)        cmd_heartbeat ;;
   check-held-by-me) cmd_check_held_by_me ;;
   -h|--help|help|"") usage; [ -n "$CMD" ] || exit 1 ;;

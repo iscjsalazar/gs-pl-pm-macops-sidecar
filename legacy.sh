@@ -369,6 +369,8 @@ status(){
   pgrep -f "$TUNNEL_PORT:$WINHOST:$SITE_PORT" >/dev/null 2>&1 && echo "activo" || echo "inactivo"
   if [ -z "$SLOT" ] && [ -x "$GUEST_TURN_SH" ]; then
     printf '   '; "$GUEST_TURN_SH" status | head -1
+    # Aviso de retencion prolongada del turno (vacio si esta libre o por debajo del umbral); indentado.
+    "$GUEST_TURN_SH" hold-warn 2>/dev/null | sed 's/^/   /'
   fi
 }
 

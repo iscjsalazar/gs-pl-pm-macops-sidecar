@@ -760,6 +760,10 @@ EOF
   if [ "$orphans" -eq 0 ]; then echo "[wt-gc] sin huerfanos."
   elif [ "$force" = "1" ]; then echo "[wt-gc] $orphans huerfano(s) retirado(s)."
   else echo "[wt-gc] $orphans huerfano(s); re-corre con FORCE=1 para retirarlos."; fi
+
+  # Aviso de retencion prolongada del turno del guest singleton (vacio si esta libre o por debajo del umbral).
+  local gt="$BASE_DIR/tools/guest-turn/guest-turn.sh"
+  if [ -x "$gt" ]; then "$gt" hold-warn 2>/dev/null | sed 's/^/[wt-gc] /'; fi
 }
 
 # Verbo independiente: siembra/asegura solo la referencia LN compartida (paso deliberado de una vez).
