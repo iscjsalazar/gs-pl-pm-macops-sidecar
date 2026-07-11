@@ -11,6 +11,7 @@
 #   [WT obligatorio] make pm-test-clean WT=<worktree>   # GATE limpio POR SLOT: wt-up (slot API+BD+seed+Oracle) + migrate por puente + suite; sin WT/slot falla (exit 2)
 #   make pm-test FILTER='FullyQualifiedName~RtSync'   # acota por filtro (inner-loop)
 #   make pm-test APIFORCE=1                            # relanza la API (api-down+api) antes de testear; no reusa
+#   make pm-unit                  # unit tests puros (*.UnitTests): sin Docker, sin red, sin data tier; FILTER= acota
 #   make pm-format               # formatea los .cs modificados vs develop (delega a scripts/format.sh in-repo)
 #   make pm-format-check         # gate de formato changed-vs-develop (delega a scripts/format-check.sh); sin data tier
 #   make pm-down / pm-nuke        # baja el data tier (conserva / borra volumenes)   [pm-nuke: ver aviso abajo]
@@ -179,7 +180,7 @@ WT_ENV = $(PM_ENV) WT=$(WT) PM_WT_SLOTS=$(SLOTS) PM_WT_ORACLE=$(ORACLE) PM_WT_GC
          PM_SHARED_SQL_NETWORK=$(SHAREDSQL_NET) PM_SHARED_SQL_HOST=$(SHAREDSQL_HOST) \
          PM_SHARED_SQL_PORT=$(SHAREDSQL_PORT) PM_SHARED_SQL_PASSWORD='$(SHAREDSQL_PASSWORD)'
 
-.PHONY: pm-run pm-watch pm-migrate pm-seed pm-api pm-api-down pm-test pm-test-clean pm-format pm-format-check pm-down pm-nuke pm-ps pm-logs pm-port pm-bootstrap-intel \
+.PHONY: pm-run pm-watch pm-migrate pm-seed pm-api pm-api-down pm-test pm-test-clean pm-unit pm-format pm-format-check pm-down pm-nuke pm-ps pm-logs pm-port pm-bootstrap-intel \
         wt-up wt-down wt-ls wt-info wt-status wt-gc wt-seed-ln \
         e2e-backend e2e-backend-down e2e-net-check e2e-up e2e-smoke e2e-down e2e-oracle-counts \
         legacy-launch legacy-data-up legacy-vm-up legacy-build legacy-deploy legacy-diag legacy-diag-logs \
@@ -199,6 +200,7 @@ pm-test-clean: REMOTE  := macdata
 pm-test-clean: PROFILE := full
 pm-test-clean: ORACLE  := 1                     # gate full: aprovisiona el Oracle ControlPiso del slot
 pm-test-clean: ; $(WT_ENV) ./pm.sh test-clean   # gate limpio POR SLOT (WT=<worktree pl-programa-maestro>)
+pm-unit:     ; $(PM_ENV) ./pm.sh unit           # unit tests puros (*.UnitTests): sin Docker, sin red, sin data tier
 pm-format:       ; $(PM_ENV) ./pm.sh format          # formatea .cs modificados vs develop (delega a scripts/format.sh in-repo)
 pm-format-check: ; $(PM_ENV) ./pm.sh format-check    # gate de formato changed-vs-develop (delega a scripts/format-check.sh)
 pm-down:     ; $(PM_ENV) ./pm.sh down
