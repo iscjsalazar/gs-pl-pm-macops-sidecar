@@ -94,8 +94,10 @@ load_env() {
   # 5180 + PM_PORT_OFFSET (patron de los otros *_HOST_PORT). No se deriva aqui: en load_env el offset aun es 0;
   # wt_derive fija el offset real del slot y re-llama compute_ports.
   PM_API_PORT_OVERRIDE="${PM_API_PORT:-}"
-  # --- API en macdata (verbo 'e2e-backend', Opcion C): la API corre en su PROPIO contenedor en la Intel,
-  # unido a la red del data tier (resuelve sqlserver/oracle/servicebus por nombre) y publicando el puerto E2E ---
+  # --- API en macdata (verbo 'e2e-backend', Opcion C) — VIA DEPRECADA (process-e2e-local-slots.md §5): la
+  # sustituye el aprovisionamiento por slots (make wt-up WT=<worktree>); el verbo corta con tombstone en pm.sh
+  # y cmd_api_e2e permanece solo hasta su retiro (follow-up). Las vars PM_GUEST_* siguen vigentes: las reusa
+  # la orquestacion viva e2e-up/e2e-smoke (scripts/e2e.sh) ---
   # Dir donde se rsyncea la solucion en la Intel: sirve de CONTEXTO de build de la imagen de la API.
   PM_REMOTE_SOLUTION_DIR="${PM_REMOTE_SOLUTION_DIR:-pm-solution}"
   # Direccion de la Intel (macdata) vista DESDE el guest: pasarela NAT/bridge de VMware. El guest ya la usa
@@ -104,7 +106,7 @@ load_env() {
   # Acceso al guest Windows desde la Intel (reusa el patron del legado): IP NAT + llave SSH (residen en macdata).
   PM_GUEST_WINHOST="${PM_GUEST_WINHOST:-172.16.128.129}"
   PM_GUEST_KEY="${PM_GUEST_KEY:-~/pm-host-windows/artifacts/ssh/id_pmwin}"
-  # 'e2e-backend' levanta el data tier (intel) antes de la API; 0 lo omite (asume data tier ya provisto).
+  # 'e2e-backend' (deprecado) levantaba el data tier (intel) antes de la API; 0 lo omite (asume data tier ya provisto).
   PM_E2E_DATATIER="${PM_E2E_DATATIER:-1}"
 
   # --- Paridad: directorios del snapshot CSV y del store SQLite del resultado ---

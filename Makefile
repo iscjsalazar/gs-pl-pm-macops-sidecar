@@ -1,9 +1,12 @@
 # Catalogo unico de verbos de gs-pl-pm-macops-sidecar: data tier + API real (pm-*) y lanzamiento del legado (legacy-*).
 # Capa fina; la logica vive en bash (pm.sh + lib/common.sh para pm-*, legacy.sh para legacy-*).
+# Marcas (norma de slots, process-e2e-local-slots.md): [WT obligatorio] = exige WT=<worktree> con slot;
+# [SLOT obligatorio] = exige SLOT=<N>; [DEPRECADO] = modo sustituido por la via por slots (corta o avisa; §5).
 #
 # Data tier + API + tests (pm-*):
 #   make pm-run                   # local: levanta el data tier + migra EF (crea BD/DDL) + seed data-only
 #   make pm-run PROFILE=full      # local: + Oracle + Service Bus emulador
+#   make pm-watch                 # pm-run + queda siguiendo los logs del data tier (Ctrl-C corta)
 #   make pm-migrate               # aplica solo las migraciones EF (crea BD y DDL; EF = dueno del DDL)
 #   make pm-seed                  # re-seed data-only idempotente (requiere la BD ya migrada)
 #   make pm-api / pm-api-down     # levanta / detiene la API real en ESTA mac (M1)
@@ -14,15 +17,17 @@
 #   make pm-unit                  # unit tests puros (*.UnitTests): sin Docker, sin red, sin data tier; FILTER= acota
 #   make pm-format               # formatea los .cs modificados vs develop (delega a scripts/format.sh in-repo)
 #   make pm-format-check         # gate de formato changed-vs-develop (delega a scripts/format-check.sh); sin data tier
-#   make pm-down / pm-nuke        # baja el data tier (conserva / borra volumenes)   [pm-nuke: ver aviso abajo]
+#   make pm-down                  # baja el data tier (conserva volumenes)
+#   make pm-nuke NUKE=1           # borra contenedores+volumenes; sin NUKE=1 corta (exit 2). Ver AVISO pm-nuke abajo
 #   make pm-ps / pm-logs / pm-port
 #   make pm-run TARGET=intel REMOTE=macdata SQLHOST=macdata   # data tier en la Intel (requiere 'macdata' en /etc/hosts del M1; ver README)
-#   make pm-run PROJECT=pm-ag2 OFFSET=10                      # 2o stack en paralelo (SQL/Oracle/API/bus +10)
+#   [DEPRECADO] make pm-run PROJECT=pm-ag2 OFFSET=10          # como ambiente de trabajo: PROJECT/OFFSET solo vale para el singleton pm-local; usa make wt-up WT=<worktree> (§5)
 #   make pm-bootstrap-intel REMOTE=macdata                   # aprovisiona colima/docker en la Intel (1 vez)
+#   make help                     # imprime este catalogo (grep del encabezado)
 #   # Gate: el comando verde es 'pm-test-clean' (perfil full = Oracle+bus, API fresca). 'pm-test' a secas corre sql-only.
 #   # Vars del bus/Ln: PM_LN_DB (erpln106), PM_SERVICEBUS_HOST, PM_SB_HOST_PORT (5672+OFFSET), PM_SB_SA_PASSWORD.
 #
-# Backend en modo E2E (Opción C; API co-localizada con el data tier en macdata, alcanzable por el guest legado):
+# Backend en modo E2E (Opción C) — via DEPRECADA (§5; la sustituyen wt-up / e2e-up por slot):
 #   [DEPRECADO] make e2e-backend                         # data tier (intel) + API en macdata; imprime la URL guest (172.16.128.1:5180)
 #   [DEPRECADO] make e2e-backend DATATIER=0              # solo la API (asume el data tier ya arriba)
 #   [DEPRECADO] make e2e-backend APIFORCE=1              # relanza la API en macdata (no reusa la que esté arriba)
@@ -31,24 +36,24 @@
 #   # Prereq: 'dotnet' (SDK .NET 10) y firewall abierto en macdata; 'macdata' resoluble en /etc/hosts del M1 (ver README).
 #
 # Orquestacion E2E completa (ruta wt: backend(slot) + legacy con inyeccion + flag + smoke funcional legacy-driven):
-#   make e2e-up    WT=<wt-pm> LEGACYSRC=<path-legacy-develop>   # todo: data tier + backend(slot) + puente SQL + legacy(+inyeccion) + flag ON + smoke
-#   make e2e-up    ... LINEA=<cod> ANOF=<aaaa> SEMF=<sem>       # params reales del disparo (el caso OFF/Oracle los exige)
-#   make e2e-up    ... FORCE=1                                  # re-deploya el legado (re-inyecta wiring; necesario si cambia el slot)
-#   make e2e-smoke WT=<wt-pm>                                   # solo el smoke funcional (ON->backend, OFF->Oracle)
-#   make e2e-url   WT=<wt-pm>                                   # reimprime la URL de acceso del slot (re-levanta el tunel si murio)
-#   make e2e-down  WT=<wt-pm>                                   # baja tunel + site + API + Oracle del slot (singletons intactos)
-#   make e2e-oracle-counts WT=<wt-pm>                           # conteos de PGE950RT en el Oracle del slot Y en el singleton
+#   [WT obligatorio] make e2e-up    WT=<wt-pm> LEGACYSRC=<path-legacy-develop>   # todo: data tier + backend(slot) + puente SQL + legacy(+inyeccion) + flag ON + smoke
+#   [WT obligatorio] make e2e-up    ... LINEA=<cod> ANOF=<aaaa> SEMF=<sem>       # params reales del disparo (el caso OFF/Oracle los exige)
+#   [WT obligatorio] make e2e-up    ... FORCE=1                                  # re-deploya el legado (re-inyecta wiring; necesario si cambia el slot)
+#   [WT obligatorio] make e2e-smoke WT=<wt-pm>                                   # solo el smoke funcional (ON->backend, OFF->Oracle)
+#   [WT obligatorio] make e2e-url   WT=<wt-pm>                                   # reimprime la URL de acceso del slot (re-levanta el tunel si murio)
+#   [WT obligatorio] make e2e-down  WT=<wt-pm>                                   # baja tunel + site + API + Oracle del slot (singletons intactos)
+#   [WT obligatorio] make e2e-oracle-counts WT=<wt-pm>                           # conteos de PGE950RT en el Oracle del slot Y en el singleton
 #                                                               #   (evidencia de aislamiento: corre antes y despues de una carga OFF)
 #   # WT = worktree de pl-programa-maestro (PL.PM.sln) EN develop; LEGACYSRC = fuente del legado EN develop (trae el gateway de Fase 1).
 #   # El shared SQL (nvoslabs) solo escucha en loopback de macdata -> e2e-up levanta un puente socat (BRIDGEPORT=60211) para el guest.
 #   # Inyeccion en el deploy: backendBaseUrl (appSettings) + ConStrPm (Config\connections.config, catalogo pm_planning_wt<N>).
 #
 # Aprovisionamiento aislado por worktree (wt-*; SQL compartido de nvoslabs + bus PM-owned, en macdata):
-#   make wt-up WT=<folder>                    # aprovisiona el entorno del worktree (slot, seed, API); intel-only
-#   make wt-up WT=<folder> ORACLE=1           # + Oracle ControlPiso propio del slot (lazy; la via e2e-up lo enciende)
-#   make wt-up WT=<folder> SOLUTION=<path>    # fuerza la raiz de la solucion del worktree (build de la API)
-#   make wt-down WT=<folder>                  # baja API + Oracle + BD del worktree; libera el slot (singletons intactos)
-#   make wt-info WT=<folder>                  # imprime la derivacion COMPLETA del slot ("que slot es mio")
+#   [WT obligatorio] make wt-up WT=<folder>                    # aprovisiona el entorno del worktree (slot, seed, API); intel-only
+#   [WT obligatorio] make wt-up WT=<folder> ORACLE=1           # + Oracle ControlPiso propio del slot (lazy; la via e2e-up lo enciende)
+#   [WT obligatorio] make wt-up WT=<folder> SOLUTION=<path>    # fuerza la raiz de la solucion del worktree (build de la API)
+#   [WT obligatorio] make wt-down WT=<folder>                  # baja API + Oracle + BD del worktree; libera el slot (singletons intactos)
+#   [WT obligatorio] make wt-info WT=<folder>                  # imprime la derivacion COMPLETA del slot ("que slot es mio")
 #   make wt-ls                                # lista el registro de slots (folder -> slot)
 #   make wt-status                            # estado de los contenedores PM por worktree y del bus
 #   make wt-gc / make wt-gc FORCE=1           # cruza registro/API/Oracle/sites: lista (o retira) huerfanos
@@ -62,24 +67,29 @@
 #   [SLOT obligatorio] make legacy-launch                       # todo: data tier (intel) + VM + build + deploy + tunel + URL
 #   [SLOT obligatorio] make legacy-launch FORCE=1               # fuerza rebuild/redeploy aunque ya este arriba
 #   [SLOT obligatorio] make legacy-launch SLOT=3                # via per-slot: site pm-wt3:8103, arbol C:\wt3, tunel 18103
-#   [SLOT obligatorio] make legacy-launch SITEPORT=8048 TUNNEL=18048   # puertos no-default (sobreescriben la derivacion)
+#   [DEPRECADO] make legacy-launch SITEPORT=… TUNNEL=…  # puertos ad-hoc: el slot los deriva; §5 de la guía
 #   [SLOT obligatorio] make legacy-launch DATATIER=0            # no gestiona el data tier (asume ya provisto)
 #   make legacy-status                       # estado de data tier / VM / app / tunel
 #   make legacy-url                          # imprime URL y puertos de acceso
 #   [SLOT obligatorio] make legacy-build / legacy-deploy
-#   make legacy-vm-up / legacy-data-up / legacy-tunnel
+#   make legacy-vm-up / legacy-data-up       # asegura la VM Windows / el data tier en intel (idempotentes)
+#   make legacy-tunnel                       # abre el tunel SSH M1->guest (SLOT=<N> deriva el puerto; TUNNEL= ad-hoc avisa DEPRECADO)
+#   make legacy-diag                         # habilita el log de errores detallado del guest + recicla el pool
+#   make legacy-diag-logs MAX=40             # vuelca los errores ASP.NET del Event Log del guest
 #   make legacy-down                         # cierra el tunel SSH y libera el turno del guest singleton
-#   make legacy-site-down SLOT=3             # desmonta el site per-slot del guest (nunca el singleton)
+#   [SLOT obligatorio] make legacy-site-down SLOT=3             # desmonta el site per-slot del guest (nunca el singleton)
 #   make legacy-sites-status                 # sites 'pm*' del guest cruzados con el registro de slots
 #   make legacy-turn-status / legacy-turn-release   # turno exclusivo del guest singleton (site pm:8080, C:\src)
-#   # Via SINGLETON (sin SLOT): un solo site/arbol/Web.config -> tomado por 'guest-turn' (una sesion a la vez).
-#   # Via PER-SLOT (SLOT=N): sites paralelos, sin turno. En ambas, stage->build->deploy lo serializa un lock
-#   #   que vive en macdata (scripts/guest-lock.sh): MSBuild, IIS y los vCPU de la VM son compartidos.
+#   make legacy-turn-heartbeat               # refresca el heartbeat del turno propio (sesiones largas de uso del site)
+#   # Via LEGADA (escape SINGLETON=1, deprecada §5): un solo site/arbol/Web.config -> tomado por 'guest-turn'
+#   #   (una sesion a la vez). Via PER-SLOT (SLOT=N): sites paralelos, sin turno. En ambas, stage->build->deploy
+#   #   lo serializa un lock que vive en macdata (scripts/guest-lock.sh): MSBuild, IIS y los vCPU de la VM son compartidos.
 #
 # Data tier COMPARTIDO: legacy-data-up lo levanta via pm-run (TARGET=intel). El perfil del legado se
 # controla con LEGACY_PROFILE (default full: requiere Oracle ControlPiso); el de pm con PROFILE (default sql).
 # AVISO pm-nuke: legacy-* comparte el stack 'pm-local'; 'pm-nuke' borra volumenes -> re-siembra el seed pero
-#   NO lo que el legado haya escrito en vivo. Aislar agentes por stack (PROJECT/OFFSET levanta tambien su bus).
+#   NO lo que el legado haya escrito en vivo (por eso exige NUKE=1). Aislar sesiones = via por slots
+#   (make wt-up WT=<worktree>); PROJECT/OFFSET queda solo para stacks compose manuales del data tier.
 
 # --- Variables data tier + API (pm-*) ---
 TARGET      ?= local
@@ -94,6 +104,8 @@ APIPORT     ?=
 FILTER      ?=
 TESTPROJECT ?=
 APIFORCE    ?= 0
+# Confirmacion de pm-nuke: borra los volumenes del stack (compartidos con el legado en vivo) -> exige NUKE=1.
+NUKE        ?= 0
 # Override de la raiz del arbol (autodetectada por marcador gs-pl-pm-macops-sidecar/ si se omite); util si el
 # sidecar corre fuera del layout estandar. WT/SOLUTION (def. en el bloque wt-*) seleccionan el codigo a operar.
 WRAPPER     ?=
@@ -205,7 +217,8 @@ pm-unit:     ; $(PM_ENV) ./pm.sh unit           # unit tests puros (*.UnitTests)
 pm-format:       ; $(PM_ENV) ./pm.sh format          # formatea .cs modificados vs develop (delega a scripts/format.sh in-repo)
 pm-format-check: ; $(PM_ENV) ./pm.sh format-check    # gate de formato changed-vs-develop (delega a scripts/format-check.sh)
 pm-down:     ; $(PM_ENV) ./pm.sh down
-pm-nuke:     ; $(PM_ENV) ./pm.sh nuke
+# Guard de confirmacion (patron in-recipe de pm-bootstrap-intel): sin NUKE=1 corta antes de invocar pm.sh.
+pm-nuke:     ; @[ "$(NUKE)" = "1" ] || { echo "pm-nuke borra los volumenes del stack (compartidos con el legado en vivo): confirma con make pm-nuke NUKE=1" >&2; exit 2; }; $(PM_ENV) ./pm.sh nuke
 pm-ps:       ; $(PM_ENV) ./pm.sh ps
 pm-logs:     ; $(PM_ENV) ./pm.sh logs
 pm-port:     ; $(PM_ENV) ./pm.sh port
@@ -226,7 +239,7 @@ e2e-net-check:    override PROFILE := full
 e2e-net-check:    ; $(E2E_ENV) ./scripts/e2e-net-check.sh
 
 # --- orquestacion E2E completa (ruta wt): data tier + backend(slot) + puente SQL + legacy(+inyeccion) + flag + smoke ---
-# 'override' fija intel/macdata como en wt-up/e2e-backend (backend, SQL compartido y bus viven en macdata).
+# 'override' fija intel/macdata como en wt-up (backend, SQL compartido y bus viven en macdata).
 e2e-up:    override TARGET  := intel
 e2e-up:    override REMOTE  := macdata
 e2e-up:    ; $(E2E_ORCH_ENV) ./scripts/e2e.sh up
