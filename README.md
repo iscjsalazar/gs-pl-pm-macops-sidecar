@@ -234,8 +234,8 @@ La fórmula `1521+offset` de `compute_ports` (`lib/common.sh`) sirve a los stack
 | `make wt-up WT=<folder> ORACLE=1` | Además aprovisiona el Oracle ControlPiso propio del slot (`pm-wt<N>-oracle-1`) y cablea la API a él (`Parity__LegacySource=oracle`). La vía `e2e-up` siempre lo enciende. |
 | `make wt-up WT=<folder> SOLUTION=<path>` | Fuerza la raíz de la solución del worktree (contexto de build de la API). |
 | `make wt-down WT=<folder>` | Baja API, Oracle (contenedor **y volumen**) y BD del worktree; verifica su ausencia y sólo entonces libera el slot. Deja los singletons compartidos intactos. |
-| `make wt-info WT=<folder>` | Imprime la derivación completa del slot: API, BD, bus, Oracle, site IIS, túnel, rutas del guest. |
-| `make wt-ls` | Lista el registro de slots (`folder → slot`). |
+| `make wt-info WT=<folder>` | Imprime la derivación completa del slot: API, BD, bus, Oracle, site IIS, túnel, rutas del guest, y la sección **Presupuesto** (topes reales: disco/RAM de la VM colima, `docker` reclamable, contadores del guest, slots vivos). |
+| `make wt-ls` | Lista el registro de slots (`folder → slot`) y una línea de resumen de presupuesto (disco libre de la VM colima + slots vivos/`SLOTS`). |
 | `make wt-status` | Estado de los contenedores PM por worktree (API y Oracle) y del bus. |
 | `make wt-gc` / `make wt-gc FORCE=1` | Cruza los cuatro planos (registro · contenedores API · contenedores Oracle · sites IIS y túneles) y lista los huérfanos; con `FORCE=1` los retira. |
 | `make wt-seed-ln` | Asegura la referencia LN compartida `pm_erpln106` (paso deliberado de una vez; idempotente). |
@@ -274,6 +274,24 @@ degrada con aviso y el rescate es `make legacy-site-down SLOT=<N>`. Un slot reut
 
 **Topes operativos.** Guest Windows: ~0.3–0.8 GiB por `w3wp` activo más 1–2 GiB del MSBuild en vuelo. colima
 (24 GiB, headroom ~9.3 GiB): ~1.5 GiB por slot E2E (API 0.26–1.47 + XE ~0.7) ⇒ 3–4 Oracles per-slot concurrentes.
+
+**Presupuesto real y gate de disco.** El tope que de verdad limita el aprovisionamiento no es el disco del **host**
+(~6.7 TiB, irrelevante) sino el disco de la **VM colima** (`/dev/vdb1`, 80 GiB) donde viven imágenes y volúmenes:
+se llenó en D6 (2026-07-05, `CREATE DATABASE pm_planning_wt3` falló al 100%). `make wt-info` imprime una sección
+**Presupuesto** con las métricas reales medidas en `macdata` (disco y RAM de la VM colima, `docker system df`
+reclamable, contadores del guest vía `scripts/guest-mem.sh`, y slots vivos vs `SLOTS`); `make wt-ls` añade una
+línea de resumen (disco libre de la VM colima + slots vivos). Ambos verbos son best-effort: sin `REMOTE=macdata`
+o con colima sin responder, la métrica degrada a `n/d` sin abortar.
+
+`make wt-up` **rechaza aprovisionar temprano** (antes del rsync/build/seed) si el disco libre de la VM colima cae
+por debajo de `PM_WT_MIN_DISK_GB` (default **6**, ≈4 slots E2E de margen; ~1.3–1.4 GB por volumen Oracle de slot),
+nombrando el margen real medido y **qué disco** midió (VM colima, no host). El gate es **fail-open**: si la medición
+falla (colima sin responder, parse vacío) avisa y continúa; sólo aborta con una medición exitosa por debajo del
+umbral. Para forzar por encima o por debajo del default: `PM_WT_MIN_DISK_GB=<N> make wt-up WT=<folder>`.
+
+**Higiene del disco de la VM.** El rebuild del mismo tag de imagen deja capas *dangling*; `wt-up` corre
+`docker image prune -f` (**sólo** dangling) tras el build para que no saturen `/dev/vdb1`. **Nunca** se corre
+`docker volume prune`: borraría los volúmenes Oracle per-slot (y cualquier otro) de sesiones vivas.
 
 Prerrequisitos en `macdata`: el SQL compartido de nvoslabs corriendo (red `nvoslabsc3-sharedsql-dt`), `colima`
 del data tier activo y las imágenes base de .NET (`sdk:10.0`/`aspnet:10.0`) disponibles.
@@ -382,6 +400,9 @@ los drivers. Los puertos del data tier se derivan en un solo lugar (`compute_por
 | `SLOTS` | wt | `4` | `N` de slots (`0..N-1`). |
 | `SOLUTION` | wt | (worktree o principal) | Raíz de la solución del worktree (contexto de build de la API). |
 | `SHAREDSQL_NET` / `_HOST` / `_PORT` / `_PASSWORD` | wt | `nvoslabsc3-sharedsql-dt` / `sqlserver` / `1433` / (autodescubierta) | Conexión al SQL compartido de nvoslabs. |
+
+Env-only (sin var `make` corta, se pasa por entorno): `PM_WT_MIN_DISK_GB` (default `6`) — umbral del gate de disco
+de `wt-up` sobre la VM colima; ver §Topes operativos. Ej.: `PM_WT_MIN_DISK_GB=8 make wt-up WT=<folder>`.
 
 ### Variables de entorno del bus / Ln (data tier `full`)
 

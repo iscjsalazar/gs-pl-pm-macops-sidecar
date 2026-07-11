@@ -120,6 +120,8 @@ load_env() {
   # Un slot (0..N-1) es la unica perilla por worktree; de el se derivan proyecto/offset/BD/prefijo de bus,
   # y ademas site IIS, tunel y Oracle del legado (ver README, tabla canonica por slot).
   PM_WT_SLOTS="${PM_WT_SLOTS:-8}"                       # N de slots disponibles
+  # Umbral de disco libre de la VM colima (GB) bajo el cual wt-up rechaza aprovisionar (el tope real, no el host).
+  PM_WT_MIN_DISK_GB="${PM_WT_MIN_DISK_GB:-6}"           # ~4 slots E2E de margen (~1.3-1.4 GB por volumen Oracle)
   # Oracle ControlPiso por slot (fase 2, lazy): solo se aprovisiona con PM_WT_ORACLE=1 (la via e2e-up lo enciende).
   PM_WT_ORACLE="${PM_WT_ORACLE:-0}"                     # 1 = aprovisiona pm-wt<N>-oracle-1 y cablea la API a el
   # Base dedicada del puerto host del Oracle per-slot. NO se usa 1521+offset (ver compute_ports).
