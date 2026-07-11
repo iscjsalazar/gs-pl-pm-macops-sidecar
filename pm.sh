@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Orquestador del data tier PM (SQL Server + Oracle) + API real para macOS.
-# Verbos: run [--watch] | migrate | seed | api | api-down | e2e-backend | e2e-backend-down | test | test-clean | unit | format | format-check | down | nuke | ps | logs | port
+# Verbos: run [--watch] | migrate | seed | api | api-down | e2e-backend (DEPRECADO) | e2e-backend-down (DEPRECADO) | test | test-clean | unit | format | format-check | down | nuke | ps | logs | port
 # Target: PM_TARGET=local (colima/desktop) | intel (rsync + docker compose en la mac Intel via SSH)
 #
 #   ./pm.sh run                 # levanta el data tier + migra EF (crea BD/DDL) + seedea data-only (local)
@@ -8,9 +8,9 @@
 #   ./pm.sh seed                # re-seed data-only (loaders idempotentes; requiere la BD ya migrada)
 #   ./pm.sh api                 # levanta la API real en ESTA mac (M1); salta si /health/live ya responde
 #   ./pm.sh api-down            # detiene la API levantada por 'api'
-#   # Modo E2E (Opción C): API co-localizada con el data tier en macdata, alcanzable por el guest (VM legado).
-#   PM_TARGET=intel PM_REMOTE_SSH=macdata ./pm.sh e2e-backend       # data tier (intel) + API en macdata
-#   PM_TARGET=intel PM_REMOTE_SSH=macdata ./pm.sh e2e-backend-down  # detiene la API E2E en macdata
+#   # [DEPRECADO] Modo E2E (Opción C): lo sustituye la via por slots (make wt-up WT=<worktree>; guia §5).
+#   [DEPRECADO] PM_TARGET=intel PM_REMOTE_SSH=macdata ./pm.sh e2e-backend       # tombstone: corta con aviso (exit 2)
+#   [DEPRECADO] PM_TARGET=intel PM_REMOTE_SSH=macdata ./pm.sh e2e-backend-down  # tombstone: corta con aviso (exit 2)
 #   ./pm.sh test                # asegura la API arriba y corre dotnet test (toda la suite) contra ella
 #   WT=<worktree> ./pm.sh test-clean   # gate limpio POR SLOT: wt-up (slot API+BD+seed+Oracle) + migrate por puente + suite
 #   PM_API_FORCE=1 ./pm.sh test # relanza la API (api-down+api) antes de testear; no reusa la que este arriba
@@ -303,7 +303,12 @@ cmd_format_check() {
 }
 
 case "$VERB" in
-  run)      cmd_run ;;
+  # Warning (no bloquea) SOLO en el camino directo de pm-run/pm-watch: la via wt fija PM_PROJECT/PM_PORT_OFFSET
+  # via wt_derive y entra por otros verbos (test-clean) o por wt.sh, nunca por 'run'.
+  run)      if [ "$PM_PROJECT" != "pm-local" ] || [ "${PM_PORT_OFFSET:-0}" != "0" ]; then
+              echo "[pm] [DEPRECADO como ambiente de trabajo] PROJECT/OFFSET solo vale para el data tier singleton pm-local; para trabajar usa make wt-up WT=<worktree> (guia §5)" >&2
+            fi
+            cmd_run ;;
   migrate)  cmd_migrate ;;
   seed)     cmd_seed ;;
   api)      cmd_api ;;
@@ -321,5 +326,5 @@ case "$VERB" in
   ps)       cmd_ps ;;
   logs)     cmd_logs ;;
   port)     cmd_port ;;
-  *) echo "uso: $0 {run [--watch]|migrate|seed|api|api-down|e2e-backend|e2e-backend-down|test|test-clean|unit|format|format-check|down|nuke|ps|logs|port}"; exit 2 ;;
+  *) echo "uso: $0 {run [--watch]|migrate|seed|api|api-down|e2e-backend (DEPRECADO)|e2e-backend-down (DEPRECADO)|test|test-clean|unit|format|format-check|down|nuke|ps|logs|port}"; exit 2 ;;
 esac

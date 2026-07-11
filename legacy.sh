@@ -164,6 +164,14 @@ require_slot(){
   exit 2
 }
 
+# --- Warning de TUNNEL= ad-hoc en legacy-tunnel (no bloquea) -----------------
+# Sin SLOT y con TUNNEL fijado a mano el puerto no proviene de la derivacion del slot: modo deprecado
+# (process-e2e-local-slots.md §5). El rescate del tunel singleton 18080 sigue siendo legitimo en la via legada.
+warn_tunnel_adhoc(){
+  { [ -z "$SLOT" ] && [ -n "${PM_LEGACY_TUNNEL_PORT:-}" ]; } || return 0
+  warn "[DEPRECADO] TUNNEL ad-hoc: los puertos se derivan del slot (make legacy-tunnel SLOT=<N>); el 18080 pertenece a la via legada"
+}
+
 # --- Turno del guest singleton (lock en la M1) -------------------------------
 # Solo la via singleton lo necesita: comparte site, arbol y Web.config entre sesiones. La via per-slot no.
 # El turno se MANTIENE tras el verbo (la sesion sigue usando el site) y se libera con 'legacy.sh down' o
@@ -466,7 +474,7 @@ case "${1:-}" in
   deploy)   require_slot deploy; guest_turn_acquire; deploy; guest_lock_release ;;
   diag)     diag ;;
   diag-logs) diag_logs ;;
-  tunnel)   tunnel_up ;;
+  tunnel)   warn_tunnel_adhoc; tunnel_up ;;
   status)   status ;;
   url)      print_url ;;
   down)     tunnel_down; guest_turn_release ;;
