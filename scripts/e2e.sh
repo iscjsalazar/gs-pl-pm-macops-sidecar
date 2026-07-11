@@ -18,6 +18,7 @@
 #
 #   make e2e-up    WT=<folder> LEGACYSRC=<path>   # data tier + backend(slot) + Oracle(slot) + puente SQL + legacy(+inyeccion) + flag ON + smoke
 #   make e2e-smoke WT=<folder>                    # solo el smoke funcional (asume e2e-up ya dejo todo arriba)
+#   make e2e-url   WT=<folder>                    # reimprime el recuadro de acceso del slot (re-levanta el tunel si murio)
 #   make e2e-down  WT=<folder>                    # baja tunel + site + API + Oracle del slot + puente (singletons intactos)
 #   make e2e-down  WT=<folder> ... PM_E2E_KEEP_FRONT=1   # conserva el site del legado (re-usar con FORCE=1)
 set -uo pipefail
@@ -520,6 +521,27 @@ cmd_down(){
   elog "E2E abajo (data tier, SQL compartido, bus y puente singletons intactos)"
 }
 
+# Reimprime el recuadro de acceso de un ambiente E2E YA arriba, sin re-orquestar nada (gotcha del tunel
+# flaky, D17 de 260709-1305). Solo lee estado y re-levanta el tunel del slot si murio; NO toca sitios IIS,
+# contenedores, BD, flags ni bus.
+cmd_url(){
+  [ -n "$WT" ] || edie "falta WT=<folder>; uso: make e2e-url WT=<wt-pm> (reimprime la URL de acceso de un ambiente E2E ya arriba)"
+  e2e_slot_try || edie "el worktree '$WT' no tiene slot: el ambiente no esta arriba; levantalo con make e2e-up WT=<wt-pm> LEGACYSRC=<path>"
+  e2e_derive_front_ports
+  E2E_ORACLE_PORT="$(e2e_oracle_port)"
+  # Mismo patron idempotente de tunnel_up (legacy.sh): pgrep del ssh -L del tunel del slot (18100+N -> guest).
+  if pgrep -f "$TUNNEL:$PM_GUEST_WINHOST:$SITEPORT" >/dev/null 2>&1; then
+    elog "tunel del slot vivo (localhost:$TUNNEL -> $PM_GUEST_WINHOST:$SITEPORT)"
+  else
+    elog "tunel del slot caido: re-levantando via make legacy-tunnel (localhost:$TUNNEL -> $PM_GUEST_WINHOST:$SITEPORT)"
+    make -C "$BASE_DIR" legacy-tunnel SLOT="$E2E_SLOT" SITEPORT="$SITEPORT" TUNNEL="$TUNNEL" \
+      || edie "no se pudo re-levantar el tunel del slot (localhost:$TUNNEL)"
+  fi
+  # e2e_summary espera SQL_PM_HOST, que solo cmd_up fija: se re-deriva igual que alla (override o puente).
+  SQL_PM_HOST="${SQL_PM_HOST_OVERRIDE:-${PM_GUEST_GATEWAY},${BRIDGE_PORT}}"
+  e2e_summary "$(e2e_api_port)"
+}
+
 e2e_summary(){  # uso: e2e_summary <api_port>
   local api_port="$1"
   printf '\n'
@@ -540,7 +562,8 @@ e2e_summary(){  # uso: e2e_summary <api_port>
 case "$VERB" in
   up)            cmd_up ;;
   smoke)         cmd_smoke ;;
+  url)           cmd_url ;;
   down)          cmd_down ;;
   oracle-counts) cmd_oracle_counts ;;
-  *) echo "uso: $0 {up|smoke|down|oracle-counts}  (WT=<folder> LEGACYSRC=<path>)"; exit 2 ;;
+  *) echo "uso: $0 {up|smoke|url|down|oracle-counts}  (WT=<folder> LEGACYSRC=<path>)"; exit 2 ;;
 esac
