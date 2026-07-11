@@ -18,6 +18,7 @@
 #   PM_TEST_FILTER='FullyQualifiedName~RtSync' ./pm.sh test                                    # un filtro
 #   ./pm.sh unit                # unit tests puros (*.UnitTests): sin API, sin Docker, sin data tier; PM_TEST_FILTER acota
 #   ./pm.sh down / nuke         # baja el data tier (conserva / borra volumenes)
+#   # La confirmacion NUKE=1 vive en la capa make (make pm-nuke NUKE=1); la invocacion directa './pm.sh nuke' la salta.
 #   # Data tier en la mac Intel + API en esta mac (el alias 'macdata' debe resolver como host p/ BD/AMQP: ver README):
 #   PM_TARGET=intel PM_REMOTE_SSH=macdata PM_TEST_SQL_HOST=macdata ./pm.sh run
 #   PM_TEST_SQL_HOST=macdata ./pm.sh test

@@ -7,13 +7,14 @@ familias de verbos sobre el mismo data tier:
   del backend `pl-programa-maestro`.
 - **`legacy-*`** — compilar y correr el legado `CargaPlantaPT_LN` en un host Windows headless (VM en `macdata`).
 - **`wt-*`** — aprovisionamiento aislado por worktree (un slot con su BD y API, sobre el SQL compartido de nvoslabs).
-- **`e2e-*`** — backend en modo E2E (`e2e-backend`) y **orquestación E2E completa** (`e2e-up`/`e2e-smoke`/`e2e-down`:
-  backend + legado con inyección de config + feature flag + smoke funcional legacy-driven).
+- **`e2e-*`** — **orquestación E2E completa** (`e2e-up`/`e2e-smoke`/`e2e-url`/`e2e-down`: backend + legado con inyección de config + feature flag + smoke funcional legacy-driven); el modo `e2e-backend` está **DEPRECADO** con tombstone (ver §Comandos — backend en modo E2E).
 
 El `Makefile` es una capa fina; la lógica vive en bash: `pm.sh` + `lib/common.sh` (`pm-*`), `legacy.sh` (`legacy-*`),
 `wt.sh` + `lib/worktrees.sh` (`wt-*`) y `scripts/e2e.sh` (`e2e-*`). El data tier es **compartido**: `legacy-data-up`
 lo levanta reusando `pm-run TARGET=intel`, y ambos consumen el mismo esquema/seed (provisto por la solicitud
 `db-setup-containers`).
+
+El catálogo del `Makefile` marca cada verbo según la norma de slots (`gs-pl-pm-guidelines/process-e2e-local-slots.md` §5): **`[WT obligatorio]`** exige `WT=<worktree>` con slot asignado, **`[SLOT obligatorio]`** exige `SLOT=<N>` y **`[DEPRECADO]`** señala un modo sustituido por la vía por slots (corta con exit 2 o avisa sin bloquear).
 
 ## Estructura
 
@@ -46,11 +47,7 @@ gs-pl-pm-macops-sidecar/
   en la mac Intel (`macdata`) vía SSH (rsync de `containers/` + `docker compose`).
 - La **API** real corre como proceso en **esta** máquina (M1). Las **pruebas de integración** son clientes HTTP
   contra esa API y asumen el data tier arriba.
-- En el **modo E2E** (`make e2e-backend`, Opción C), la API corre en su propio contenedor en `macdata`, unido a la
-  red del data tier, de modo que el guest Windows del legado la alcanza por la pasarela NAT de VMware
-  (`172.16.128.1`). La **orquestación E2E completa** (`make e2e-up`) compone el backend (ruta wt), el legado con
-  inyección de config, el feature flag y un smoke funcional; **todo el runtime vive en `macdata`** (la M1 sólo
-  orquesta por SSH; el disparo del smoke va `macdata`→guest, sin túnel). Ver §Comandos — orquestación E2E completa.
+- La **orquestación E2E completa** (`make e2e-up`) compone el backend por la ruta **wt** (contenedor de la API en `macdata`, unido a la red del data tier y alcanzable por el guest Windows por la pasarela NAT de VMware `172.16.128.1`), el legado con inyección de config, el feature flag y un smoke funcional; **todo el runtime vive en `macdata`** (la M1 sólo orquesta por SSH; el disparo del smoke va `macdata`→guest, sin túnel). Ver §Comandos — orquestación E2E completa. El modo `e2e-backend` (Opción C, API suelta) está **DEPRECADO** con tombstone.
 - El **legado** compila y corre en una VM Windows Server 2022 Core headless en `macdata`, operada por SSH; el
   acceso desde la M1 es por túnel SSH (ver §Comandos legado e `INSTALL-fusion.md`).
 - La solución (`pl-programa-maestro`) sólo **lee** variables de entorno (`ConnectionStrings__Planning`,
@@ -67,7 +64,7 @@ gs-pl-pm-macops-sidecar/
 | `make pm-api` / `make pm-api-down` | Levanta / detiene la API real en esta máquina (M1). |
 | `make pm-test` | Inner-loop: reusa la API si responde y corre `dotnet test` (default `PROFILE=sql`; acota con `FILTER=`/`TESTPROJECT=`, fuerza API con `APIFORCE=1`). |
 | `make pm-test-clean WT=<worktree>` | **Gate** por slot: reusa `cmd_wt_up` (API fresca + BD `pm_planning_wt<N>` + seed + Oracle/bus del slot) + `pm_ef_migrate` por el puente SQL `60211` + toda la suite (`PROFILE=full`). Fuerza `TARGET=intel REMOTE=macdata ORACLE=1`; sustituye al singleton `pm-local` como ambiente de validación. |
-| `make pm-down` / `make pm-nuke` | Baja el data tier (conserva / borra volúmenes). |
+| `make pm-down` / `make pm-nuke NUKE=1` | Baja el data tier (conserva / borra volúmenes); `pm-nuke` **exige la confirmación `NUKE=1`** (sin ella corta con exit 2). |
 | `make pm-ps` / `make pm-logs` / `make pm-port` | Estado / logs / puertos publicados del data tier. |
 | `make pm-bootstrap-intel REMOTE=macdata` | Aprovisiona colima/docker en la mac Intel (una vez). |
 
@@ -86,9 +83,8 @@ make pm-test TESTPROJECT=tests/PL.PM.IntegrationTests/PL.PM.IntegrationTests.csp
 make pm-run TARGET=intel REMOTE=macdata SQLHOST=macdata
 make pm-test SQLHOST=macdata
 
-# Dos stacks en paralelo (offset desplaza puertos de SQL/Oracle/API/bus)
-make pm-run PROJECT=pm-ag2 OFFSET=10
-make pm-test PROJECT=pm-ag2 OFFSET=10
+# [DEPRECADO] Stacks compose manuales del data tier: como ambiente de trabajo la vía es el slot (make wt-up WT=)
+make pm-run PROJECT=pm-ag2 OFFSET=10      # avisa DEPRECADO sin bloquear (offset desplaza puertos de SQL/Oracle/API/bus)
 ```
 
 ## Comandos — legado `CargaPlantaPT_LN` (`legacy-*`)
@@ -98,11 +94,11 @@ ya está arriba (usar `FORCE=1` para forzar rebuild/redeploy).
 
 | Comando | Acción |
 | --- | --- |
-| `make legacy-launch` | Todo: data tier (intel) + VM + build + deploy + túnel + URL. |
-| `make legacy-launch SLOT=<N>` | Igual, pero sobre el **sitio del slot** (`pm-wt<N>`:`8100+N`, árbol `C:\wt<N>`, túnel `18100+N`). |
+| `make legacy-launch SLOT=<N>` | Todo, sobre el **sitio del slot** (`pm-wt<N>`:`8100+N`, árbol `C:\wt<N>`, túnel `18100+N`): data tier (intel) + VM + build + deploy + túnel + URL. **`SLOT` es mandatorio** (sin él corta con exit 2). |
+| `make legacy-launch SINGLETON=1` | **[DEPRECADO]** Escape deliberado de la **vía legada** singleton (site `pm`:8080, árbol `C:\src`): avisa `[VIA LEGADA]` y toma el turno `guest-turn`. |
 | `make legacy-data-up` | Asegura el data tier en intel (reusa `pm-run TARGET=intel`). |
 | `make legacy-vm-up` | Asegura la VM Windows (omite si ya corre). |
-| `make legacy-build` / `make legacy-deploy` | Compila en el guest / publica en IIS (omite si health 200, salvo `FORCE`). |
+| `make legacy-build SLOT=<N>` / `make legacy-deploy SLOT=<N>` | Compila en el guest / publica en IIS sobre el **árbol del slot** (`C:\wt<N>`); omite si health 200, salvo `FORCE`. **`SLOT` es mandatorio** (exit 2 sin él); `SINGLETON=1` es el escape deprecado hacia el árbol singleton. |
 | `make legacy-tunnel` / `make legacy-down` | Abre / cierra el túnel SSH M1 → guest (`legacy-down` libera además el turno del guest). |
 | `make legacy-site-down SLOT=<N>` | Desmonta el sitio del slot (site, pool, árbol, raíz, zip, scripts, regla de firewall) y su stage en `macdata`. **Nunca** opera el singleton. |
 | `make legacy-sites-status` | Lista los sitios `pm*` del guest cruzados con el registro de slots; marca huérfanos. |
@@ -111,17 +107,17 @@ ya está arriba (usar `FORCE=1` para forzar rebuild/redeploy).
 | `make legacy-diag` / `make legacy-diag-logs` | Habilita log de errores detallado / vuelca errores ASP.NET. |
 
 ```bash
-make legacy-launch                         # lanzamiento end-to-end (vía singleton)
-make legacy-launch SLOT=3                  # vía per-slot: site pm-wt3:8103, árbol C:\wt3, túnel 18103
-make legacy-launch FORCE=1                 # fuerza rebuild/redeploy
-make legacy-launch SITEPORT=8048 TUNNEL=18048   # puertos no-default (sobreescriben la derivación)
+make legacy-launch SLOT=3                  # vía canónica per-slot: site pm-wt3:8103, árbol C:\wt3, túnel 18103
+make legacy-launch SLOT=3 FORCE=1          # fuerza rebuild/redeploy
+make legacy-launch SINGLETON=1             # [DEPRECADO] escape de la vía legada singleton (avisa [VIA LEGADA]; toma el turno)
+# [DEPRECADO] SITEPORT=/TUNNEL= ad-hoc: los puertos los deriva el slot (8100+N / 18100+N); fijarlos a mano reintroduce colisiones
 make legacy-status                         # estado data tier / VM / app / túnel
 make legacy-down                           # cierra el túnel y libera el turno del guest
 ```
 
 ### Dos vías, dos locks
 
-La **vía singleton** (sin `SLOT`) comparte un único sitio `pm`:8080, un único árbol `C:\src` y un único
+La **vía singleton** (vía legada **DEPRECADA**; se alcanza sólo con el escape deliberado `SINGLETON=1` — sin `SLOT` ni `SINGLETON=1`, `legacy-launch`/`legacy-build`/`legacy-deploy` cortan con exit 2) comparte un único sitio `pm`:8080, un único árbol `C:\src` y un único
 `Web.config`: el `stage` de una sesión borra el árbol de la otra y el `deploy` reescribe su configuración. Por eso
 está protegida por un **turno exclusivo** (`tools/guest-turn/guest-turn.sh`, mismo patrón que `deploy-turn`: mutex
 por `mkdir`, identidad por pid + `lstart`, heartbeat con TTL, reclamo por `mv` al *graveyard* — nunca `rm`). Una
@@ -148,43 +144,14 @@ cmdlets de `WebAdministration` concurrentes fallan al *commitear*) y los vCPU de
 todos los sitios. Al vivir en `macdata`, el lock cubre también a sesiones de otras máquinas orquestadoras. Antes de
 reclamar un lock rancio consulta al guest: si hay un MSBuild vivo, **no** lo roba.
 
-## Comandos — backend en modo E2E (`e2e-*`, Opción C)
+## Comandos — backend en modo E2E (`e2e-*`, Opción C) — DEPRECADO
 
-Para el camino end-to-end (legado en la VM → API .NET 10 → data tier), la API corre en **su propio contenedor en
-`macdata`**, unido a la red del data tier. El contenedor resuelve `sqlserver`/`oracle`/`servicebus` por nombre de
-servicio (puertos internos) y publica el puerto E2E (`5180`); así el guest Windows lo alcanza por la misma pasarela
-NAT de VMware (`172.16.128.1`) que ya usa para el Oracle del data tier, sin abrir el firewall del M1 ni depender de
-su IP DHCP. La imagen se construye desde la solución rsync-eada (`Dockerfile` en `e2e/`, vía `docker build -f-`); la
-API recibe su configuración sólo por entorno (`ASPNETCORE_*`, `ConnectionStrings__*`): la solución no conoce al wrapper.
+**Vía DEPRECADA con tombstone activo** (`gs-pl-pm-guidelines/process-e2e-local-slots.md` §5): `make e2e-backend` y `make e2e-backend-down` cortan con aviso y **exit 2** sin tocar nada — la API suelta en `macdata` no tiene BD, Oracle ni frontend propios y no aísla nada. La sustituye la vía por slot: `make wt-up WT=<worktree>` (solo el backend del slot) o `make e2e-up WT=<wt-pm> LEGACYSRC=<path>` (camino completo). El retiro del código de `e2e-backend` queda como follow-up; esta sección se conserva como referencia mínima.
 
 | Comando | Acción |
 | --- | --- |
-| `make e2e-backend` | Levanta el data tier (intel), construye la imagen de la API y corre el contenedor `<PROJECT>-api`; imprime la URL que ve el guest (`http://172.16.128.1:5180`). |
-| `make e2e-backend DATATIER=0` | Sólo la API (asume el data tier ya arriba y su red creada). |
-| `make e2e-backend APIFORCE=1` | Recrea el contenedor de la API (no reusa el que esté arriba). |
-| `make e2e-backend-down` | Elimina el contenedor de la API E2E en `macdata`. |
-| `make e2e-net-check` | Smoke de conectividad: M1 → data tier/API y guest → backend/data tier (`PROFILE=full`). En modo slot (con `WT` / dentro de `e2e-up`) hace **SKIP** de los checks del data tier por offset en vez de fallar sobre puertos inexistentes en la vía wt. |
-
-```bash
-make e2e-backend            # data tier (intel) + contenedor de la API en macdata; guest -> http://172.16.128.1:5180
-make e2e-net-check          # verifica guest->backend y la resolución del data tier
-PM_E2E_CHECK_GUEST=0 make e2e-net-check   # omite los checks del guest (VM apagada)
-make e2e-backend-down       # elimina el contenedor de la API E2E
-```
-
-Prerrequisitos en `macdata`:
-
-- `docker` (colima del data tier). No requiere el SDK de .NET en el host: el build ocurre en el stage `sdk:10.0`
-  de la imagen; el contenedor de runtime usa `aspnet:10.0`.
-- Firewall de `macdata` que permita la conexión entrante del guest al puerto `5180` (el data tier ya admite el
-  tráfico del guest hacia sus puertos publicados por Docker).
-- En el M1, `macdata` resoluble en `/etc/hosts` (ver §Requisito de host) para `make e2e-net-check` y para alcanzar
-  la API por la LAN.
-
-La inyección de esa URL en el config del legado y la activación del feature flag las realiza la **orquestación
-E2E completa** (`make e2e-up`, ver §Comandos — orquestación E2E completa); aquí (`e2e-backend`) sólo se habilita
-la conectividad de red de la API. Nota: `e2e-up` usa la ruta **wt** (no `e2e-backend`); `e2e-backend` queda como
-levante mono del backend para validar conectividad.
+| `make e2e-backend` / `make e2e-backend-down` | **[DEPRECADO]** Tombstone: cortan con exit 2 y remiten a `make wt-up WT=` / `make wt-down WT=`. |
+| `make e2e-net-check` | **Vigente.** Smoke de conectividad: M1 → data tier/API y guest → backend/data tier (`PROFILE=full`). En modo slot (con `WT` / dentro de `e2e-up`) hace **SKIP** de los checks del data tier por offset en vez de fallar sobre puertos inexistentes en la vía wt. `PM_E2E_CHECK_GUEST=0` omite los checks del guest (VM apagada). |
 
 ## Comandos — aprovisionamiento por worktree (`wt-*`)
 
@@ -306,10 +273,7 @@ inyecta el wiring de aplicación al backend .NET 10 en el deploy del legado, act
 **smoke funcional legacy-driven**. Usa la ruta **wt** (backend por slot, ver §Comandos — aprovisionamiento por
 worktree). Es idempotente.
 
-**Topología (todo el runtime vive en `macdata`).** La M1 es **solo el orquestador**: ejecuta `make` y maneja por
-SSH. El backend (contenedor de la API), el SQL compartido, el bus, el data tier y la **VM Windows del legado**
-corren en `macdata`. El disparo del smoke va **`macdata` → guest directo** (`172.16.128.129:8080`); el túnel
-`localhost:18080` que abre `legacy-launch` es **solo para acceso humano a la UI**, el smoke no lo usa.
+**Topología (todo el runtime vive en `macdata`).** La M1 es **solo el orquestador**: ejecuta `make` y maneja por SSH. El backend (contenedor de la API), el SQL compartido, el bus, el data tier y la **VM Windows del legado** corren en `macdata`. El disparo del smoke va **`macdata` → guest directo**, contra el **sitio del slot** (`172.16.128.129:8100+N`); el túnel `localhost:18100+N` que abre `legacy-launch SLOT=<N>` es **solo para acceso humano a la UI**, el smoke no lo usa.
 
 **Puente SQL (socat).** El SQL compartido de nvoslabs se publica solo en el **loopback de `macdata`**
 (`127.0.0.1:60201`), inalcanzable desde la VM (que ve a `macdata` por la pasarela NAT `172.16.128.1`). `e2e-up`
@@ -334,6 +298,7 @@ discrimina ON por `MensajeTecnico` y OFF por la ausencia de órdenes nuevas (rob
 | `make e2e-up ... LINEA=<cod> ANOF=<aaaa> SEMF=<sem>` | Params reales del disparo (el caso OFF/Oracle los exige; el ON los ignora). |
 | `make e2e-up ... FORCE=1` | Re-deploya el legado (re-inyecta el wiring; necesario si el slot se reutiliza o se conservó el sitio). |
 | `make e2e-smoke WT=<wt-pm>` | Solo el smoke funcional; dispara contra el **sitio del slot** (`8100+N`). Asume `e2e-up` ya dejó todo arriba. |
+| `make e2e-url WT=<wt-pm>` | Reimprime el **recuadro de acceso del slot** (URL del site y del túnel) y **re-levanta el túnel si murió**. Asume el ambiente ya arriba. |
 | `make e2e-down WT=<wt-pm>` | Baja el túnel y el **sitio del slot**, y luego API + Oracle + BD del slot (`wt-down`). El puente y los demás singletons quedan intactos. |
 | `make e2e-down ... PM_E2E_KEEP_FRONT=1` | Conserva el sitio del legado (reusarlo exige `FORCE=1` en el siguiente `e2e-up`). |
 | `make e2e-down ... PM_E2E_BRIDGE_DOWN=1` | Baja también el puente `60211`. **Compartido**: bajarlo hace que los demás slots lean el flag como OFF. |
@@ -381,7 +346,7 @@ los drivers. Los puertos del data tier se derivan en un solo lugar (`compute_por
 | --- | --- | --- | --- |
 | `TARGET` | pm | `local` | `local` (colima) o `intel` (macdata vía SSH). |
 | `PROFILE` | pm | `sql` | `sql` o `full` (agrega Oracle). |
-| `PROJECT` | pm | `pm-local` | Nombre del proyecto compose; aísla stacks en paralelo. |
+| `PROJECT` | pm | `pm-local` | Nombre del proyecto compose; sólo para stacks compose manuales del data tier (**DEPRECADO** como ambiente de trabajo: la vía es el slot). |
 | `OFFSET` | pm | `0` | Desplaza puertos por agente (SQL, Oracle y API). |
 | `SQLHOST` | pm | `127.0.0.1` | Host del SQL/bus; para `intel`, el alias `macdata` (requiere mapearlo en `/etc/hosts`, ver §Requisito de host). |
 | `APIPORT` | pm | `5180 + OFFSET` | Puerto de la API en la M1. |
@@ -394,8 +359,8 @@ los drivers. Los puertos del data tier se derivan en un solo lugar (`compute_por
 | `WINHOST` | e2e/legacy | `172.16.128.129` | IP NAT del guest Windows (reusada del legado). |
 | `DATATIER` | e2e/legacy | `1` | `0` = no gestiona el data tier (asume ya provisto). |
 | `MACDATA` | legacy | `macdata` | Alias SSH de la mac Intel que hospeda la VM. |
-| `SITEPORT` | legacy | `8080` | Puerto IIS del legado en el guest. |
-| `TUNNEL` | legacy | `18080` | Puerto local (M1) del túnel SSH → guest. |
+| `SITEPORT` | legacy | (vacío: lo deriva el slot, `8100+N`; singleton `8080`) | Puerto IIS del legado en el guest. Fijarlo ad-hoc está **DEPRECADO**. |
+| `TUNNEL` | legacy | (vacío: lo deriva el slot, `18100+N`; singleton `18080`) | Puerto local (M1) del túnel SSH → guest. Fijarlo ad-hoc está **DEPRECADO** (avisa sin bloquear). |
 | `LEGACY_PROFILE` | legacy | `full` | Perfil del data tier del legado (requiere Oracle ControlPiso). |
 | `DATATIER` | legacy | `1` | `0` = no gestiona el data tier (asume ya provisto). |
 | `FORCE` | legacy | `0` | `1` = rebuild/redeploy aunque ya esté arriba. |
@@ -428,10 +393,7 @@ echo "$(ssh macdata 'ipconfig getifaddr en0 || ipconfig getifaddr en1') macdata"
 
 Tras esto, `SQLHOST=macdata` sirve para SSH **y** para BD/AMQP. Si la IP de la `macdata` cambia (DHCP), se re-ejecuta.
 
-Para el modo E2E (`make e2e-backend`), la API corre en un contenedor **en** `macdata` y el guest la alcanza por la
-pasarela NAT (`172.16.128.1`), no por la IP LAN del M1: no hace falta tocar el firewall del M1. En `macdata` basta
-`docker` (no el SDK de .NET) y que su firewall permita la conexión entrante del guest al puerto `5180`. El mapeo
-`/etc/hosts` del M1 sigue aplicando para `make e2e-net-check` (probes M1 → `macdata`) y para alcanzar la API por la LAN.
+Para la vía E2E por slot (`make wt-up` / `make e2e-up`), la API corre en un contenedor **en** `macdata` y el guest la alcanza por la pasarela NAT (`172.16.128.1`), no por la IP LAN del M1: no hace falta tocar el firewall del M1. En `macdata` basta `docker` (no el SDK de .NET) y que su firewall permita la conexión entrante del guest al puerto de la API del slot (`5180+N*10`). El mapeo `/etc/hosts` del M1 sigue aplicando para `make e2e-net-check` (probes M1 → `macdata`) y para alcanzar la API por la LAN.
 
 ## Gate vs inner-loop
 
@@ -441,23 +403,15 @@ pasarela NAT (`172.16.128.1`), no por la IP LAN del M1: no hace falta tocar el f
   fuerza `TARGET=intel REMOTE=macdata ORACLE=1` y sustituye al singleton `pm-local` como ambiente de validación.
 - **`make pm-test`** es el **inner-loop**: rápido, `PROFILE=sql`, reusa la API arriba; acota con
   `FILTER=`/`TESTPROJECT=` (o `APIFORCE=1` para relanzar la API). La suite de mensajería sólo corre con `full`.
+- **`make pm-unit [WT=<worktree>] [FILTER=…]`** corre los **unit tests puros** (`*.UnitTests`): sin Docker, sin red y sin data tier; es la superficie de la evidencia **unit** por separado. El gate integral sigue siendo `make pm-test-clean WT=<worktree>`.
 
 ## Paralelismo
 
-La unidad de aislamiento es el **stack completo**, no la suite. `make pm-run PROJECT=pm-ag2 OFFSET=10` levanta su
-propio SQL/Oracle/API **y su propio bus** (`5672+OFFSET`). El bus **no** se comparte entre suites concurrentes:
-las entidades de `Config.json` son fijas y los tests drenan subscriptions, así que dos agentes contra el mismo
-stack competirían por los mismos mensajes. Regla: un agente = un stack (`PROJECT`/`OFFSET`).
+La unidad de aislamiento de **sesiones** es el **slot** (`make wt-up WT=<worktree>`; ver §Comandos — aprovisionamiento por worktree). `PROJECT`/`OFFSET` queda **solo** para stacks compose manuales del data tier y está **DEPRECADO como ambiente de trabajo**: `make pm-run PROJECT=… OFFSET=…` emite un warning deprecado sin bloquear. Para esos stacks manuales sigue aplicando la regla histórica: cada stack levanta su propio SQL/Oracle/API **y su propio bus** (`5672+OFFSET`); el bus **no** se comparte entre suites concurrentes (las entidades de `Config.json` son fijas y los tests drenan subscriptions, así que dos agentes contra el mismo stack competirían por los mismos mensajes) — un agente = un stack.
 
-> **Aviso `pm-nuke`:** `legacy-*` comparte el stack `pm-local`; `pm-nuke` borra volúmenes — se re-siembra el seed,
-> pero no lo que el legado haya escrito en vivo.
+> **Aviso `pm-nuke`:** `legacy-*` comparte el stack `pm-local`; `pm-nuke` borra volúmenes — se re-siembra el seed, pero no lo que el legado haya escrito en vivo. Por eso **exige la confirmación `NUKE=1`** (`make pm-nuke NUKE=1`); sin ella corta con exit 2.
 
-> **Aviso `TARGET=intel` desde varios checkouts:** `pm-run TARGET=intel` y `e2e-backend` hacen `rsync --delete`
-> a rutas fijas en `macdata` (`PM_REMOTE_DIR=pm-containers`, `PM_REMOTE_SOLUTION_DIR=pm-solution`), que **no** se
-> derivan de `PROJECT`/`OFFSET`. Dos checkouts del sidecar (el central y un worktree) ejecutando contra `intel`
-> en paralelo se pisan ese contexto remoto aunque usen `PROJECT` distinto. Para correrlos a la vez, además de
-> `PROJECT`/`OFFSET` hay que fijar `PM_REMOTE_DIR` y `PM_REMOTE_SOLUTION_DIR` distintos por checkout. Los `wt-*`
-> sí aíslan el contexto de build por slot (`pm-solution-wt<N>`).
+> **Aviso `TARGET=intel` desde varios checkouts:** `pm-run TARGET=intel` hace `rsync --delete` a rutas fijas en `macdata` (`PM_REMOTE_DIR=pm-containers`, `PM_REMOTE_SOLUTION_DIR=pm-solution`), que **no** se derivan de `PROJECT`/`OFFSET` (`e2e-backend`, que compartía ese contexto remoto, hoy es un tombstone **DEPRECADO**). Dos checkouts del sidecar (el central y un worktree) ejecutando contra `intel` en paralelo se pisan ese contexto remoto aunque usen `PROJECT` distinto. Para correrlos a la vez, además de `PROJECT`/`OFFSET` hay que fijar `PM_REMOTE_DIR` y `PM_REMOTE_SOLUTION_DIR` distintos por checkout. Los `wt-*` sí aíslan el contexto de build por slot (`pm-solution-wt<N>`).
 
 ## Rutas y worktrees
 
