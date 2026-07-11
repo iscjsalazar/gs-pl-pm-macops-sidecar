@@ -57,14 +57,15 @@
 #   # WT se autodetecta con git rev-parse si se corre dentro del worktree. Requiere REMOTE=macdata.
 #
 # Legado CargaPlantaPT_LN (legacy-*; data tier solo en intel/macdata):
-#   make legacy-launch                       # todo: data tier (intel) + VM + build + deploy + tunel + URL
-#   make legacy-launch FORCE=1               # fuerza rebuild/redeploy aunque ya este arriba
-#   make legacy-launch SLOT=3                # via per-slot: site pm-wt3:8103, arbol C:\wt3, tunel 18103
-#   make legacy-launch SITEPORT=8048 TUNNEL=18048   # puertos no-default (sobreescriben la derivacion)
-#   make legacy-launch DATATIER=0            # no gestiona el data tier (asume ya provisto)
+#   [SLOT obligatorio] make legacy-launch                       # todo: data tier (intel) + VM + build + deploy + tunel + URL
+#   [SLOT obligatorio] make legacy-launch FORCE=1               # fuerza rebuild/redeploy aunque ya este arriba
+#   [SLOT obligatorio] make legacy-launch SLOT=3                # via per-slot: site pm-wt3:8103, arbol C:\wt3, tunel 18103
+#   [SLOT obligatorio] make legacy-launch SITEPORT=8048 TUNNEL=18048   # puertos no-default (sobreescriben la derivacion)
+#   [SLOT obligatorio] make legacy-launch DATATIER=0            # no gestiona el data tier (asume ya provisto)
 #   make legacy-status                       # estado de data tier / VM / app / tunel
 #   make legacy-url                          # imprime URL y puertos de acceso
-#   make legacy-build / legacy-deploy / legacy-vm-up / legacy-data-up / legacy-tunnel
+#   [SLOT obligatorio] make legacy-build / legacy-deploy
+#   make legacy-vm-up / legacy-data-up / legacy-tunnel
 #   make legacy-down                         # cierra el tunel SSH y libera el turno del guest singleton
 #   make legacy-site-down SLOT=3             # desmonta el site per-slot del guest (nunca el singleton)
 #   make legacy-sites-status                 # sites 'pm*' del guest cruzados con el registro de slots
@@ -111,6 +112,7 @@ PM_ENV = PM_TARGET=$(TARGET) PM_PROFILE=$(PROFILE) PM_PROJECT=$(PROJECT) \
 MACDATA       ?= macdata
 WINHOST       ?= 172.16.128.129
 SLOT          ?=
+SINGLETON     ?= 0
 SITEPORT      ?=
 TUNNEL        ?=
 SQLPORT       ?= 1433
@@ -125,6 +127,7 @@ LEGACY_ENV = PM_LEGACY_MACDATA=$(MACDATA) PM_LEGACY_WINHOST=$(WINHOST) PM_LEGACY
              PM_LEGACY_SITE_PORT=$(SITEPORT) PM_LEGACY_TUNNEL_PORT=$(TUNNEL) \
              PM_LEGACY_SQL_PORT=$(SQLPORT) PM_LEGACY_ORACLE_PORT=$(ORACLEPORT) PM_LEGACY_DBHOST=$(DBHOST) \
              PM_LEGACY_PROFILE=$(LEGACY_PROFILE) PM_LEGACY_DATATIER=$(DATATIER) PM_LEGACY_FORCE=$(FORCE) \
+             PM_LEGACY_SINGLETON=$(SINGLETON) \
              WT=$(WT) PM_LEGACY_SRC_LOCAL='$(SOLUTION)' PM_WRAPPER_DIR='$(WRAPPER)'
 
 # --- Variables E2E (Opción C: API co-localizada con el data tier en macdata, alcanzable por el guest) ---
