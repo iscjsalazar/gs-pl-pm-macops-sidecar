@@ -511,6 +511,116 @@ wt_drop_planning() {  # uso: wt_drop_planning <password>
   wt_shared_exec "$pw" "$sql" || wt_log "aviso: no se pudo dropear '$PM_PLANNING_DB' (quiza ya no existe)"
 }
 
+# --- Presupuesto de aprovisionamiento (topes reales: disco/RAM de la VM colima, docker, guest, slots) ---
+# El limite efectivo del aprovisionamiento NO es el disco del host (6.7 TiB) sino el disco de la VM colima
+# (/dev/vdb1, 80 GiB) donde viven imagenes y volumenes: se lleno en D6 (2026-07-05, CREATE DATABASE al 100%).
+# Toda medicion remota va por on_intel (el contexto docker vive en macdata, no resuelve desde la M1) y es
+# best-effort: sin REMOTE o con colima sin responder cada metrica degrada a vacio, nunca aborta el verbo que la
+# consulta.
+
+# Perfil colima remoto derivado del contexto docker (colima-<perfil>); fallback nlc3runner.
+wt_colima_profile() { local p="${PM_REMOTE_DOCKER_CONTEXT#colima-}"; [ -n "$p" ] || p="nlc3runner"; printf '%s' "$p"; }
+
+# Verdadero si el argumento es un entero decimal no vacio.
+wt_is_num() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
+
+# Formatea bytes -> "N.N" (GB, una decimal). Vacio si la entrada no es numerica.
+wt_gb() { wt_is_num "${1:-}" || return 0; awk -v b="$1" 'BEGIN{printf "%.1f", b/1073741824}'; }
+
+# Valor de la clave 'clave=valor' en un blob multilinea (vacio si ausente).
+wt_kv() { printf '%s\n' "${1:-}" | awk -F= -v k="${2:-}" '$1==k{print $2; exit}'; }
+
+# Disco /dev/vdb1 de la VM colima -> "totalBytes availBytes usePct" (vacio si no se pudo medir). Se ancla por
+# device (no por mount, que es /var/lib/cni, no /). Fail-open.
+wt_colima_disk_line() {
+  [ -n "$PM_REMOTE_SSH" ] || return 0
+  local prof; prof="$(wt_colima_profile)"
+  on_intel "colima ssh -p '$prof' -- df -B1 /dev/vdb1" 2>/dev/null | awk '$1 ~ /vdb1/ {print $2, $4, $5; exit}' || true
+}
+
+# RAM de la VM colima -> "totalBytes availBytes" (vacio si no se pudo medir). Fail-open.
+wt_colima_ram_line() {
+  [ -n "$PM_REMOTE_SSH" ] || return 0
+  local prof; prof="$(wt_colima_profile)"
+  on_intel "colima ssh -p '$prof' -- free -b" 2>/dev/null | awk '/^Mem:/{print $2, $NF; exit}' || true
+}
+
+# docker system df del docker remoto: reclaimable por tipo en una linea (informativo, NO entra en la aritmetica
+# del umbral; el prune-hook de wt_up_api retira las capas dangling). Vacio si no se pudo medir. Fail-open.
+wt_docker_reclaimable() {
+  [ -n "$PM_REMOTE_SSH" ] || return 0
+  on_intel "docker $(remote_docker_ctx) system df --format '{{.Type}}={{.Reclaimable}}'" 2>/dev/null | tr '\n' ' ' | sed 's/ *$//' || true
+}
+
+# Contadores del guest Windows via guest-mem.sh (mismo path remoto que sites-status.sh en cmd_wt_gc). Blob
+# clave=valor; vacio si el guest no responde. Fail-open (best-effort).
+wt_guest_mem_line() {
+  [ -n "$PM_REMOTE_SSH" ] || return 0
+  on_intel "bash ~/pm-host-windows/scripts/guest-mem.sh" 2>/dev/null || true
+}
+
+# N de slots vivos = renglones del registro (folder->slot; el archivo no lleva encabezado).
+wt_live_slots() {
+  [ -f "$PM_WT_REGISTRY" ] || { printf '0'; return 0; }
+  awk 'END{print NR+0}' "$PM_WT_REGISTRY" 2>/dev/null || printf '0'
+}
+
+# Gate de disco de wt-up: rechaza aprovisionar si el disco de la VM colima esta por debajo de PM_WT_MIN_DISK_GB,
+# ANTES de gastar rsync/build (en D6 el fallo aparecia a mitad del seed). Fail-open: si la medicion FALLA (colima
+# sin responder, parse vacio) avisa y continua; SOLO aborta con una medicion exitosa por debajo del umbral.
+wt_disk_gate() {
+  local free min_bytes
+  free="$(wt_colima_disk_line | awk '{print $2}')"
+  if ! wt_is_num "$free"; then
+    wt_log "aviso: no se pudo medir el disco de la VM colima (colima sin responder o parse vacio); se continua sin gate de disco"
+    return 0
+  fi
+  min_bytes=$(( PM_WT_MIN_DISK_GB * 1073741824 ))
+  if [ "$free" -lt "$min_bytes" ]; then
+    wt_log "ERROR: disco de la VM colima por debajo del umbral: $(wt_gb "$free") GB libres < $PM_WT_MIN_DISK_GB GB (PM_WT_MIN_DISK_GB)."
+    wt_log "       Es el disco /dev/vdb1 de la VM colima (NO el host de 6.7 TiB). Baja worktrees (make wt-down) o corre make wt-gc FORCE=1; sube PM_WT_MIN_DISK_GB para forzar."
+    return 1
+  fi
+  wt_log "disco de la VM colima OK: $(wt_gb "$free") GB libres >= umbral $PM_WT_MIN_DISK_GB GB"
+}
+
+# Seccion "Presupuesto" de wt-info: topes reales del aprovisionamiento. Best-effort (cada metrica no medible
+# degrada a 'n/d'); las lecturas remotas van por on_intel. Imprime las lineas ya indentadas para el heredoc.
+wt_budget_lines() {
+  local dl rl recl gm total free pct ram_total ram_avail g_av g_pg g_w3 live min_bytes status
+  dl="$(wt_colima_disk_line)"
+  rl="$(wt_colima_ram_line)"
+  recl="$(wt_docker_reclaimable)"
+  gm="$(wt_guest_mem_line)"
+  total="$(printf '%s' "$dl" | awk '{print $1}')"
+  free="$(printf '%s' "$dl" | awk '{print $2}')"
+  pct="$(printf '%s' "$dl" | awk '{print $3}')"
+  ram_total="$(printf '%s' "$rl" | awk '{print $1}')"
+  ram_avail="$(printf '%s' "$rl" | awk '{print $2}')"
+  g_av="$(wt_kv "$gm" availableMB)"
+  g_pg="$(wt_kv "$gm" pagesPerSec)"
+  g_w3="$(wt_kv "$gm" w3wpCount)"
+  live="$(wt_live_slots)"
+  min_bytes=$(( PM_WT_MIN_DISK_GB * 1073741824 ))
+  status="OK"
+  if wt_is_num "$free" && [ "$free" -lt "$min_bytes" ]; then status="BAJO UMBRAL"; fi
+
+  echo "  Presupuesto (topes reales del aprovisionamiento)"
+  if wt_is_num "$free"; then
+    echo "    disco VM colima   $(wt_gb "$free") GB libres / $(wt_gb "$total") GB (${pct} usado)   umbral wt-up: ${PM_WT_MIN_DISK_GB} GB   [${status}]"
+  else
+    echo "    disco VM colima   n/d (sin REMOTE=macdata o colima sin responder)   umbral wt-up: ${PM_WT_MIN_DISK_GB} GB"
+  fi
+  echo "    docker reclamable ${recl:-n/d}"
+  if wt_is_num "$ram_avail"; then
+    echo "    RAM VM colima     $(wt_gb "$ram_avail") GB disponibles / $(wt_gb "$ram_total") GB"
+  else
+    echo "    RAM VM colima     n/d"
+  fi
+  echo "    guest Windows     availableMB=${g_av:-n/d} pagesPerSec=${g_pg:-n/d} w3wp=${g_w3:-n/d}"
+  echo "    slots vivos       ${live} / ${PM_WT_SLOTS} (PM_WT_SLOTS)"
+}
+
 # --- Verbos ---
 
 cmd_wt_up() {
@@ -546,6 +656,10 @@ cmd_wt_up() {
 
   # Falla temprana si el puerto de API del slot ya esta ocupado en macdata (antes del rsync/build).
   wt_check_api_port_free || return 1
+
+  # Gate de disco de la VM colima: rechaza ANTES del rsync/build/seed si el disco esta por debajo del umbral
+  # (en D6 el fallo aparecia a mitad del seed). Solo mide disco; no depende del slot. Fail-open ante error de medicion.
+  wt_disk_gate || return 1
 
   local pw; pw="$(wt_shared_sql_password)" || return 1
 
@@ -620,9 +734,19 @@ cmd_wt_down() {
 }
 
 cmd_wt_ls() {
-  if [ ! -s "$PM_WT_REGISTRY" ]; then echo "[wt] registro vacio ($PM_WT_REGISTRY)"; return 0; fi
-  echo "folder	slot	project	offset	created"
-  cat "$PM_WT_REGISTRY"
+  # Resumen de presupuesto (disco libre VM colima + slots vivos): best-effort, degrada sin abortar. Este verbo
+  # no exige remoto (no llama wt_require_intel); sin REMOTE=macdata el disco sale 'n/d'.
+  local free disk_txt live
+  free="$(wt_colima_disk_line | awk '{print $2}')"
+  if wt_is_num "$free"; then disk_txt="$(wt_gb "$free") GB libres"; else disk_txt="n/d (sin REMOTE=macdata)"; fi
+  live="$(wt_live_slots)"
+  if [ ! -s "$PM_WT_REGISTRY" ]; then
+    echo "[wt] registro vacio ($PM_WT_REGISTRY)"
+  else
+    echo "folder	slot	project	offset	created"
+    cat "$PM_WT_REGISTRY"
+  fi
+  echo "[wt] presupuesto: disco VM colima ${disk_txt}   slots vivos ${live}/${PM_WT_SLOTS} (PM_WT_SLOTS)"
 }
 
 cmd_wt_status() {
@@ -646,6 +770,9 @@ cmd_wt_info() {
     return 1
   fi
   wt_derive "$slot"
+  # Presupuesto medido ANTES del heredoc (el heredoc solo interpola $var; no ejecuta subcomandos). Best-effort.
+  local budget=""
+  budget="$(wt_budget_lines)" || true
   cat <<EOF
 [wt] worktree '$folder' -> slot $slot
 
@@ -669,6 +796,8 @@ cmd_wt_info() {
   Compartidos (NO son del slot)
     SQL Server (motor), bus ${PM_WT_BUS_PROJECT}, puente pm-e2e-sqlbridge:60211, ${PM_WT_LN_DB} (read-only),
     site singleton pm:8080, pm-local-oracle-1:1521
+
+$budget
 
   URLs
     API      http://${PM_REMOTE_SSH:-macdata}:${PM_API_PORT}/health/live
