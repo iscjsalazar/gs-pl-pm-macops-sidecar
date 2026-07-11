@@ -208,6 +208,9 @@ cmd_test_clean() {     # gate "limpio" POR SLOT: aprovisiona el data tier del sl
   cmd_wt_up || return 1
   # 2) Host M1-resoluble hacia macdata: el mDNS del host Intel, NUNCA el alias 'macdata' (D36). Override por SQLHOST.
   local m1host="$PM_TEST_SQL_HOST"
+  # Nota (D36): SQLHOST=macdata NO resuelve desde el M1 (es alias SSH, no un nombre DNS/mDNS); el nombre
+  # M1-resoluble es macbook-pro-de-diana.local (mDNS del host Intel) o una entrada en /etc/hosts del M1.
+  case "$m1host" in macdata) echo "[pm] nota: SQLHOST=macdata no resuelve desde el M1 (alias SSH); se usa macbook-pro-de-diana.local (mDNS) o una entrada en /etc/hosts (D36)." ;; esac
   case "$m1host" in ""|127.0.0.1|localhost|macdata) m1host="macbook-pro-de-diana.local" ;; esac
   # 3) Puente 60211 -> SQL compartido (idempotente, adopt-if-present, bajo wt_lock bridge; factorizado en lib/).
   local bport pw; bport="$(wt_bridge_port)"

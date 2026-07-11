@@ -440,8 +440,12 @@ wt_oracle_down() {
 # contenedor (distinto del propio, que el verbo recrea) ya lo publica. Sin esto el conflicto de bind solo
 # aflora del 'docker run' tras el build completo (minutos).
 wt_check_port_free() {  # uso: wt_check_port_free <puerto> <contenedor-propio> <etiqueta>
-  local port="$1" own="$2" label="$3" ctx holder; ctx="$(remote_docker_ctx)"
-  holder="$(on_intel "docker $ctx ps --filter 'publish=$port' --format '{{.Names}}' 2>/dev/null" | tr -d '\r' | grep -v -x "$own" | head -n1 || true)"
+  local port="$1" own="$2" label="$3" ctx names rc holder; ctx="$(remote_docker_ctx)"
+  # Falla-CERRADO: el rc del on_intel (ssh/docker) se captura ANTES de filtrar, sin que el pipe ni un '|| true'
+  # lo enmascaren. Si la consulta falla, no se puede afirmar que el puerto este libre -> se aborta, no se procede.
+  rc=0; names="$(on_intel "docker $ctx ps --filter 'publish=$port' --format '{{.Names}}' 2>/dev/null")" || rc=$?
+  [ "$rc" -eq 0 ] || { wt_die "no se pudo verificar el puerto :$port en $PM_REMOTE_SSH (ssh/docker); no se procede (falla-cerrado)"; return 1; }
+  holder="$(printf '%s' "$names" | tr -d '\r' | grep -v -x "$own" | head -n1 || true)"
   [ -z "$holder" ] || { wt_die "el puerto de $label :$port ya lo publica el contenedor '$holder' en $PM_REMOTE_SSH; baja ese stack o usa otro slot"; return 1; }
 }
 
@@ -625,9 +629,28 @@ wt_budget_lines() {
 
 cmd_wt_up() {
   wt_require_intel || return 1
+  # Gate de disco de la VM colima ANTES de asignar el slot (D44): solo mide disco de colima (no depende del slot),
+  # asi un rechazo por umbral NO consume una fila de slots.tsv. Fail-open ante error de medicion (req5). Queda
+  # FUERA del up-lock (no toca el slot); no confundir con el falla-cerrado de wt_check_port_free.
+  wt_disk_gate || return 1
   local folder slot
   folder="$(wt_resolve_folder)" || return 1
+  # La asignacion de slot se serializa por el registro (aparte del up-lock): folders distintos no compiten.
   slot="$(wt_registry_lock wt_slot_assign "$folder")" || return 1
+  # Exclusion por slot (D29-2): dos wt-up del MISMO folder resuelven el mismo slot y se pisan rsync/build/run. El
+  # aprovisionamiento se serializa por 'wt_lock up-<slot>'; el segundo espera (o reclama si el dueno murio). Los
+  # locks internos (ln/bus/seed/bridge/oracle-wt<N>) llevan otros nombres: sin deadlock. wt_lock corre el helper
+  # como llamada NUEVA -> folder/slot viajan por args (los locals de cmd_wt_up no cruzan; los globals de wt_derive si).
+  # El anidamiento de wt_lock hace que el 'trap RETURN' de cada helper interno dispare un drop del up-lock; es
+  # idempotente (_wt_lock_drop es no-op si el lock ya se solto), asi que los drops NO son 1:1 con los acquires.
+  wt_lock "up-${slot}" _cmd_wt_up_locked "$folder" "$slot"
+}
+
+# Cuerpo de aprovisionamiento de un slot, serializado por 'wt_lock up-<slot>' (ver cmd_wt_up). Corre como llamada
+# nueva: recibe folder ($1) y slot ($2) por args (los locals de cmd_wt_up no cruzan); los globals que fija
+# wt_derive (WT_SLOT, PM_*, WT_ORACLE_*) SI cruzan a las funciones que invoca.
+_cmd_wt_up_locked() {
+  local folder="$1" slot="$2"
   wt_derive "$slot"
   wt_log "worktree '$folder' -> slot $slot (proyecto $PM_PROJECT, offset $PM_PORT_OFFSET, API :$PM_API_PORT, BD $PM_PLANNING_DB, bus $WT_SB_PREFIX)"
 
@@ -657,10 +680,6 @@ cmd_wt_up() {
   # Falla temprana si el puerto de API del slot ya esta ocupado en macdata (antes del rsync/build).
   wt_check_api_port_free || return 1
 
-  # Gate de disco de la VM colima: rechaza ANTES del rsync/build/seed si el disco esta por debajo del umbral
-  # (en D6 el fallo aparecia a mitad del seed). Solo mide disco; no depende del slot. Fail-open ante error de medicion.
-  wt_disk_gate || return 1
-
   local pw; pw="$(wt_shared_sql_password)" || return 1
 
   # 1) rsync de containers/ (scripts + CSV de seed) a macdata; resuelve su ruta absoluta para docker -v/cp.
@@ -670,7 +689,10 @@ cmd_wt_up() {
 
   # 2) singletons compartidos
   wt_shared_sql_check || return 1
-  wt_push_seed_assets || return 1
+  # Lock dedicado del seed (F2 de 260702-2244): wt_push_seed_assets hace 'docker cp' de los CSV a rutas
+  # COMPARTIDAS del motor SQL (/pmdata, /seed-ctrlpiso); dos wt-up concurrentes en slots distintos se
+  # sobreescribirian. Serializa el push (distinto del up-lock, que aisla por slot). No usa el lock del registro.
+  wt_lock seed wt_push_seed_assets || return 1
   # Lock dedicado del seed LN: serializa el check-then-act (DROP+CREATE de pm_erpln106) entre wt-up
   # concurrentes en frio; sin el, dos verian la referencia ausente y la sembrarian en paralelo (corrupcion).
   wt_lock ln wt_ensure_ln_singleton "$pw" || return 1
@@ -805,15 +827,38 @@ $budget
 EOF
 }
 
+# Owner (folder) de un slot segun el SNAPSHOT del registro (una linea 'folder<TAB>slot<TAB>...' por worktree).
+# Vacio si el slot esta libre. Consulta la copia en memoria; no re-lee ni re-lockea el archivo por cada plano.
+_wt_gc_owner() {  # uso: _wt_gc_owner <slot> <snapshot>
+  printf '%s\n' "$2" | awk -F'\t' -v s="$1" '$2==s{print $1; exit}'
+}
+
 # Recoleccion de basura: cruza los CUATRO planos (registro / API / Oracle / sites+tuneles) y lista los
-# huerfanos. Con FORCE=1 los retira. Sin FORCE solo informa.
+# huerfanos. Con FORCE=1 los retira. Sin FORCE solo informa. Sale != 0 si con FORCE=1 no pudo retirar un huerfano.
 cmd_wt_gc() {
   wt_require_intel || return 1
   local ctx force="${PM_WT_GC_FORCE:-0}"; ctx="$(remote_docker_ctx)"
-  local apis oracles sites slot owner n orphans=0
+  local apis oracles sites slot owner n orphans=0 clean_failures=0
+  # Snapshot del registro tomado UNA vez bajo wt_registry_lock: el listado y todos los lookups de owner se hacen
+  # contra esta copia en memoria, sin sostener el lock durante las llamadas remotas (docker/ssh) de los planos.
+  local reg_snap="" reg_readable=1
+  if [ -f "$PM_WT_REGISTRY" ]; then
+    reg_snap="$(wt_registry_lock cat "$PM_WT_REGISTRY")" || reg_readable=0
+  fi
+  # Un registro NO legible (lock no adquirido o lectura fallida) es estado DESCONOCIDO, distinto de un registro
+  # vacio: un snapshot vacio por fallo de lectura veria todos los slots vivos como huerfanos. Con FORCE=1 se aborta
+  # sin retirar nada (evita segar en masa APIs/Oracles/sites/tuneles de sesiones vivas); sin FORCE se avisa y se
+  # informa (los huerfanos listados no son fiables).
+  if [ "$reg_readable" != "1" ]; then
+    if [ "$force" = "1" ]; then
+      wt_die "no se pudo leer el registro de slots bajo lock ($PM_WT_REGISTRY); wt-gc con FORCE=1 NO retira nada para no segar slots vivos"
+      return 1
+    fi
+    wt_log "AVISO: no se pudo leer el registro de slots ($PM_WT_REGISTRY); la deteccion de huerfanos NO es fiable (se informa, no se retira)"
+  fi
 
   echo "[wt-gc] registro de slots ($PM_WT_REGISTRY):"
-  if [ -s "$PM_WT_REGISTRY" ]; then awk -F'\t' '{printf "  slot %-3s %s\n", $2, $1}' "$PM_WT_REGISTRY"; else echo "  (vacio)"; fi
+  if [ -n "$reg_snap" ]; then printf '%s\n' "$reg_snap" | awk -F'\t' '{printf "  slot %-3s %s\n", $2, $1}'; else echo "  (vacio)"; fi
 
   apis="$(on_intel "docker $ctx ps -a --filter 'name=pm-wt' --format '{{.Names}}' 2>/dev/null" 2>/dev/null | tr -d '\r' | grep -E '^pm-wt[0-9]+-api$' || true)"
   oracles="$(on_intel "docker $ctx ps -a --filter 'name=pm-wt' --format '{{.Names}}' 2>/dev/null" 2>/dev/null | tr -d '\r' | grep -E '^pm-wt[0-9]+-oracle-1$' || true)"
@@ -822,11 +867,15 @@ cmd_wt_gc() {
   echo "[wt-gc] plano API:"
   for n in $apis; do
     slot="${n#pm-wt}"; slot="${slot%-api}"
-    owner="$(awk -F'\t' -v s="$slot" '$2==s{print $1; exit}' "$PM_WT_REGISTRY" 2>/dev/null)"
+    owner="$(_wt_gc_owner "$slot" "$reg_snap")"
     if [ -n "$owner" ]; then echo "  $n  -> $owner"
     else
       echo "  $n  -> HUERFANO (slot $slot libre)"; orphans=$((orphans+1))
-      [ "$force" = "1" ] && { on_intel "docker $ctx rm -f '$n' >/dev/null 2>&1; true"; echo "     retirado"; }
+      if [ "$force" = "1" ]; then
+        # Sin '; true': el rc del docker rm (o del ssh) se propaga y una falla de retiro se contabiliza.
+        if on_intel "docker $ctx rm -f '$n' >/dev/null 2>&1"; then echo "     retirado"
+        else echo "     ERROR: no se pudo retirar '$n' (ssh/docker)"; clean_failures=$((clean_failures+1)); fi
+      fi
     fi
   done
   [ -n "$apis" ] || echo "  (ninguno)"
@@ -834,11 +883,16 @@ cmd_wt_gc() {
   echo "[wt-gc] plano Oracle:"
   for n in $oracles; do
     slot="${n#pm-wt}"; slot="${slot%-oracle-1}"
-    owner="$(awk -F'\t' -v s="$slot" '$2==s{print $1; exit}' "$PM_WT_REGISTRY" 2>/dev/null)"
+    owner="$(_wt_gc_owner "$slot" "$reg_snap")"
     if [ -n "$owner" ]; then echo "  $n  -> $owner"
     else
       echo "  $n  -> HUERFANO (slot $slot libre)"; orphans=$((orphans+1))
-      if [ "$force" = "1" ]; then wt_derive "$slot"; wt_oracle_down && echo "     retirado"; fi
+      if [ "$force" = "1" ]; then
+        wt_derive "$slot"
+        # wt_oracle_down retorna != 0 si el contenedor/volumen sobrevive (VERIFICA la ausencia): se contabiliza.
+        if wt_oracle_down; then echo "     retirado"
+        else echo "     ERROR: no se pudo retirar '$n' por completo"; clean_failures=$((clean_failures+1)); fi
+      fi
     fi
   done
   [ -n "$oracles" ] || echo "  (ninguno)"
@@ -846,11 +900,14 @@ cmd_wt_gc() {
   echo "[wt-gc] plano sites IIS del guest:"
   for n in $sites; do
     slot="${n#pm-wt}"
-    owner="$(awk -F'\t' -v s="$slot" '$2==s{print $1; exit}' "$PM_WT_REGISTRY" 2>/dev/null)"
+    owner="$(_wt_gc_owner "$slot" "$reg_snap")"
     if [ -n "$owner" ]; then echo "  $n  -> $owner"
     else
       echo "  $n  -> HUERFANO (slot $slot libre)"; orphans=$((orphans+1))
-      [ "$force" = "1" ] && { ssh "$PM_REMOTE_SSH" "WINHOST=${PM_GUEST_WINHOST} SLOT=$slot bash ~/pm-host-windows/scripts/site-down.sh" >/dev/null 2>&1 && echo "     retirado"; }
+      if [ "$force" = "1" ]; then
+        if ssh "$PM_REMOTE_SSH" "WINHOST=${PM_GUEST_WINHOST} SLOT=$slot bash ~/pm-host-windows/scripts/site-down.sh" >/dev/null 2>&1; then echo "     retirado"
+        else echo "     ERROR: no se pudo retirar el site '$n' (guest inalcanzable o site-down fallo)"; clean_failures=$((clean_failures+1)); fi
+      fi
     fi
   done
   [ -n "$sites" ] || echo "  (ninguno o guest inalcanzable)"
@@ -866,19 +923,23 @@ cmd_wt_gc() {
     # Extrae el puerto local de un '-L <puerto>:<winhost>:<siteport>'.
     tun_port="$(printf '%s' "$tun_line" | sed -n "s/.*-L \([0-9]\{1,\}\):${PM_GUEST_WINHOST}:.*/\1/p")"
     if [ -z "$tun_port" ]; then echo "  pid $tun_pid  (no se dedujo el puerto local)"; continue; fi
-    # SOLO el bloque reservado [BASE, BASE+SLOTS) es del aprovisionamiento por slot. Fuera de el (18080 del
-    # singleton, 60211 del puente, cualquier tunel ad-hoc) el proceso es de otra via y NO se toca: sin la cota
-    # superior, un tunel en 60211 se leeria como "slot 42111 huerfano" y FORCE=1 lo mataria.
+    # SOLO la reserva documentada [BASE, BASE+SLOTS_MAX) es del aprovisionamiento por slot. La cota superior usa
+    # PM_WT_SLOTS_MAX (reserva 18100-18107), NO el PM_WT_SLOTS de la invocacion: con PM_WT_SLOTS bajo, un tunel
+    # legitimo de un slot alto (p. ej. 18106) caeria "fuera del bloque" y no se GC-aria. Fuera de la reserva
+    # (18080 del singleton, 60211 del puente, cualquier tunel ad-hoc) el proceso es de otra via y NO se toca.
     if [ "$tun_port" -lt "$PM_WT_TUNNEL_PORT_BASE" ] 2>/dev/null \
-       || [ "$tun_port" -ge "$(( PM_WT_TUNNEL_PORT_BASE + PM_WT_SLOTS ))" ] 2>/dev/null; then
+       || [ "$tun_port" -ge "$(( PM_WT_TUNNEL_PORT_BASE + PM_WT_SLOTS_MAX ))" ] 2>/dev/null; then
       echo "  pid $tun_pid  localhost:$tun_port  -> fuera del bloque de slots (singleton, puente u otra via): no se toca"; continue
     fi
     slot=$(( tun_port - PM_WT_TUNNEL_PORT_BASE ))
-    owner="$(awk -F'\t' -v s="$slot" '$2==s{print $1; exit}' "$PM_WT_REGISTRY" 2>/dev/null)"
+    owner="$(_wt_gc_owner "$slot" "$reg_snap")"
     if [ -n "$owner" ]; then echo "  pid $tun_pid  localhost:$tun_port  -> $owner (slot $slot)"
     else
       echo "  pid $tun_pid  localhost:$tun_port  -> HUERFANO (slot $slot libre)"; orphans=$((orphans+1))
-      [ "$force" = "1" ] && { kill "$tun_pid" 2>/dev/null && echo "     tunel cerrado (pid $tun_pid)"; }
+      if [ "$force" = "1" ]; then
+        if kill "$tun_pid" 2>/dev/null; then echo "     tunel cerrado (pid $tun_pid)"
+        else echo "     ERROR: no se pudo cerrar el tunel (pid $tun_pid)"; clean_failures=$((clean_failures+1)); fi
+      fi
     fi
   done <<EOF
 $(pgrep -fl -- "-L .*:${PM_GUEST_WINHOST}:" 2>/dev/null)
@@ -887,12 +948,18 @@ EOF
 
   echo ""
   if [ "$orphans" -eq 0 ]; then echo "[wt-gc] sin huerfanos."
-  elif [ "$force" = "1" ]; then echo "[wt-gc] $orphans huerfano(s) retirado(s)."
-  else echo "[wt-gc] $orphans huerfano(s); re-corre con FORCE=1 para retirarlos."; fi
+  elif [ "$force" != "1" ]; then echo "[wt-gc] $orphans huerfano(s); re-corre con FORCE=1 para retirarlos."
+  elif [ "$clean_failures" -gt 0 ]; then echo "[wt-gc] $orphans huerfano(s); $clean_failures retiro(s) fallaron (ver ERROR arriba)."
+  else echo "[wt-gc] $orphans huerfano(s) retirado(s)."; fi
 
   # Aviso de retencion prolongada del turno del guest singleton (vacio si esta libre o por debajo del umbral).
   local gt="$BASE_DIR/tools/guest-turn/guest-turn.sh"
   if [ -x "$gt" ]; then "$gt" hold-warn 2>/dev/null | sed 's/^/[wt-gc] /'; fi
+
+  # Exit != 0 si con FORCE=1 no se pudo retirar algun huerfano (ssh/docker/kill fallaron): un wt-gc en pipeline
+  # distingue "limpio" de "no pudo limpiar" (ac8). Sin huerfanos, sin FORCE, o todo retirado -> 0.
+  [ "$clean_failures" -eq 0 ] || { wt_log "wt-gc: $clean_failures retiro(s) fallaron; revisa manualmente en $PM_REMOTE_SSH"; return 1; }
+  return 0
 }
 
 # Verbo independiente: siembra/asegura solo la referencia LN compartida (paso deliberado de una vez).
@@ -903,6 +970,7 @@ cmd_wt_seed_ln() {
   WT_REMOTE_CONTAINERS_ABS="$(on_intel "cd '$PM_REMOTE_DIR' && pwd" | tr -d '\r')" || WT_REMOTE_CONTAINERS_ABS=""
   [ -n "$WT_REMOTE_CONTAINERS_ABS" ] || { wt_die "no se resolvio la ruta remota de containers"; return 1; }
   wt_shared_sql_check || return 1
-  wt_push_seed_assets || return 1
+  # Mismo lock del seed que cmd_wt_up: el 'docker cp' de los CSV va a rutas COMPARTIDAS del motor (F2).
+  wt_lock seed wt_push_seed_assets || return 1
   wt_lock ln wt_ensure_ln_singleton "$pw"
 }

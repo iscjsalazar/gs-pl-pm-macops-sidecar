@@ -105,9 +105,35 @@ _SYNCED=0
 sync_remote(){
   [ "$_SYNCED" = "1" ] && return 0
   log "sincronizando host-windows (scripts/packer) -> $MACDATA:$HW_REMOTE"
-  ssh_md "mkdir -p $HW_REMOTE" || true
-  rsync -a -e ssh "$HERE/scripts" "$HERE/packer" "$MACDATA:$HW_REMOTE/" \
-    || die "fallo el sync de host-windows hacia $MACDATA"
+  ssh_md "mkdir -p $HW_REMOTE/scripts" || true
+  # $HW_REMOTE/scripts es un arbol UNICO compartido: un 'rsync -a' desde un checkout viejo revierte en silencio
+  # los scripts de las demas sesiones (falta el --delete que si tienen los arboles per-slot de sync_to_intel).
+  # Guard por marcador de version: $HW_REMOTE/scripts/.sync-version guarda '<HEAD-short-sha> <committer-epoch>'
+  # del checkout que sincronizo. Si el marcador remoto trae un epoch ESTRICTAMENTE mayor (arbol mas nuevo), NO
+  # se sincroniza (no se revierte un arbol mas nuevo; warn en vez de die, para no abortar el verbo). Si no, se
+  # sincroniza con --delete y se reescribe el marcador.
+  local local_epoch local_sha remote_epoch
+  local_epoch="$(git -C "$HERE" show -s --format=%ct HEAD 2>/dev/null || true)"
+  local_sha="$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || true)"
+  case "$local_epoch" in ''|*[!0-9]*) local_epoch="" ;; esac
+  if [ -n "$local_epoch" ]; then
+    remote_epoch="$(ssh_md "cat $HW_REMOTE/scripts/.sync-version 2>/dev/null" 2>/dev/null | awk '{print $2}')"
+    case "$remote_epoch" in ''|*[!0-9]*) remote_epoch="" ;; esac
+    if [ -n "$remote_epoch" ] && [ "$remote_epoch" -gt "$local_epoch" ]; then
+      warn "el arbol remoto de host-windows/scripts es mas nuevo (epoch $remote_epoch > $local_epoch de $HERE); NO se sincroniza para no revertirlo"
+      _SYNCED=1
+      return 0
+    fi
+    rsync -a --delete -e ssh "$HERE/scripts" "$HERE/packer" "$MACDATA:$HW_REMOTE/" \
+      || die "fallo el sync de host-windows hacia $MACDATA"
+    # El --delete borra el marcador (no vive en el arbol fuente): se reescribe tras el rsync.
+    ssh_md "printf '%s %s\n' '$local_sha' '$local_epoch' > $HW_REMOTE/scripts/.sync-version" || true
+  else
+    # Sin git (o HEAD sin epoch): se degrada al comportamiento previo (rsync -a SIN --delete, no reversible).
+    warn "sin metadatos git de $HERE; sync no reversible (rsync -a sin --delete): un checkout viejo podria revertir scripts remotos"
+    rsync -a -e ssh "$HERE/scripts" "$HERE/packer" "$MACDATA:$HW_REMOTE/" \
+      || die "fallo el sync de host-windows hacia $MACDATA"
+  fi
   _SYNCED=1
 }
 

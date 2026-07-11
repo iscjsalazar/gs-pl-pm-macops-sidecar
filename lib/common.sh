@@ -119,7 +119,11 @@ load_env() {
   # --- Aprovisionamiento por worktree (verbos wt-*) ---
   # Un slot (0..N-1) es la unica perilla por worktree; de el se derivan proyecto/offset/BD/prefijo de bus,
   # y ademas site IIS, tunel y Oracle del legado (ver README, tabla canonica por slot).
-  PM_WT_SLOTS="${PM_WT_SLOTS:-8}"                       # N de slots disponibles
+  PM_WT_SLOTS="${PM_WT_SLOTS:-8}"                       # N de slots disponibles en ESTA invocacion
+  # Cota superior de la reserva documentada de slots (bloques 8100-8107 site / 18100-18107 tunel / 15210-15217
+  # Oracle): wt-gc acota el barrido de tuneles por esta reserva, NO por el PM_WT_SLOTS de la invocacion, para
+  # no dejar sin recoger un tunel legitimo de un slot alto (p. ej. 18106) cuando se corre con PM_WT_SLOTS bajo.
+  PM_WT_SLOTS_MAX="${PM_WT_SLOTS_MAX:-8}"               # reserva documentada 18100-18107 (cota de gc, no de asignacion)
   # Umbral de disco libre de la VM colima (GB) bajo el cual wt-up rechaza aprovisionar (el tope real, no el host).
   PM_WT_MIN_DISK_GB="${PM_WT_MIN_DISK_GB:-6}"           # ~4 slots E2E de margen (~1.3-1.4 GB por volumen Oracle)
   # Oracle ControlPiso por slot (fase 2, lazy): solo se aprovisiona con PM_WT_ORACLE=1 (la via e2e-up lo enciende).
