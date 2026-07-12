@@ -1,5 +1,5 @@
 # Imagen de la API .NET 10 (PL.PM.Bootstrapper.Api) para el camino E2E.
-# La construye el orquestador (pm.sh cmd_api_e2e) en el docker de macdata; el contexto de build es la raíz
+# La construye el aprovisionamiento por slots (lib/worktrees.sh) en el docker de macdata; el contexto de build es la raíz
 # de la solución rsync-eada (PM_REMOTE_SOLUTION_DIR). Se pasa por stdin (docker build -f-), por lo que este
 # archivo NO se coloca dentro del árbol de la solución (frontera wrapper-solución).
 #

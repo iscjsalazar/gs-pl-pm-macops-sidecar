@@ -27,11 +27,8 @@
 #   # Gate: el comando verde es 'pm-test-clean' (perfil full = Oracle+bus, API fresca). 'pm-test' a secas corre sql-only.
 #   # Vars del bus/Ln: PM_LN_DB (erpln106), PM_SERVICEBUS_HOST, PM_SB_HOST_PORT (5672+OFFSET), PM_SB_SA_PASSWORD.
 #
-# Backend en modo E2E (Opción C) — via DEPRECADA (§5; la sustituyen wt-up / e2e-up por slot):
-#   [DEPRECADO] make e2e-backend                         # data tier (intel) + API en macdata; imprime la URL guest (172.16.128.1:5180)
-#   [DEPRECADO] make e2e-backend DATATIER=0              # solo la API (asume el data tier ya arriba)
-#   [DEPRECADO] make e2e-backend APIFORCE=1              # relanza la API en macdata (no reusa la que esté arriba)
-#   [DEPRECADO] make e2e-backend-down                    # detiene la API E2E en macdata
+# Backend en modo E2E (Opción C) — via DEPRECADA, solo tombstone permanente (§5; la sustituyen wt-up / e2e-up por slot):
+#   [DEPRECADO] make e2e-backend / e2e-backend-down      # tombstone: cortan con exit 2 sin tocar nada; usa make wt-up WT=<worktree>
 #   make e2e-net-check                       # smoke de conectividad (M1 + guest -> backend/data tier)
 #   # Prereq: 'dotnet' (SDK .NET 10) y firewall abierto en macdata; 'macdata' resoluble en /etc/hosts del M1 (ver README).
 #
@@ -149,11 +146,11 @@ LEGACY_ENV = PM_LEGACY_MACDATA=$(MACDATA) PM_LEGACY_WINHOST=$(WINHOST) PM_LEGACY
 GATEWAY   ?= 172.16.128.1
 # llave SSH al guest (residente en macdata; el ~ se mantiene literal y se expande EN macdata):
 GUESTKEY  ?= ~/pm-host-windows/artifacts/ssh/id_pmwin
-# WINHOST (IP del guest) y DATATIER (1=levanta el data tier antes de la API) se reusan de las vars del legado.
+# WINHOST (IP del guest) se reusa de las vars del legado.
 
 # GUESTKEY va entre comillas simples para que el ~ NO se expanda en el M1 (la llave vive en macdata).
 E2E_ENV = $(PM_ENV) PM_GUEST_GATEWAY=$(GATEWAY) PM_GUEST_WINHOST=$(WINHOST) \
-          PM_GUEST_KEY='$(GUESTKEY)' PM_E2E_DATATIER=$(DATATIER)
+          PM_GUEST_KEY='$(GUESTKEY)'
 
 # --- Variables orquestacion E2E (e2e-up/e2e-smoke/e2e-down): wt + legacy + flag + smoke funcional ---
 # Ruta wt: el backend corre por slot (WT=<worktree de pl-programa-maestro con PL.PM.sln); LEGACYSRC = fuente
@@ -224,9 +221,9 @@ pm-logs:     ; $(PM_ENV) ./pm.sh logs
 pm-port:     ; $(PM_ENV) ./pm.sh port
 pm-bootstrap-intel: ; @test -n "$(REMOTE)" || { echo "falta REMOTE=<host-ssh-intel>"; exit 2; }; ssh $(REMOTE) 'bash -s' < remote-intel/bootstrap-intel.sh
 
-# --- backend en modo E2E (Opción C, DEPRECADA): API en macdata, alcanzable por el guest ---
-# 'override' fija el contrato del modo E2E aun frente a un override de línea de comando (TARGET/REMOTE/PROFILE
-# deben ser intel/macdata/full); el host del SQL en E2E lo fuerza el driver (pm.sh cmd_api_e2e), no esta capa.
+# --- backend en modo E2E (Opción C) — solo tombstone permanente (DEPRECADO): cortan con exit 2 en pm.sh ---
+# Los targets permanecen como tombstone (R3): 'override' fija el contrato historico (TARGET/REMOTE/PROFILE
+# intel/macdata/full), pero el verbo 'e2e-backend' de pm.sh ya no ejecuta nada — corta con aviso y exit 2.
 e2e-backend:      override TARGET  := intel
 e2e-backend:      override REMOTE  := macdata
 e2e-backend:      override PROFILE := full

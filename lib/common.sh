@@ -94,20 +94,18 @@ load_env() {
   # 5180 + PM_PORT_OFFSET (patron de los otros *_HOST_PORT). No se deriva aqui: en load_env el offset aun es 0;
   # wt_derive fija el offset real del slot y re-llama compute_ports.
   PM_API_PORT_OVERRIDE="${PM_API_PORT:-}"
-  # --- API en macdata (verbo 'e2e-backend', Opcion C) — VIA DEPRECADA (process-e2e-local-slots.md §5): la
-  # sustituye el aprovisionamiento por slots (make wt-up WT=<worktree>); el verbo corta con tombstone en pm.sh
-  # y cmd_api_e2e permanece solo hasta su retiro (follow-up). Las vars PM_GUEST_* siguen vigentes: las reusa
-  # la orquestacion viva e2e-up/e2e-smoke (scripts/e2e.sh) ---
-  # Dir donde se rsyncea la solucion en la Intel: sirve de CONTEXTO de build de la imagen de la API.
+  # --- Contexto de build de la imagen de la API en la Intel ---
+  # Dir donde se rsyncea la solucion en la Intel (sync_solution_to_intel); sirve de CONTEXTO de build de la
+  # imagen de la API que corre la via por slots. lib/worktrees.sh lo sobreescribe a pm-solution-wt<N> por slot.
   PM_REMOTE_SOLUTION_DIR="${PM_REMOTE_SOLUTION_DIR:-pm-solution}"
+  # --- Guest Windows (legado) visto desde la Intel: pasarela NAT + acceso SSH; lo reusan la orquestacion E2E
+  # por slots (scripts/e2e.sh, scripts/e2e-net-check.sh) y wt (lib/worktrees.sh) ---
   # Direccion de la Intel (macdata) vista DESDE el guest: pasarela NAT/bridge de VMware. El guest ya la usa
   # para Oracle (ver scripts/deploy-app.sh). Es la URL del backend que el guest alcanza.
   PM_GUEST_GATEWAY="${PM_GUEST_GATEWAY:-172.16.128.1}"
   # Acceso al guest Windows desde la Intel (reusa el patron del legado): IP NAT + llave SSH (residen en macdata).
   PM_GUEST_WINHOST="${PM_GUEST_WINHOST:-172.16.128.129}"
   PM_GUEST_KEY="${PM_GUEST_KEY:-~/pm-host-windows/artifacts/ssh/id_pmwin}"
-  # 'e2e-backend' (deprecado) levantaba el data tier (intel) antes de la API; 0 lo omite (asume data tier ya provisto).
-  PM_E2E_DATATIER="${PM_E2E_DATATIER:-1}"
 
   # --- Paridad: directorios del snapshot CSV y del store SQLite del resultado ---
   # El backend por defecto usa el temp del proceso (Path.GetTempPath()); en las rutas contenerizadas (API
@@ -198,11 +196,6 @@ pm_parity_env_flags() {
 
 # URL base de la API real (la M1). Único punto de verdad del puerto de API.
 pm_api_base_url() { printf 'http://%s:%s' "$PM_API_HOST" "$PM_API_PORT"; }
-
-# URL de la API E2E (Opción C) vista por el guest: el host del bridge NAT de macdata.
-pm_api_guest_url() { printf 'http://%s:%s' "$PM_GUEST_GATEWAY" "$PM_API_PORT"; }
-# URL de la API E2E vista por el M1 (LAN): requiere 'macdata' resoluble en /etc/hosts del M1 (ver README).
-pm_api_lan_url() { printf 'http://%s:%s' "${PM_REMOTE_SSH:-macdata}" "$PM_API_PORT"; }
 
 compute_ports() {
   if [ "$PM_PORT_MODE" = "ephemeral" ]; then

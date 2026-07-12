@@ -138,7 +138,7 @@ reclamar un lock rancio consulta al guest: si hay un MSBuild vivo, **no** lo rob
 
 ## Comandos — backend en modo E2E (`e2e-*`, Opción C) — DEPRECADO
 
-**Vía DEPRECADA con tombstone activo** (`gs-pl-pm-guidelines/process-e2e-local-slots.md` §5): `make e2e-backend` y `make e2e-backend-down` cortan con aviso y **exit 2** sin tocar nada — la API suelta en `macdata` no tiene BD, Oracle ni frontend propios y no aísla nada. La sustituye la vía por slot: `make wt-up WT=<worktree>` (solo el backend del slot) o `make e2e-up WT=<wt-pm> LEGACYSRC=<path>` (camino completo). El retiro del código de `e2e-backend` queda como follow-up; esta sección se conserva como referencia mínima.
+**Vía DEPRECADA, solo tombstone permanente** (`gs-pl-pm-guidelines/process-e2e-local-slots.md` §5): `make e2e-backend` y `make e2e-backend-down` cortan con aviso y **exit 2** sin tocar nada — la API suelta en `macdata` no tenía BD, Oracle ni frontend propios y no aislaba nada. El código de la vía `e2e-backend` ya se retiró; solo permanece el tombstone (guard permanente). La sustituye la vía por slot: `make wt-up WT=<worktree>` (solo el backend del slot) o `make e2e-up WT=<wt-pm> LEGACYSRC=<path>` (camino completo).
 
 | Comando | Acción |
 | --- | --- |
