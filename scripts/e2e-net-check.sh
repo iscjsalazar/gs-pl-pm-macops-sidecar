@@ -8,6 +8,7 @@
 #   PM_E2E_CHECK_GUEST=0 make e2e-net-check    # omite la sección del guest (VM apagada)
 set -uo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/worktrees.sh"   # wt_slot_lookup / wt_derive / wt_bridge_port (modo slot)
 set +e   # common.sh fija 'set -e'; el smoke NO debe abortar a mitad: reporta PASS/FAIL y sigue.
 load_env
 
@@ -19,6 +20,24 @@ APIP="$PM_API_PORT"
 SQLP="$PM_SQL_HOST_PORT"
 ORAP="$PM_ORACLE_HOST_PORT"
 BUSP="$PM_SB_HOST_PORT"
+GUEST_SQLP="$SQLP"                      # pata guest->SQL: en modo NO-slot coincide con el puerto de la M1
+
+# En modo slot (WT=<folder>) el data tier NO publica 1433/1521+offset: el Oracle del slot publica en 15210+N y el
+# guest alcanza el SQL del slot por el puente compartido 60211. Se resuelve el slot y se derivan sus puertos reales
+# (molde de scripts/e2e.sh) ANTES de imprimir la cabecera y de probar las patas del guest. Sin slot registrado no
+# hay puertos reales que derivar: se reporta explicito (no se prueba en silencio contra 1521/1433+offset espurios).
+WT_SLOT_OK=1
+if [ -n "${WT:-}" ]; then
+  WT_NET_SLOT="$(wt_slot_lookup "$WT")"
+  if [ -n "$WT_NET_SLOT" ]; then
+    wt_derive "$WT_NET_SLOT"            # fija PM_ORACLE_HOST_PORT=15210+N y PM_API_PORT reales del slot
+    APIP="$PM_API_PORT"
+    ORAP="$PM_ORACLE_HOST_PORT"
+    GUEST_SQLP="$(wt_bridge_port)"      # el guest alcanza el SQL del slot por el puente compartido (60211)
+  else
+    WT_SLOT_OK=0
+  fi
+fi
 
 PASS=0; FAIL=0
 ok()   { local l="$1" c="$2"; if eval "$c" >/dev/null 2>&1; then printf '  [PASS] %s\n' "$l"; PASS=$((PASS+1)); else printf '  [FAIL] %s\n' "$l"; FAIL=$((FAIL+1)); fi; }
@@ -32,7 +51,7 @@ guest_ps() {
 }
 
 echo "== Smoke E2E de red (perfil=$PM_PROFILE) =="
-echo "   Intel(macdata)=$MD  guest=$GWIN  gateway(guest->macdata)=$GW  api:$APIP  sql:$SQLP  oracle:$ORAP  bus:$BUSP"
+echo "   Intel(macdata)=$MD  guest=$GWIN  gateway(guest->macdata)=$GW  api:$APIP  sql:$GUEST_SQLP  oracle:$ORAP  bus:$BUSP"
 
 echo "-- M1 -> Intel / data tier / API --"
 ok "M1 alcanza la Intel por SSH ($MD)"                 "ssh -o ConnectTimeout=8 $MD true"
@@ -41,6 +60,7 @@ if [ -n "${WT:-}" ]; then
   # Via slot (WT=<folder>): el data tier NO publica 1433/1521/5672+offset en el host de macdata. El SQL se
   # alcanza por el puente 60211, el Oracle del slot por 15210+N y el bus por 15672; estos checks M1-directos por
   # offset no aplican y darian FAIL espurio. Se omiten (la via wt no expone esos puertos por offset).
+  ok "WT=$WT resuelve a un slot registrado (si falla: corre 'make wt-up WT=$WT' antes)"  "[ \"$WT_SLOT_OK\" = 1 ]"
   skip "M1 -> data tier SQL/Oracle/bus por offset (via slot WT=$WT: SQL por puente 60211, Oracle 15210+N, bus 15672)"
 else
   ok "M1 -> data tier SQL ($MD:$SQLP)"                   "nc -z -G 6 $MD $SQLP"
@@ -65,7 +85,7 @@ else
   if [ "$PM_PROFILE" = "full" ]; then
     ok "guest -> data tier Oracle TCP ($GW:$ORAP)"      "guest_ps '(Test-NetConnection -ComputerName $GW -Port $ORAP -WarningAction SilentlyContinue).TcpTestSucceeded' | grep -qi true"
   fi
-  ok "guest -> data tier SQL TCP ($GW:$SQLP)"           "guest_ps '(Test-NetConnection -ComputerName $GW -Port $SQLP -WarningAction SilentlyContinue).TcpTestSucceeded' | grep -qi true"
+  ok "guest -> data tier SQL TCP ($GW:$GUEST_SQLP)"     "guest_ps '(Test-NetConnection -ComputerName $GW -Port $GUEST_SQLP -WarningAction SilentlyContinue).TcpTestSucceeded' | grep -qi true"
 fi
 
 echo "== Resultado: $PASS PASS / $FAIL FAIL =="
