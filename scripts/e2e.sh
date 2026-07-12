@@ -283,6 +283,15 @@ e2e_set_flag(){  # uso: e2e_set_flag <0|1>
   fi
 }
 
+# Lectura VIVA del flag: imprime el IsEnabled real (0/1) de carga-backend/$PLANTA en la BD del slot; vacio si no
+# se pudo leer (sin SA o BD sin respuesta). Via wt_shared_scalar (escalar trimmeado). Nombre de tabla de 3 partes
+# (molde de e2e_orders_count) en vez de USE [...]: el mensaje "Changed database context to ..." de USE contaminaria
+# el escalar. El banner mapea el valor a on/off en vez de imprimir el estado DESEADO ($FLAG_FINAL).
+e2e_read_flag(){
+  local pw; pw="$(wt_shared_sql_password)" || return 1
+  wt_shared_scalar "$pw" "SET NOCOUNT ON; SELECT IsEnabled FROM [$PM_PLANNING_DB].FeatureManagement.FeatureFlags WHERE [Key]='carga-backend' AND Plant='$PLANTA';"
+}
+
 # Conteo de ordenes en la BD del backend. El backend almacena la planta BASE (BasePlantCode mapea RT->RES),
 # no la etiqueta RT, asi que el conteo filtra Plant='RES'. -1 ante error de consulta.
 e2e_orders_count(){
@@ -542,11 +551,37 @@ cmd_url(){
   e2e_summary "$(e2e_api_port)"
 }
 
+# Health-check LIGERO de las tres patas del ambiente, best-effort (timeouts cortos, nunca aborta). La API y el
+# puente se prueban por SSH a macdata contra 127.0.0.1 (molde e2e-net-check.sh:54): 'macdata' es un alias SSH, no
+# resuelve como hostname en el M1, asi que un curl/nc M1-directo a "$PM_REMOTE_SSH:puerto" daria DOWN espurio. El
+# site IIS del slot va por el tunel local (localhost:$TUNNEL -> guest:$SITEPORT), que si es M1-local. Fija
+# HEALTH_API/HEALTH_SITE/HEALTH_BRIDGE en OK/DOWN para que el banner refleje el estado real, no solo el proceso del tunel.
+e2e_health_check(){  # uso: e2e_health_check <api_port>
+  local api_port="$1"
+  if ssh -o ConnectTimeout=8 "$PM_REMOTE_SSH" "curl -fsS -o /dev/null --max-time 6 http://127.0.0.1:$api_port/health/live" >/dev/null 2>&1; then
+    HEALTH_API=OK; else HEALTH_API=DOWN; fi
+  if curl -fsS -o /dev/null --max-time 6 "http://localhost:$TUNNEL/$VDIR/Login.aspx" >/dev/null 2>&1; then
+    HEALTH_SITE=OK; else HEALTH_SITE=DOWN; fi
+  if ssh -o ConnectTimeout=8 "$PM_REMOTE_SSH" "nc -z -G 6 127.0.0.1 $BRIDGE_PORT" >/dev/null 2>&1; then
+    HEALTH_BRIDGE=OK; else HEALTH_BRIDGE=DOWN; fi
+}
+
 e2e_summary(){  # uso: e2e_summary <api_port>
   local api_port="$1"
+  # Health-check ligero de API/site/puente; la cabecera solo declara "arriba" si las tres patas responden.
+  e2e_health_check "$api_port"
+  local head_state='arriba'
+  case "${HEALTH_API}/${HEALTH_SITE}/${HEALTH_BRIDGE}" in OK/OK/OK) : ;; *) head_state='degradado' ;; esac
+  # Lectura VIVA del flag desde la BD del slot (best-effort): mapea 1->on, 0->off; marcador claro si no se leyo.
+  local flag_live; flag_live="$(e2e_read_flag)"
+  case "$flag_live" in
+    1) flag_live=on ;;
+    0) flag_live=off ;;
+    *) flag_live="?(sin lectura: ${flag_live:-vacio})" ;;
+  esac
   printf '\n'
   printf '  +----------------------------------------------------------------+\n'
-  printf '  |  E2E Programa Maestro -- arriba                                |\n'
+  printf '  |%-66s|\n' "  E2E Programa Maestro -- $head_state"
   printf '  +----------------------------------------------------------------+\n'
   printf '   Slot:                %s   (make wt-info WT=%s para la derivacion completa)\n' "$E2E_SLOT" "$WT"
   printf '   Backend (slot %s):   http://%s:%s   (BD %s)\n' "$E2E_SLOT" "$PM_GUEST_GATEWAY" "$api_port" "$PM_PLANNING_DB"
@@ -554,7 +589,8 @@ e2e_summary(){  # uso: e2e_summary <api_port>
   printf '   Site IIS (slot %s):  %s   (guest %s:%s)\n' "$E2E_SLOT" "$WT_SITE_NAME" "$PM_GUEST_WINHOST" "$SITEPORT"
   printf '   SQL del flag:        %s  (puente %s, compartido)\n' "$SQL_PM_HOST" "$BRIDGE_NAME"
   printf '   Legacy (login):      http://localhost:%s/%s/Login.aspx\n' "$TUNNEL" "$VDIR"
-  printf '   Feature flag:        carga-backend/%s = %s\n' "$PLANTA" "$FLAG_FINAL"
+  printf '   Feature flag:        carga-backend/%s = %s  (leido de %s)\n' "$PLANTA" "$flag_live" "$PM_PLANNING_DB"
+  printf '   Health:              API=%s  site=%s  puente=%s\n' "$HEALTH_API" "$HEALTH_SITE" "$HEALTH_BRIDGE"
   printf '   Smoke / cierre:      make e2e-smoke WT=%s   |   make e2e-down WT=%s\n' "$WT" "$WT"
   printf '\n'
 }
