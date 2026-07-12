@@ -340,8 +340,10 @@ with_up_lock() {  # uso: with_up_lock <cmd...>
     i=$((i+1)); [ "$i" -gt 90 ] && { echo "[pm] timeout esperando lock de arranque" >&2; return 1; }
     sleep 1
   done
-  trap 'rmdir "$LOCKDIR" 2>/dev/null || true' RETURN
-  "$@"
+  local rc=0
+  "$@" || rc=$?
+  rmdir "$LOCKDIR" 2>/dev/null || true
+  return "$rc"
 }
 
 # --- ejecutor de docker compose: local (contexto) o intel (ssh) ---
