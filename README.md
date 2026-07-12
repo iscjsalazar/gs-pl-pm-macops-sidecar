@@ -117,15 +117,7 @@ make legacy-down                           # cierra el túnel y libera el turno 
 
 ### Dos vías, dos locks
 
-La **vía singleton** (vía legada **DEPRECADA**; se alcanza sólo con el escape deliberado `SINGLETON=1` — sin `SLOT` ni `SINGLETON=1`, `legacy-launch`/`legacy-build`/`legacy-deploy` cortan con exit 2) comparte un único sitio `pm`:8080, un único árbol `C:\src` y un único
-`Web.config`: el `stage` de una sesión borra el árbol de la otra y el `deploy` reescribe su configuración. Por eso
-está protegida por un **turno exclusivo** (`tools/guest-turn/guest-turn.sh`, mismo patrón que `deploy-turn`: mutex
-por `mkdir`, identidad por pid + `lstart`, heartbeat con TTL, reclamo por `mv` al *graveyard* — nunca `rm`). Una
-segunda sesión que intente `legacy-launch`/`build`/`deploy` sobre el singleton recibe **exit 3** y no toca nada. El
-turno se **mantiene** mientras la sesión usa el sitio y se libera con `make legacy-down` o `make legacy-turn-release`.
-`guest-turn.sh status` reporta **siempre** la edad de retención y, superado `GUEST_TURN_HOLD_WARN` (default 14400 s / 4 h),
-imprime `AVISO: RETENCION PROLONGADA` con el comando de rescate (`release` propio; `release --force --reason` ajeno);
-el aviso está cableado también en `make legacy-sites-status` y en `make wt-gc`.
+La **vía singleton** (vía legada **DEPRECADA**; se alcanza sólo con el escape deliberado `SINGLETON=1` — sin `SLOT` ni `SINGLETON=1`, `legacy-launch`/`legacy-build`/`legacy-deploy` cortan con exit 2) comparte un único sitio `pm`:8080, un único árbol `C:\src` y un único `Web.config`: el `stage` de una sesión borra el árbol de la otra y el `deploy` reescribe su configuración. Por eso está protegida por un **turno exclusivo** (`tools/guest-turn/guest-turn.sh`, mismo patrón que `deploy-turn`: mutex por `mkdir`, identidad por pid + `lstart`, heartbeat con TTL, reclamo por `mv` al *graveyard* — nunca `rm`). Una segunda sesión que intente `legacy-launch`/`build`/`deploy` sobre el singleton recibe **exit 3** y no toca nada. El turno se **mantiene** mientras la sesión usa el sitio y se libera con `make legacy-down` o `make legacy-turn-release`. `guest-turn.sh status` reporta **siempre** la edad de retención y, superado `GUEST_TURN_HOLD_WARN` (default 14400 s / 4 h), imprime `AVISO: RETENCION PROLONGADA` con el comando de rescate (`release` propio; `release --force --reason` ajeno); el aviso está cableado también en `make legacy-sites-status` y en `make wt-gc`.
 
 A diferencia de `deploy-turn`, el reclamo automático exige que el **proceso dueño esté muerto**. Un turno cuyo
 heartbeat envejeció pero cuya dueña sigue viva **no se roba**: esa sesión probablemente esté navegando la UI, y
