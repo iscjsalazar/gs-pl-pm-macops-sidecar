@@ -67,7 +67,7 @@
 #   [SLOT obligatorio] make legacy-launch                       # todo: data tier (intel) + VM + build + deploy + tunel + URL
 #   [SLOT obligatorio] make legacy-launch FORCE=1               # fuerza rebuild/redeploy aunque ya este arriba
 #   [SLOT obligatorio] make legacy-launch SLOT=3                # via per-slot: site pm-wt3:8103, arbol C:\wt3, tunel 18103
-#   [DEPRECADO] make legacy-launch SITEPORT=… TUNNEL=…  # puertos ad-hoc: el slot los deriva; §5 de la guía
+#   [DEPRECADO] make legacy-launch SITEPORT=<port> TUNNEL=<port>  # puertos ad-hoc: el slot los deriva; §5 de la guía
 #   [SLOT obligatorio] make legacy-launch DATATIER=0            # no gestiona el data tier (asume ya provisto)
 #   make legacy-status                       # estado de data tier / VM / app / tunel
 #   make legacy-url                          # imprime URL y puertos de acceso
