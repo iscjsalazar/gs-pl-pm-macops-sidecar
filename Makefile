@@ -98,7 +98,10 @@ REMOTE      ?=
 CONTEXT     ?=
 SQLHOST     ?= 127.0.0.1
 APIPORT     ?=
-FILTER      ?=
+# FILTER: filtro de dotnet test y perilla CANONICA. El default toma PM_TEST_FILTER del entorno, de modo que
+# 'PM_TEST_FILTER=... make pm-test|pm-test-clean' YA NO se pisa con vacio (PM_ENV re-emite el mismo valor);
+# FILTER=<expr> en la linea de comando gana. Vacio = sin filtro.
+FILTER      ?= $(PM_TEST_FILTER)
 TESTPROJECT ?=
 APIFORCE    ?= 0
 # Confirmacion de pm-nuke: borra los volumenes del stack (compartidos con el legado en vivo) -> exige NUKE=1.

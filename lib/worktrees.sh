@@ -556,6 +556,30 @@ wt_is_num() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 # Formatea bytes -> "N.N" (GB, una decimal). Vacio si la entrada no es numerica.
 wt_gb() { wt_is_num "${1:-}" || return 0; awk -v b="$1" 'BEGIN{printf "%.1f", b/1073741824}'; }
 
+# Edad (segundos) sobre la cual wt-ls/wt-info marcan un slot como candidato "viejo". Solo informativo: el
+# reclamo automatico por heartbeat/TTL es un follow-up y NO se implementa aqui. Default 24 h.
+WT_AGE_WARN_SECS="${PM_WT_AGE_WARN_SECS:-86400}"
+
+# Edad transcurrida (segundos) de un timestamp ISO-8601 UTC (p. ej. 2026-07-15T00:57:59Z). Vacio si no parsea.
+# date de macOS/BSD: -j -f parsea sin fijar reloj; TZ=UTC interpreta el string como UTC (sin el se leeria local).
+wt_age_secs() {  # uso: wt_age_secs <iso-utc>
+  local iso="${1:-}" epoch
+  [ -n "$iso" ] || return 0
+  epoch="$(TZ=UTC date -j -f '%Y-%m-%dT%H:%M:%SZ' "$iso" +%s 2>/dev/null)" || return 0
+  wt_is_num "$epoch" || return 0
+  printf '%s' "$(( $(date +%s) - epoch ))"
+}
+
+# Formatea segundos -> edad compacta (45m, 3h4m, 2d5h). Vacio si la entrada no es numerica.
+wt_age_fmt() {  # uso: wt_age_fmt <segundos>
+  wt_is_num "${1:-}" || return 0
+  local s="$1" d h m
+  d=$(( s / 86400 )); h=$(( (s % 86400) / 3600 )); m=$(( (s % 3600) / 60 ))
+  if [ "$d" -gt 0 ]; then printf '%dd%dh' "$d" "$h"
+  elif [ "$h" -gt 0 ]; then printf '%dh%dm' "$h" "$m"
+  else printf '%dm' "$m"; fi
+}
+
 # Valor de la clave 'clave=valor' en un blob multilinea (vacio si ausente).
 wt_kv() { printf '%s\n' "${1:-}" | awk -F= -v k="${2:-}" '$1==k{print $2; exit}'; }
 
@@ -790,8 +814,14 @@ cmd_wt_ls() {
   if [ ! -s "$PM_WT_REGISTRY" ]; then
     echo "[wt] registro vacio ($PM_WT_REGISTRY)"
   else
-    echo "folder	slot	project	offset	created"
-    cat "$PM_WT_REGISTRY"
+    printf 'folder\tslot\tproject\toffset\tcreated\tage\n'
+    local f s pr off cr secs age
+    while IFS=$'\t' read -r f s pr off cr; do
+      [ -n "$f" ] || continue
+      secs="$(wt_age_secs "$cr")"; age="$(wt_age_fmt "$secs")"; [ -n "$age" ] || age="n/d"
+      if wt_is_num "$secs" && [ "$secs" -ge "$WT_AGE_WARN_SECS" ]; then age="$age [viejo]"; fi
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$f" "$s" "$pr" "$off" "$cr" "$age"
+    done < "$PM_WT_REGISTRY"
   fi
   echo "[wt] presupuesto: disco VM colima ${disk_txt}   slots vivos ${live}/${PM_WT_SLOTS} (PM_WT_SLOTS)"
 }
@@ -820,8 +850,13 @@ cmd_wt_info() {
   # Presupuesto medido ANTES del heredoc (el heredoc solo interpola $var; no ejecuta subcomandos). Best-effort.
   local budget=""
   budget="$(wt_budget_lines)" || true
+  # Edad del slot (informativa; el reclamo por TTL/heartbeat es follow-up). 'created' es la col 5 del registro.
+  local created secs age old=""
+  created="$(awk -F'\t' -v f="$folder" '$1==f{print $5; exit}' "$PM_WT_REGISTRY" 2>/dev/null)"
+  secs="$(wt_age_secs "$created")"; age="$(wt_age_fmt "$secs")"
+  if wt_is_num "$secs" && [ "$secs" -ge "$WT_AGE_WARN_SECS" ]; then old=" [viejo]"; fi
   cat <<EOF
-[wt] worktree '$folder' -> slot $slot
+[wt] worktree '$folder' -> slot $slot   (creado ${created:-n/d}; edad ${age:-n/d}${old})
 
   Backend (docker en ${PM_REMOTE_SSH:-macdata})
     contenedor API    pm-wt${slot}-api            puerto host ${PM_API_PORT}   (guest: ${PM_GUEST_GATEWAY}:${PM_API_PORT})

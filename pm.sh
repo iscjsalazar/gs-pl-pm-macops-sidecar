@@ -118,10 +118,23 @@ cmd_test() {           # asegura la API real arriba (M1) y corre dotnet test con
   local ctrlcs=""; [ "$PM_PROFILE" = "full" ] && ctrlcs="$(pm_ctrlpiso_connstr)"
   # ServiceBus__SubscriptionPrefix aisla los topics/subscriptions del bus compartido por slot (wt<N>). En modo
   # slot (cmd_test_clean) lo fija wt_derive; en la via singleton (pm-test) va vacio = sin prefijo.
-  PM_API_BASE_URL="$base" PM_TEST_SQL="$cs" ConnectionStrings__Planning="$cs" \
-    ConnectionStrings__Ln="$(pm_ln_connstr)" ServiceBus__ConnectionString="$sbcs" \
-    ServiceBus__SubscriptionPrefix="${WT_SB_PREFIX:-}" \
-    ConnectionStrings__CtrlPiso="$ctrlcs" dotnet "${args[@]}" "$@"
+  # Log completo por corrida a disco (artifacts/, gitignored): un '| tail' del terminal nunca pierde la
+  # evidencia; la lista de pruebas fallidas se recupera con grep. El 'if' evita el abort de set -e y captura
+  # el rc real de dotnet por pipefail (set -euo pipefail); tee solo duplica la salida.
+  local logdir="$BASE_DIR/artifacts/test-logs"; mkdir -p "$logdir"
+  local logf="$logdir/test-$(date -u +%Y%m%dT%H%M%SZ)-${PM_PROJECT}.log"
+  echo "[pm] test: log completo -> $logf (fallos: grep -E 'Failed|Con error PL' \"$logf\")"
+  local rc=0
+  if PM_API_BASE_URL="$base" PM_TEST_SQL="$cs" ConnectionStrings__Planning="$cs" \
+       ConnectionStrings__Ln="$(pm_ln_connstr)" ServiceBus__ConnectionString="$sbcs" \
+       ServiceBus__SubscriptionPrefix="${WT_SB_PREFIX:-}" \
+       ConnectionStrings__CtrlPiso="$ctrlcs" dotnet "${args[@]}" "$@" 2>&1 | tee "$logf"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  echo "[pm] test: log guardado -> $logf (rc=$rc)"
+  return "$rc"
 }
 
 cmd_test_clean() {     # gate "limpio" POR SLOT: aprovisiona el data tier del slot (API fresca + BD + seed +
@@ -155,6 +168,14 @@ cmd_test_clean() {     # gate "limpio" POR SLOT: aprovisiona el data tier del sl
   #    PM_ORACLE_HOST_PORT (15210+N), WT_SB_PREFIX.
   echo "[pm] test-clean: aprovisionando el data tier del slot (wt-up) ..."
   cmd_wt_up || return 1
+  # Falla-cerrado (regla dura del gate): el gate DEBE correr con el Oracle del slot activo y listo (perfil full).
+  # Sin el, las pruebas dependientes de Oracle se saltan y el gate quedaria verde sin cobertura real. cmd_wt_up
+  # ya verifico la readiness al aprovisionar/adoptar el Oracle (WT_ORACLE_ACTIVE=1 via wt_oracle_ready); si quedo
+  # en 0 (p. ej. 'ORACLE=0' o una corrida cruda 'WT=... ./pm.sh test-clean') se aborta en vez de degradar a csv.
+  if [ "${WT_ORACLE_ACTIVE:-0}" != "1" ]; then
+    echo "[pm] test-clean: el slot NO tiene Oracle activo del slot -> degradaria a modo csv (pruebas Oracle omitidas, gate verde falso). El gate exige ORACLE=1/perfil full: usa 'make pm-test-clean WT=<worktree>'; una corrida cruda 'WT=... ./pm.sh test-clean' o 'ORACLE=0' no es un gate valido." >&2
+    return 2
+  fi
   # 2) Host M1-resoluble hacia macdata: el mDNS del host Intel, NUNCA el alias 'macdata' (D36). Override por SQLHOST.
   local m1host="$PM_TEST_SQL_HOST"
   # Nota (D36): SQLHOST=macdata NO resuelve desde el M1 (es alias SSH, no un nombre DNS/mDNS); el nombre
