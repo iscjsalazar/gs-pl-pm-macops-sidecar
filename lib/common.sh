@@ -149,11 +149,16 @@ load_env() {
   # singleton sembrado una vez (guarded seed-once), compartido read-only por todos los worktrees.
   PM_WT_LN_DB="${PM_WT_LN_DB:-pm_erpln106}"
   # Bus PM-owned compartido entre worktrees (proyecto compose dedicado): el aislamiento lo da el prefijo
-  # de instancia ServiceBus__SubscriptionPrefix=wt<N> (la API auto-provisiona topics+subscriptions prefijados).
+  # de instancia ServiceBus__SubscriptionPrefix=wt<N>. El emulador de Service Bus solo carga entidades
+  # ESTATICAS de Config.json (no las crea en runtime), asi que wt_ensure_bus renderiza un Config.json con
+  # las entidades prefijadas de todos los slots del techo (canonicas + wt0..wt<PM_WT_SLOTS_MAX-1>).
   PM_WT_BUS_PROJECT="${PM_WT_BUS_PROJECT:-pm-shared}"
   # Puerto host del bus compartido: solo para debug desde la M1; la API lo alcanza por la red interna
   # (servicebus:5672). Default alto para no chocar con un bus pm-local en 5672.
   PM_WT_BUS_HOST_PORT="${PM_WT_BUS_HOST_PORT:-15672}"
+  # Dir en macdata ($HOME/<dir>) del Config.json expandido del emulador compartido: estable (no per-slot),
+  # asi el bind mount sobrevive el reciclado de dirs staged de cualquier slot y los reinicios del emulador.
+  PM_WT_BUS_CONFIG_DIR="${PM_WT_BUS_CONFIG_DIR:-pm-shared-bus}"
   # Imagen del contenedor de herramientas SQL (sqlcmd tools18 + bcp): no existe imagen standalone de
   # mssql-tools18 en MCR, asi que se reusa la del motor (la trae en /opt/mssql-tools18/bin), pero como
   # contenedor de tools aparte (no como motor). Tambien sirve contra un motor remoto/gestionado.

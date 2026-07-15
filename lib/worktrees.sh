@@ -268,14 +268,39 @@ wt_seed_planning() {  # uso: wt_seed_planning <password>
 
 # --- Bus PM-owned (singleton compartido entre worktrees) ---
 
+# Renderiza la topologia del emulador compartido con las entidades de TODOS los slots del techo
+# (canonicas + wt0..wt<PM_WT_SLOTS_MAX-1>): el emulador solo carga entidades ESTATICAS de Config.json y la
+# API de cada slot resuelve nombres prefijados wt<N>-*, asi que todas deben existir de antemano. Deriva el
+# resultado de la topologia base (containers/servicebus/Config.json) para no duplicar la lista de topics.
+# Escribe a $HOME/<PM_WT_BUS_CONFIG_DIR>/Config.slots.json en macdata (ruta estable, no per-slot).
+wt_render_bus_config() {
+  local jq_prog jq_b64 dir="$PM_WT_BUS_CONFIG_DIR"
+  # Expande cada topic base a la variante canonica y a wt<N>- para N en [0, MAX); idem en las subscriptions.
+  jq_prog='($MAX|tonumber) as $n | ([""] + [range(0;$n) | "wt\(.)"]) as $pfx | .UserConfig.Namespaces[0].Topics as $base | .UserConfig.Namespaces[0].Topics = [ $pfx[] as $p | $base[] | .Name = (if $p == "" then .Name else "\($p)-\(.Name)" end) | .Subscriptions = [ .Subscriptions[] | .Name = (if $p == "" then .Name else "\($p)-\(.Name)" end) ] ]'
+  jq_b64="$(printf '%s' "$jq_prog" | base64 | tr -d '\n')"
+  wt_log "renderizando topologia de bus por-slot (canonica + wt0..wt$((PM_WT_SLOTS_MAX-1))) en $dir/Config.slots.json ..."
+  # base64 evita el infierno de comillas al llevar el programa jq por ssh; el jq lee la base staged del slot.
+  on_intel "set -e; mkdir -p \"\$HOME/$dir\"; printf '%s' '$jq_b64' | base64 -d > \"\$HOME/$dir/render.jq\"; jq --arg MAX '$PM_WT_SLOTS_MAX' -f \"\$HOME/$dir/render.jq\" '$PM_REMOTE_DIR/servicebus/Config.json' > \"\$HOME/$dir/Config.slots.json\"" \
+    || { wt_die "fallo al renderizar la topologia de bus por-slot"; return 1; }
+}
+
 # Levanta el bus (sbsqledge + servicebus emulador) como proyecto compose dedicado, una sola vez.
 wt_ensure_bus() {
   local ctx; ctx="$(remote_docker_ctx)"
+  # Declara estaticamente en el emulador las entidades de todos los slots del techo antes del cold-start.
+  wt_render_bus_config || return 1
+  local recreate=""
+  # Cold-start unico. Si el emulador ya corre, verifica que monte la topologia por-slot; una instancia stale
+  # (canonica, previa a este cambio) se recrea para que existan las entidades wt<N>-*.
   if on_intel "[ \"\$(docker $ctx inspect -f '{{.State.Running}}' '${PM_WT_BUS_PROJECT}-servicebus-1' 2>/dev/null)\" = true ]" 2>/dev/null; then
-    wt_log "bus PM-owned ya arriba (proyecto $PM_WT_BUS_PROJECT)"; return 0
+    if on_intel "docker $ctx inspect -f '{{range .Mounts}}{{println .Source}}{{end}}' '${PM_WT_BUS_PROJECT}-servicebus-1' 2>/dev/null | grep -q '/$PM_WT_BUS_CONFIG_DIR/Config.slots.json\$'" 2>/dev/null; then
+      wt_log "bus PM-owned ya arriba con topologia por-slot (proyecto $PM_WT_BUS_PROJECT)"; return 0
+    fi
+    wt_log "bus PM-owned arriba con topologia stale (canonica): recreando el emulador con entidades por-slot ..."
+    recreate="--force-recreate"
   fi
   wt_log "levantando bus PM-owned (proyecto $PM_WT_BUS_PROJECT: sbsqledge + servicebus; host :$PM_WT_BUS_HOST_PORT) ..."
-  on_intel "export PATH=/usr/local/bin:\$PATH PM_SB_SA_PASSWORD='$(wt_esc "$PM_SB_SA_PASSWORD")' PM_SB_HOST_PORT='$PM_WT_BUS_HOST_PORT'; cd '$PM_REMOTE_DIR/compose' && docker $ctx compose -p '$PM_WT_BUS_PROJECT' -f '$COMPOSE_FILE' --profile bus up -d sbsqledge servicebus" \
+  on_intel "export PATH=/usr/local/bin:\$PATH PM_SB_SA_PASSWORD='$(wt_esc "$PM_SB_SA_PASSWORD")' PM_SB_HOST_PORT='$PM_WT_BUS_HOST_PORT' PM_SB_CONFIG_FILE=\"\$HOME/$PM_WT_BUS_CONFIG_DIR/Config.slots.json\"; cd '$PM_REMOTE_DIR/compose' && docker $ctx compose -p '$PM_WT_BUS_PROJECT' -f '$COMPOSE_FILE' --profile bus up -d $recreate sbsqledge servicebus" \
     || { wt_die "fallo al levantar el bus PM-owned"; return 1; }
 }
 
