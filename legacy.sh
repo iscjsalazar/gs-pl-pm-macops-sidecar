@@ -470,7 +470,8 @@ case "${1:-}" in
   launch)   require_slot launch; launch ;;
   data-up)  data_up ;;
   vm-up)    vm_up ;;
-  build)    require_slot build; guest_turn_acquire; stage_build; guest_lock_release ;;
+  build)    require_slot build; guest_turn_acquire; stage_build; guest_lock_release
+            warn "'build' solo COMPILA el arbol del slot en el guest (gate de compilacion); NO despliega ni re-inyecta el wiring runtime (backendBaseUrl + connection strings). El site del legado queda con los defaults del repo (backendBaseUrl=\"\") y su gateway a pm-api no opera bajo SQL-first hasta 'make e2e-up WT=<wt-pm> LEGACYSRC=<path> FORCE=1'." ;;
   deploy)   require_slot deploy; guest_turn_acquire; deploy; guest_lock_release ;;
   diag)     diag ;;
   diag-logs) diag_logs ;;
