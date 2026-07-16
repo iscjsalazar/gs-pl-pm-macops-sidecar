@@ -27,7 +27,11 @@ param(
   [string]$SqlPmUserB64      = "",
   [string]$SqlPmPassB64      = "",
   [string]$SqlReaderUserB64  = "",
-  [string]$SqlReaderPassB64  = ""
+  [string]$SqlReaderPassB64  = "",
+  # ConStrInforLN (backlog LN): catalogo del proxy SQL del backlog LN. Es un singleton COMPARTIDO entre slots
+  # (pm_erpln106, no derivado del slot), en el MISMO SQL compartido y con las mismas credenciales que ConStrPm;
+  # por eso viaja como constante con default y no en base64 (sin caracteres que rompan el quoting via SSH).
+  [string]$SqlInforLnDb      = "pm_erpln106"
 )
 $ErrorActionPreference = "Stop"
 Import-Module WebAdministration
@@ -82,10 +86,13 @@ if ($BackendBaseUrl -ne "") {
   else { Write-Warning "appSettings/backendBaseUrl no encontrado en $cfgPath (fuente legacy sin el wiring de Fase 1; sin inyectar)" }
 }
 
-# --- E2E: inyecta ConStrPm/ConStrJobsReader (connectionStrings via configSource) en el Config\connections.config
-# DESPLEGADO. El repo versiona placeholders __SQL_PM_*__ (sin credenciales ni host); el valor real solo vive aqui,
-# en el guest. La reescritura del catalogo se acota a esas dos cadenas: un reemplazo global de 'Initial Catalog='
-# arrastraria tambien a ConStrInforLN (erpln106) y ConStrMicroservicio (Nucleos). ---
+# --- E2E: inyecta ConStrPm/ConStrJobsReader/ConStrInforLN (connectionStrings via configSource) en el
+# Config\connections.config DESPLEGADO. El repo versiona placeholders (__SQL_PM_*__ para el backend PM;
+# __SQL_INFOR_LN_HOST__ para el backlog LN; sin credenciales ni host); el valor real solo vive aqui, en el guest.
+# ConStrInforLN apunta al proxy SQL del backlog LN (pm_erpln106), en el MISMO SQL compartido y con las mismas
+# credenciales que ConStrPm, para que el camino OFF/InforLN del legado lea el backlog en el slot. La reescritura
+# del catalogo se acota POR NOMBRE de cadena: NO se toca ConStrMicroservicio (Nucleos) ni las cadenas de
+# SecurePerfect, que comparten los placeholders __SQL_USER__/__SQL_PASSWORD__ con ConStrInforLN. ---
 if ($SqlPmHost -ne "") {
   $connCfg = Join-Path $App "Config\connections.config"
   if (Test-Path $connCfg) {
@@ -112,11 +119,24 @@ if ($SqlPmHost -ne "") {
       if ($SqlPmDb -ne "" -and $pmNames -contains $name) {
         $v = [regex]::Replace($v, 'Initial Catalog=[^;]*;', 'Initial Catalog=' + $SqlPmDb + ';')
       }
+      # ConStrInforLN: reusa host/credenciales de ConStrPm (mismo SQL compartido) y re-apunta el catalogo al proxy
+      # LN del slot (pm_erpln106). El reemplazo de __SQL_USER__/__SQL_PASSWORD__ se ACOTA a este nodo (nunca global)
+      # porque esos placeholders tambien viven en ConStrMicroservicio/SecurePerfect. Idempotente: el redeploy
+      # re-apunta el catalogo (placeholder 'erpln106' o el valor de una corrida previa).
+      if ($name -eq 'ConStrInforLN') {
+        $v = $v.Replace('__SQL_INFOR_LN_HOST__', $SqlPmHost)
+        $v = $v.Replace('__SQL_USER__', $SqlPmUser)
+        $v = $v.Replace('__SQL_PASSWORD__', $SqlPmPass)
+        if ($SqlInforLnDb -ne "") {
+          $v = [regex]::Replace($v, 'Initial Catalog=[^;]*;', 'Initial Catalog=' + $SqlInforLnDb + ';')
+        }
+      }
       $add.SetAttribute('connectionString', $v)
     }
     $connXml.Save($connCfg)
     "ConStrPm -> Server=$SqlPmHost; Catalog=$SqlPmDb; User=$SqlPmUser"
     "ConStrJobsReader -> Server=$SqlPmHost; Catalog=$SqlPmDb; User=$rdUser"
+    "ConStrInforLN -> Server=$SqlPmHost; Catalog=$SqlInforLnDb; User=$SqlPmUser"
   } else { Write-Warning "Config\connections.config no encontrado en $App (fuente legacy sin connectionStrings externalizado; ConStrPm sin inyectar)" }
 }
 
