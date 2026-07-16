@@ -558,11 +558,15 @@ wt_up_api() {  # uso: wt_up_api <password>
   fi
   wt_log "run contenedor $cname (redes: $PM_SHARED_SQL_NETWORK + ${PM_WT_BUS_PROJECT}_default$([ "${WT_ORACLE_ACTIVE:-0}" = "1" ] && printf ' + %s' "$WT_ORACLE_NETWORK"); sql $PM_SHARED_SQL_HOST/$PM_PLANNING_DB; bus prefix $WT_SB_PREFIX; paridad $psrc; publica $PM_API_PORT->8080) ..."
   # create + connect (redes adicionales) + start: evita la ventana en que la API arranca antes de unir el bus.
+  # FeatureManagement__FlagCacheTtlSeconds=0 desactiva el caché en-proceso del lector de flags (default prod
+  # 45 s): en el slot un flag fijado por UPDATE SQL directo se ve en la lectura siguiente, dando determinismo
+  # a los tests de API física con flag (I3/I4/I8). Se inyecta en TODO slot, no solo con Oracle activo.
   on_intel "docker $ctx rm -f '$cname' >/dev/null 2>&1; \
     docker $ctx create --name '$cname' --network '$PM_SHARED_SQL_NETWORK' -p '$PM_API_PORT:8080' \
       -e ASPNETCORE_ENVIRONMENT=IntegrationTest \
       -e ConnectionStrings__Planning='$cs' -e ConnectionStrings__Ln='$ln' \
       -e ServiceBus__ConnectionString='$sbcs' -e ServiceBus__SubscriptionPrefix='$WT_SB_PREFIX' \
+      -e FeatureManagement__FlagCacheTtlSeconds=0 \
       -e Parity__LegacySource='$psrc'$oracle_env $(pm_parity_env_flags) '$img' >/dev/null \
     && docker $ctx network connect '${PM_WT_BUS_PROJECT}_default' '$cname'$oracle_net \
     && docker $ctx start '$cname' >/dev/null" \
