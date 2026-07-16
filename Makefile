@@ -12,6 +12,8 @@
 #   make pm-api / pm-api-down     # levanta / detiene la API real en ESTA mac (M1)
 #   make pm-test                  # inner-loop: reusa la API si responde + dotnet test (default PROFILE=sql)
 #   [WT obligatorio] make pm-test-clean WT=<worktree>   # GATE limpio POR SLOT: wt-up (slot API+BD+seed+Oracle) + migrate por puente + suite; sin WT/slot falla (exit 2)
+#   [WT obligatorio] make pm-gate WT=<worktree>         # ONE-SHOT: encadena wt-up ORACLE=1 + pm-test-clean en un solo comando (aprovisiona-y-corre)
+#   [WT obligatorio] make pm-test-clean WT=<worktree> WARM=1   # re-run tras kill esporadico: reusa el slot sano (sin rsync/build/reseed/cold-init)
 #   make pm-test FILTER='FullyQualifiedName~RtSync'   # acota por filtro (inner-loop)
 #   make pm-test APIFORCE=1                            # relanza la API (api-down+api) antes de testear; no reusa
 #   make pm-unit                  # unit tests puros (*.UnitTests): sin Docker, sin red, sin data tier; FILTER= acota
@@ -197,6 +199,7 @@ SCALAR      ?= 0
 KEY         ?=
 STATE       ?=
 PLANT       ?= RES
+WARM        ?= 0
 # SQL se EXPORTA (no se interpola entre comillas simples en WT_ENV): un SQL con comillas simples
 # ('WHERE Plant=''RES''') rompe el quoting de make/shell si se interpola; exportado llega intacto al recipe,
 # que lo asigna a PM_WT_SQL con comillas dobles. wt-sql/wt-oracle lo consumen.
@@ -204,12 +207,12 @@ export SQL
 
 WT_ENV = $(PM_ENV) WT=$(WT) PM_WT_SLOTS=$(SLOTS) PM_WT_ORACLE=$(ORACLE) PM_WT_GC_FORCE=$(FORCE) \
          PM_WT_SEED_FORCE=$(FORCE) PM_WT_SOLUTION_DIR='$(SOLUTION)' \
-         PM_WT_SQL_SCALAR=$(SCALAR) \
+         PM_WT_SQL_SCALAR=$(SCALAR) PM_WT_WARM=$(WARM) \
          PM_WT_FLAG_KEY='$(KEY)' PM_WT_FLAG_STATE=$(STATE) PM_WT_FLAG_PLANT=$(PLANT) \
          PM_SHARED_SQL_NETWORK=$(SHAREDSQL_NET) PM_SHARED_SQL_HOST=$(SHAREDSQL_HOST) \
          PM_SHARED_SQL_PORT=$(SHAREDSQL_PORT) PM_SHARED_SQL_PASSWORD='$(SHAREDSQL_PASSWORD)'
 
-.PHONY: pm-run pm-watch pm-migrate pm-seed pm-api pm-api-down pm-test pm-test-clean pm-unit pm-format pm-format-check pm-down pm-nuke pm-ps pm-logs pm-port pm-bootstrap-intel \
+.PHONY: pm-run pm-watch pm-migrate pm-seed pm-api pm-api-down pm-test pm-test-clean pm-gate pm-unit pm-format pm-format-check pm-down pm-nuke pm-ps pm-logs pm-port pm-bootstrap-intel \
         wt-up wt-down wt-ls wt-info wt-status wt-gc wt-seed-ln wt-sql wt-oracle wt-flag wt-heartbeat \
         e2e-backend e2e-backend-down e2e-net-check e2e-up e2e-smoke e2e-url e2e-down e2e-oracle-counts \
         legacy-launch legacy-data-up legacy-vm-up legacy-build legacy-deploy legacy-diag legacy-diag-logs \
@@ -230,6 +233,9 @@ pm-test-clean: PROFILE := full
 pm-test-clean: ORACLE  := 1                     # gate full: aprovisiona el Oracle ControlPiso del slot
 pm-test-clean: ; $(WT_ENV) ./pm.sh test-clean   # gate limpio POR SLOT (WT=<worktree pl-programa-maestro>)
 pm-unit:     ; $(PM_ENV) ./pm.sh unit           # unit tests puros (*.UnitTests): sin Docker, sin red, sin data tier
+# One-shot (D1): aprovisiona el slot (wt-up ORACLE=1) y corre el gate en UN comando. No toca el guard de
+# pm-test-clean (que sigue exigiendo wt-up previo); pm-gate encadena ambos. wt-up es idempotente (reusa el slot).
+pm-gate: ; @[ -n "$(WT)" ] || { echo "pm-gate exige WT=<worktree>: aprovisiona-y-corre el gate en un paso" >&2; exit 2; }; $(MAKE) wt-up WT=$(WT) ORACLE=1 && $(MAKE) pm-test-clean WT=$(WT)
 pm-format:       ; $(PM_ENV) ./pm.sh format          # formatea .cs modificados vs develop (delega a scripts/format.sh in-repo)
 pm-format-check: ; $(PM_ENV) ./pm.sh format-check    # gate de formato changed-vs-develop (delega a scripts/format-check.sh)
 pm-down:     ; $(PM_ENV) ./pm.sh down

@@ -124,7 +124,13 @@ cmd_test() {           # asegura la API real arriba (M1) y corre dotnet test con
   local logdir="$BASE_DIR/artifacts/test-logs"; mkdir -p "$logdir"
   local logf="$logdir/test-$(date -u +%Y%m%dT%H%M%SZ)-${PM_PROJECT}.log"
   echo "[pm] test: log completo -> $logf (fallos: grep -E 'Failed|Con error PL' \"$logf\")"
-  local rc=0
+  local rc=0 rcf="${logf%.log}.rc"
+  # Veredicto persistido de forma robusta: un sidecar .rc (maquina-legible) y una linea EXIT= al final del log. Un
+  # trap de SIGTERM/INT deja rastro si el background muere a media corrida (el harness lo mata tras compilar/migrar
+  # pero antes de terminar): asi el veredicto se lee del ARCHIVO, no del status del background. 'running' hasta fin.
+  echo running > "$rcf"
+  # shellcheck disable=SC2064
+  trap 'echo "[pm] test: EXIT=143 (killed)" >> "'"$logf"'"; echo 143 > "'"$rcf"'"; type wt_lock_release_all >/dev/null 2>&1 && wt_lock_release_all; exit 143' TERM INT
   if PM_API_BASE_URL="$base" PM_TEST_SQL="$cs" ConnectionStrings__Planning="$cs" \
        ConnectionStrings__Ln="$(pm_ln_connstr)" ServiceBus__ConnectionString="$sbcs" \
        ServiceBus__SubscriptionPrefix="${WT_SB_PREFIX:-}" \
@@ -133,7 +139,10 @@ cmd_test() {           # asegura la API real arriba (M1) y corre dotnet test con
   else
     rc=$?
   fi
-  echo "[pm] test: log guardado -> $logf (rc=$rc)"
+  # Restaura el trap (a wt_lock_release_all si worktrees.sh esta sourced, si no al default) y sella el veredicto.
+  if type wt_lock_release_all >/dev/null 2>&1; then trap 'wt_lock_release_all' TERM INT; else trap - TERM INT; fi
+  echo "$rc" > "$rcf"
+  echo "[pm] test: EXIT=$rc | log -> $logf | rc -> $rcf" | tee -a "$logf"
   return "$rc"
 }
 
@@ -166,8 +175,23 @@ cmd_test_clean() {     # gate "limpio" POR SLOT: aprovisiona el data tier del sl
   #    recrea la API del slot (frescura = el analogo de APIFORCE) y siembra la BD. Deja en scope los globals del
   #    slot que fija wt_derive: PM_PLANNING_DB (pm_planning_wt<N>), PM_PORT_OFFSET, PM_API_PORT (5180+N*10),
   #    PM_ORACLE_HOST_PORT (15210+N), WT_SB_PREFIX.
-  echo "[pm] test-clean: aprovisionando el data tier del slot (wt-up) ..."
-  cmd_wt_up || return 1
+  # Modo warm (WARM=1): re-correr el gate tras un kill esporadico del background es caro si rehace rsync+build de
+  # la API y el cold-init del Oracle (~91 s) sobre un slot que ya quedo sano. Con WARM=1, si el slot responde
+  # /health/live y su Oracle corre, se REUSA el aprovisionamiento: wt_derive fija los globals del slot sin re-
+  # provisionar. Si el slot NO esta sano, cae al aprovisionamiento normal (no hay atajo enganoso).
+  if [ "${PM_WT_WARM:-0}" = "1" ]; then
+    wt_derive "$gate_slot"
+    if on_intel "curl -fsS -o /dev/null http://127.0.0.1:$PM_API_PORT/health/live" 2>/dev/null && wt_oracle_running; then
+      WT_ORACLE_ACTIVE=1
+      echo "[pm] test-clean: WARM=1 y slot $gate_slot sano (API :$PM_API_PORT + Oracle $WT_ORACLE_CONTAINER) -> se reusa el aprovisionamiento (sin wt-up; evita rsync/build/reseed/cold-init)"
+    else
+      echo "[pm] test-clean: WARM=1 pero el slot $gate_slot NO esta sano (API o Oracle abajo) -> aprovisionando normalmente (wt-up) ..."
+      cmd_wt_up || return 1
+    fi
+  else
+    echo "[pm] test-clean: aprovisionando el data tier del slot (wt-up) ..."
+    cmd_wt_up || return 1
+  fi
   # Falla-cerrado (regla dura del gate): el gate DEBE correr con el Oracle del slot activo y listo (perfil full).
   # Sin el, las pruebas dependientes de Oracle se saltan y el gate quedaria verde sin cobertura real. cmd_wt_up
   # ya verifico la readiness al aprovisionar/adoptar el Oracle (WT_ORACLE_ACTIVE=1 via wt_oracle_ready); si quedo
