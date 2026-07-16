@@ -86,6 +86,18 @@ if ($BackendBaseUrl -ne "") {
   else { Write-Warning "appSettings/backendBaseUrl no encontrado en $cfgPath (fuente legacy sin el wiring de Fase 1; sin inyectar)" }
 }
 
+# --- Guard dev-jamas-PROD (ADR-0010): marca el ambiente en el Web.config del slot para que el guard del DAL
+# (Conexion.ValidateTarget) sepa que corre en dev y exija un host Oracle DEV (el XE del slot via NAT 172.16.128.*).
+# Se crea la key si el Web.config de la fuente legacy aun no la trae (fail-safe: el guard SIEMPRE queda armado en
+# los slots). El repo/on-prem quedan con la key vacia => guard inerte. ---
+$appSettings = $cfg.SelectSingleNode("//appSettings")
+if ($appSettings) {
+  $pe = $appSettings.SelectSingleNode("add[@key='pmEnvironment']")
+  if (-not $pe) { $pe = $cfg.CreateElement('add'); $pe.SetAttribute('key', 'pmEnvironment'); $appSettings.AppendChild($pe) | Out-Null }
+  $pe.SetAttribute('value', 'dev'); $cfg.Save($cfgPath); "pmEnvironment -> dev (guard dev-jamas-PROD armado)"
+}
+else { Write-Warning "appSettings no encontrado en $cfgPath (no se marca pmEnvironment)" }
+
 # --- E2E: inyecta ConStrPm/ConStrJobsReader/ConStrInforLN (connectionStrings via configSource) en el
 # Config\connections.config DESPLEGADO. El repo versiona placeholders (__SQL_PM_*__ para el backend PM;
 # __SQL_INFOR_LN_HOST__ para el backlog LN; sin credenciales ni host); el valor real solo vive aqui, en el guest.
