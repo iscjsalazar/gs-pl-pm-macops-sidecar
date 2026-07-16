@@ -533,9 +533,21 @@ wt_up_api() {  # uso: wt_up_api <password>
   # fuente viva de paridad pasa de csv a oracle. Sin el, el comportamiento queda intacto (csv, sin CtrlPiso).
   local psrc oracle_env="" oracle_net=""
   if [ "${WT_ORACLE_ACTIVE:-0}" = "1" ]; then
-    local ctrlcs; ctrlcs="$(wt_esc "$(pm_ctrlpiso_connstr oracle 1521)")"
+    # Destino Oracle del slot: alias de red 'oracle' + sid XE (espeja el sid=XE de pm_ctrlpiso_connstr,
+    # lib/common.sh:190). Fuente unica en wt_up_api para el connstring de CtrlPiso y para la allowlist del
+    # guard, de modo que un cambio del destino del slot arrastre ambos.
+    local ora_host=oracle ora_sid=XE
+    local ctrlcs; ctrlcs="$(wt_esc "$(pm_ctrlpiso_connstr "$ora_host" 1521)")"
     psrc="${PM_PARITY_LEGACY_SOURCE:-oracle}"
     oracle_env=" -e ConnectionStrings__CtrlPiso='$ctrlcs'"
+    # Allowlist DEV del guard Oracle derivada del destino LEGITIMO del slot (XE): no relaja el guard, lo
+    # habilita para el contenedor de la API. host=alias de red del slot; dbName=sid del slot. AllowedServerHosts
+    # se pasa vacio a proposito: ReadStringArray filtra la cadena vacia y ese sub-chequeo se omite por diseno
+    # (el Oracle del slot es XE y no expone el server-host que si tiene Prolec), igual que el molde test-side
+    # BuildDevAllowlist. Docker interpreta '-e KEY=' como variable con valor vacio (no como herencia del host).
+    oracle_env="$oracle_env -e Oracle__WriteGuard__AllowedHosts__0='$ora_host'"
+    oracle_env="$oracle_env -e Oracle__WriteGuard__AllowedDbNames__0='$ora_sid'"
+    oracle_env="$oracle_env -e Oracle__WriteGuard__AllowedServerHosts__0=''"
     oracle_net=" && docker $ctx network connect '$WT_ORACLE_NETWORK' '$cname'"
   else
     psrc="${PM_PARITY_LEGACY_SOURCE:-csv}"
