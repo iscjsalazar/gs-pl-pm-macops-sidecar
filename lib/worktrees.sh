@@ -540,6 +540,10 @@ wt_up_api() {  # uso: wt_up_api <password>
     local ctrlcs; ctrlcs="$(wt_esc "$(pm_ctrlpiso_connstr "$ora_host" 1521)")"
     psrc="${PM_PARITY_LEGACY_SOURCE:-oracle}"
     oracle_env=" -e ConnectionStrings__CtrlPiso='$ctrlcs'"
+    # Kill-switch global de mutacion Oracle (nivel 0, ADR-0010): default OFF. Se enciende SOLO cuando el slot
+    # cablea su propio Oracle XE desechable (WT_ORACLE_ACTIVE=1), el destino DEV sancionado, de modo que el gate
+    # y el E2E (seed/replica del flag OFF) escriban en el XE del slot; dev arranca sin la var (replica apagada).
+    oracle_env="$oracle_env -e Oracle__WriteGuard__DmlEnabled=true"
     # Allowlist DEV del guard Oracle derivada del destino LEGITIMO del slot (XE): no relaja el guard, lo
     # habilita para el contenedor de la API. host=alias de red del slot; dbName=sid del slot. AllowedServerHosts
     # se pasa vacio a proposito: ReadStringArray filtra la cadena vacia y ese sub-chequeo se omite por diseno

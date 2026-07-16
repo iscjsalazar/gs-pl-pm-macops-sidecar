@@ -81,11 +81,18 @@ cmd_api() {            # levanta la API real en ESTA mac (M1) apuntando al SQL d
   # Paridad: la suite de integracion usa fixtures CSV (Parity__LegacySource=csv). Para una corrida
   # viva contra Oracle se relanza con PM_PARITY_LEGACY_SOURCE=oracle (requiere el perfil full).
   local ctrlcs=""; [ "$PM_PROFILE" = "full" ] && ctrlcs="$(pm_ctrlpiso_connstr)"
+  # Guard Oracle nivel 0 + allowlist para el destino XE del data tier (solo perfil full, que cablea CtrlPiso):
+  # enciende el kill-switch y habilita el guard host/SID contra el host/sid que pm_ctrlpiso_connstr (sin args)
+  # usa ($PM_TEST_SQL_HOST / XE). Sin full quedan OFF/vacias (no hay Oracle). Camino singleton DEPRECADO; la via
+  # canonica es el slot (wt_up_api).
+  local wg_dml="false" wg_host="" wg_db=""
+  [ "$PM_PROFILE" = "full" ] && { wg_dml="true"; wg_host="$PM_TEST_SQL_HOST"; wg_db="XE"; }
   echo "[pm] api: levantando en $base (entorno IntegrationTest, sql $PM_TEST_SQL_HOST:$PM_SQL_HOST_PORT/$PM_PLANNING_DB, bus ${sbcs:+$PM_SERVICEBUS_HOST:$PM_SB_HOST_PORT}) ..."
-  # La solucion solo LEE ASPNETCORE_URLS / ConnectionStrings__* / ServiceBus__ConnectionString / Parity__* por entorno (frontera intacta).
+  # La solucion solo LEE ASPNETCORE_URLS / ConnectionStrings__* / ServiceBus__ConnectionString / Parity__* / Oracle__WriteGuard__* por entorno (frontera intacta).
   ASPNETCORE_ENVIRONMENT=IntegrationTest ASPNETCORE_URLS="$base" ConnectionStrings__Planning="$cs" \
     ConnectionStrings__Ln="$(pm_ln_connstr)" ServiceBus__ConnectionString="$sbcs" \
     Parity__LegacySource="${PM_PARITY_LEGACY_SOURCE:-csv}" ConnectionStrings__CtrlPiso="$ctrlcs" \
+    Oracle__WriteGuard__DmlEnabled="$wg_dml" Oracle__WriteGuard__AllowedHosts__0="$wg_host" Oracle__WriteGuard__AllowedDbNames__0="$wg_db" \
     nohup dotnet run --project "$proj" -c Debug > "$logf" 2>&1 &
   echo $! > "$pidf"
   local i; for i in $(seq 1 90); do
@@ -116,6 +123,11 @@ cmd_test() {           # asegura la API real arriba (M1) y corre dotnet test con
   # Con perfil full viaja tambien la connstring Oracle del data tier: habilita la prueba de
   # integracion de la fuente viva de paridad (sin ella esa prueba se salta).
   local ctrlcs=""; [ "$PM_PROFILE" = "full" ] && ctrlcs="$(pm_ctrlpiso_connstr)"
+  # Guard Oracle nivel 0 + allowlist para el destino XE (solo full): consistente con cmd_api. Las pruebas de
+  # integracion componen su propio writer guardado (OracleSlotWriter, DmlEnabled=true en codigo); estas vars
+  # cubren cualquier camino que lea la config del proceso. Sin full quedan OFF/vacias (no hay Oracle).
+  local wg_dml="false" wg_host="" wg_db=""
+  [ "$PM_PROFILE" = "full" ] && { wg_dml="true"; wg_host="$PM_TEST_SQL_HOST"; wg_db="XE"; }
   # ServiceBus__SubscriptionPrefix aisla los topics/subscriptions del bus compartido por slot (wt<N>). En modo
   # slot (cmd_test_clean) lo fija wt_derive; en la via singleton (pm-test) va vacio = sin prefijo.
   # Log completo por corrida a disco (artifacts/, gitignored): un '| tail' del terminal nunca pierde la
@@ -134,6 +146,7 @@ cmd_test() {           # asegura la API real arriba (M1) y corre dotnet test con
   if PM_API_BASE_URL="$base" PM_TEST_SQL="$cs" ConnectionStrings__Planning="$cs" \
        ConnectionStrings__Ln="$(pm_ln_connstr)" ServiceBus__ConnectionString="$sbcs" \
        ServiceBus__SubscriptionPrefix="${WT_SB_PREFIX:-}" \
+       Oracle__WriteGuard__DmlEnabled="$wg_dml" Oracle__WriteGuard__AllowedHosts__0="$wg_host" Oracle__WriteGuard__AllowedDbNames__0="$wg_db" \
        ConnectionStrings__CtrlPiso="$ctrlcs" dotnet "${args[@]}" "$@" 2>&1 | tee "$logf"; then
     rc=0
   else
@@ -230,17 +243,20 @@ cmd_unit() {           # unit tests puros (*.UnitTests): 100% locales en esta ma
                        # la API ni exporta variables de conexion (nada de PM_API_BASE_URL / ConnectionStrings__* /
                        # ServiceBus__* / PM_TEST_SQL*): la suite queda verde con el data tier apagado.
   command -v dotnet >/dev/null 2>&1 || { echo "[pm] falta 'dotnet' en PATH" >&2; return 2; }
-  # Descubrimiento por convencion: tests/*.UnitTests/*.csproj bajo la raiz de la solucion (resolve_solution_dir,
-  # via load_env: PM_SOLUTION_DIR explicito > WT=<worktree> > CWD en un worktree de codigo > checkout central).
+  # Descubrimiento por convencion: tests/*.UnitTests/*.csproj + tests/*.ArchitectureTests/*.csproj bajo la raiz de
+  # la solucion (resolve_solution_dir, via load_env: PM_SOLUTION_DIR explicito > WT=<worktree> > CWD en un worktree
+  # de codigo > checkout central). Los ArchitectureTests son puros (NetArchTest lee IL: sin Docker ni data tier),
+  # asi que pertenecen al loop rapido local: el guard de escritura Oracle (ADR-0010) exige que su test corra aqui.
   local projects=() p
   while IFS= read -r p; do projects+=("$p"); done \
-    < <(find "$PM_SOLUTION_DIR/tests" -maxdepth 2 -name '*.UnitTests.csproj' 2>/dev/null | sort)
+    < <({ find "$PM_SOLUTION_DIR/tests" -maxdepth 2 -name '*.UnitTests.csproj' 2>/dev/null; \
+          find "$PM_SOLUTION_DIR/tests" -maxdepth 2 -name '*.ArchitectureTests.csproj' 2>/dev/null; } | sort)
   if [ "${#projects[@]}" -eq 0 ]; then
-    echo "[pm] unit: ningun *.UnitTests.csproj bajo $PM_SOLUTION_DIR/tests; la raiz resuelta no parece la solucion pl-programa-maestro (revisa WT=<worktree> / PM_SOLUTION_DIR)" >&2
+    echo "[pm] unit: ningun *.UnitTests.csproj ni *.ArchitectureTests.csproj bajo $PM_SOLUTION_DIR/tests; la raiz resuelta no parece la solucion pl-programa-maestro (revisa WT=<worktree> / PM_SOLUTION_DIR)" >&2
     return 2
   fi
   local args=(); [ -n "${PM_TEST_FILTER:-}" ] && args+=(--filter "$PM_TEST_FILTER")
-  echo "[pm] unit: ${#projects[@]} proyectos *.UnitTests bajo $PM_SOLUTION_DIR/tests (filtro: ${PM_TEST_FILTER:-<todos>})"
+  echo "[pm] unit: ${#projects[@]} proyectos *.UnitTests + *.ArchitectureTests bajo $PM_SOLUTION_DIR/tests (filtro: ${PM_TEST_FILTER:-<todos>})"
   # Corre TODOS los proyectos aunque alguno falle (reporte completo); exit !=0 si CUALQUIERA fallo.
   local run=0 green=0 red=0 failed=""
   for p in "${projects[@]}"; do
