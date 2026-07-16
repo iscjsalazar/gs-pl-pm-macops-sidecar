@@ -53,8 +53,12 @@
 #   [WT obligatorio] make wt-info WT=<folder>                  # imprime la derivacion COMPLETA del slot ("que slot es mio")
 #   make wt-ls                                # lista el registro de slots (folder -> slot)
 #   make wt-status                            # estado de los contenedores PM por worktree y del bus
-#   make wt-gc / make wt-gc FORCE=1           # cruza registro/API/Oracle/sites: lista (o retira) huerfanos
-#   make wt-seed-ln                           # asegura la referencia LN compartida (pm_erpln106) una vez
+#   make wt-gc / make wt-gc FORCE=1           # reclama arrendamientos muertos (pid muerto + heartbeat > TTL) y huerfanos
+#   make wt-seed-ln / make wt-seed-ln FORCE=1 # asegura (o re-aplica con FORCE) la referencia LN compartida (pm_erpln106)
+#   [WT obligatorio] make wt-sql WT=<folder> SQL="SELECT ..." [SCALAR=1]   # SQL contra la BD del slot (pm_planning_wt<N>)
+#   [WT obligatorio] make wt-oracle WT=<folder> SQL="select ..."          # SQL contra el Oracle del slot (requiere ORACLE=1)
+#   [WT obligatorio] make wt-flag WT=<folder> KEY=<flag> STATE=on|off [PLANT=RES]   # fija un feature flag en la BD del slot
+#   [WT obligatorio] make wt-heartbeat WT=<folder>                        # refresca el arrendamiento del slot (holds largos)
 #   # Slot 0..N-1 (N=SLOTS, default 8) -> proyecto pm-wt<N>, API :5180+N*10, BD pm_planning_wt<N>, bus prefix wt<N>,
 #   #   site IIS pm-wt<N>::8100+N, tunel :18100+N, Oracle pm-wt<N>-oracle-1::15210+N. Ver README (tabla canonica).
 #   # Vars del SQL compartido (override): SHAREDSQL_NET/HOST/PORT/PASSWORD (default red nvoslabsc3-sharedsql-dt, sqlserver:1433).
@@ -187,14 +191,26 @@ SHAREDSQL_NET   ?=
 SHAREDSQL_HOST  ?=
 SHAREDSQL_PORT  ?=
 SHAREDSQL_PASSWORD ?=
+# Data-plane del slot (wt-sql/wt-oracle/wt-flag): SQL arbitrario, escalar, y toggle de feature flag.
+SQL         ?=
+SCALAR      ?= 0
+KEY         ?=
+STATE       ?=
+PLANT       ?= RES
+# SQL se EXPORTA (no se interpola entre comillas simples en WT_ENV): un SQL con comillas simples
+# ('WHERE Plant=''RES''') rompe el quoting de make/shell si se interpola; exportado llega intacto al recipe,
+# que lo asigna a PM_WT_SQL con comillas dobles. wt-sql/wt-oracle lo consumen.
+export SQL
 
 WT_ENV = $(PM_ENV) WT=$(WT) PM_WT_SLOTS=$(SLOTS) PM_WT_ORACLE=$(ORACLE) PM_WT_GC_FORCE=$(FORCE) \
-         PM_WT_SOLUTION_DIR='$(SOLUTION)' \
+         PM_WT_SEED_FORCE=$(FORCE) PM_WT_SOLUTION_DIR='$(SOLUTION)' \
+         PM_WT_SQL_SCALAR=$(SCALAR) \
+         PM_WT_FLAG_KEY='$(KEY)' PM_WT_FLAG_STATE=$(STATE) PM_WT_FLAG_PLANT=$(PLANT) \
          PM_SHARED_SQL_NETWORK=$(SHAREDSQL_NET) PM_SHARED_SQL_HOST=$(SHAREDSQL_HOST) \
          PM_SHARED_SQL_PORT=$(SHAREDSQL_PORT) PM_SHARED_SQL_PASSWORD='$(SHAREDSQL_PASSWORD)'
 
 .PHONY: pm-run pm-watch pm-migrate pm-seed pm-api pm-api-down pm-test pm-test-clean pm-unit pm-format pm-format-check pm-down pm-nuke pm-ps pm-logs pm-port pm-bootstrap-intel \
-        wt-up wt-down wt-ls wt-info wt-status wt-gc wt-seed-ln \
+        wt-up wt-down wt-ls wt-info wt-status wt-gc wt-seed-ln wt-sql wt-oracle wt-flag wt-heartbeat \
         e2e-backend e2e-backend-down e2e-net-check e2e-up e2e-smoke e2e-url e2e-down e2e-oracle-counts \
         legacy-launch legacy-data-up legacy-vm-up legacy-build legacy-deploy legacy-diag legacy-diag-logs \
         legacy-tunnel legacy-status legacy-url legacy-down legacy-site-down legacy-sites-status \
@@ -276,6 +292,17 @@ wt-seed-ln: REMOTE := macdata
 wt-seed-ln: ; $(WT_ENV) ./wt.sh seed-ln
 wt-ls:      ; $(WT_ENV) ./wt.sh ls
 wt-info:    ; $(WT_ENV) ./wt.sh info
+# Data-plane del slot: encapsulan credenciales/puente/contexto (nadie los re-descubre). Slot-mandatorios.
+wt-sql:      override TARGET := intel
+wt-sql:      REMOTE := macdata
+wt-sql:      ; PM_WT_SQL="$$SQL" $(WT_ENV) ./wt.sh sql
+wt-oracle:   override TARGET := intel
+wt-oracle:   REMOTE := macdata
+wt-oracle:   ; PM_WT_SQL="$$SQL" $(WT_ENV) ./wt.sh oracle
+wt-flag:     override TARGET := intel
+wt-flag:     REMOTE := macdata
+wt-flag:     ; $(WT_ENV) ./wt.sh flag
+wt-heartbeat: ; $(WT_ENV) ./wt.sh heartbeat
 
 # --- legado ---
 legacy-launch:    ; $(LEGACY_ENV) ./legacy.sh launch

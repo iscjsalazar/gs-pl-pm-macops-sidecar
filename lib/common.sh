@@ -137,6 +137,10 @@ load_env() {
   PM_WT_SITE_PORT_BASE="${PM_WT_SITE_PORT_BASE:-8100}"
   PM_WT_TUNNEL_PORT_BASE="${PM_WT_TUNNEL_PORT_BASE:-18100}"
   PM_WT_REGISTRY="${PM_WT_REGISTRY:-$SIDECAR_CENTRAL_DIR/.worktrees/slots.tsv}"   # registro compartido (checkout central); gitignored folder->slot
+  # TTL del arrendamiento de un slot: un slot cuyo proceso dueno murio (kill -0 falla) Y cuyo heartbeat es mas
+  # viejo que esto se considera abandonado y es reclamable (mismo TTL que guest-turn/deploy-turn, 60 min). Un pid
+  # vivo O un heartbeat fresco protegen el slot: nunca se le roba a una duena viva (semantica guest-turn).
+  PM_WT_LEASE_TTL="${PM_WT_LEASE_TTL:-3600}"
   # SQL compartido (reuso del de nvoslabs): la API y el seeder lo alcanzan uniendose a su red externa
   # (idiomatico, igual que los labs de nvoslabs) o, en su defecto, por el puerto publicado en loopback.
   PM_SHARED_SQL_NETWORK="${PM_SHARED_SQL_NETWORK:-nvoslabsc3-sharedsql-dt}"   # red externa del SQL compartido
