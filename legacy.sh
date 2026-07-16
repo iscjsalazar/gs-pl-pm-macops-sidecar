@@ -471,8 +471,9 @@ case "${1:-}" in
   data-up)  data_up ;;
   vm-up)    vm_up ;;
   build)    require_slot build; guest_turn_acquire; stage_build; guest_lock_release
-            warn "'build' solo COMPILA el arbol del slot en el guest (gate de compilacion); NO despliega ni re-inyecta el wiring runtime (backendBaseUrl + connection strings). El site del legado queda con los defaults del repo (backendBaseUrl=\"\") y su gateway a pm-api no opera bajo SQL-first hasta 'make e2e-up WT=<wt-pm> LEGACYSRC=<path> FORCE=1'." ;;
-  deploy)   require_slot deploy; guest_turn_acquire; deploy; guest_lock_release ;;
+            warn "'build' es solo la COMPUERTA DE COMPILACION del arbol del slot en el guest: si compilo, NO despliega ni re-inyecta el wiring runtime (backendBaseUrl + connection strings), y el site queda con los defaults del repo (backendBaseUrl=\"\"); si se OMITIO por health 200 (sin FORCE=1), el site corre el BINARIO VIEJO. En ambos casos el gateway a pm-api no opera bajo SQL-first: la validacion viva se hace SIEMPRE sobre 'make e2e-up WT=<wt-pm> LEGACYSRC=<path> FORCE=1' (ver process-e2e-local-slots.md D7)." ;;
+  deploy)   require_slot deploy; guest_turn_acquire; deploy; guest_lock_release
+            warn "'deploy' publica el binario del slot en IIS pero NO re-inyecta el wiring runtime (backendBaseUrl + connection strings) ni corre la validacion; ademas se OMITE si el site responde health 200 (sin FORCE=1). Valida SIEMPRE sobre 'make e2e-up WT=<wt-pm> LEGACYSRC=<path> FORCE=1' (ver process-e2e-local-slots.md D7)." ;;
   diag)     diag ;;
   diag-logs) diag_logs ;;
   tunnel)   warn_tunnel_adhoc; tunnel_up ;;

@@ -98,20 +98,26 @@ wt_slot_lookup() {  # uso: wt_slot_lookup <folder>
   awk -F'\t' -v f="$1" '$1==f{print $2; exit}' "$PM_WT_REGISTRY"
 }
 
-# Asigna (o reusa) el slot libre mas bajo para un folder y lo persiste. Imprime el slot.
+# Asigna (o reusa) el slot libre mas bajo para un folder y lo persiste. Imprime el slot. Vacio + rc!=0 si el pool
+# esta lleno (el llamador decide: reclamar arrendamientos muertos o rendirse).
+# El registro tiene 7 columnas: folder, slot, project, offset, created, owner_pid, heartbeat. owner_pid+heartbeat
+# forman el arrendamiento del slot (ver wt_lease_reclaimable); las filas viejas de 5 columnas se leen como
+# arrendamiento sin pid (muerto) y sin heartbeat (cae a 'created' para la edad).
 wt_slot_assign() {  # uso: wt_slot_assign <folder>   (correr bajo wt_registry_lock)
-  local folder="$1" existing n used
+  local folder="$1" existing n used now
   existing="$(wt_slot_lookup "$folder")"
   if [ -n "$existing" ]; then printf '%s' "$existing"; return 0; fi
   [ -f "$PM_WT_REGISTRY" ] || : > "$PM_WT_REGISTRY"
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   for n in $(seq 0 $(( PM_WT_SLOTS - 1 ))); do
     used="$(awk -F'\t' -v s="$n" '$2==s{print 1; exit}' "$PM_WT_REGISTRY")"
     if [ -z "$used" ]; then
-      printf '%s\t%s\t%s\t%s\t%s\n' "$folder" "$n" "pm-wt${n}" "$(( n * 10 ))" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$PM_WT_REGISTRY"
+      # owner_pid = pid de este proceso; heartbeat = ahora (la asignacion es el primer latido del arrendamiento).
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$folder" "$n" "pm-wt${n}" "$(( n * 10 ))" "$now" "$$" "$now" >> "$PM_WT_REGISTRY"
       printf '%s' "$n"; return 0
     fi
   done
-  wt_die "sin slots libres (PM_WT_SLOTS=$PM_WT_SLOTS); baja un worktree o sube PM_WT_SLOTS"; return 1
+  return 1   # pool lleno: sin wt_die (el llamador reclama arrendamientos muertos o reporta el error final)
 }
 
 # Libera el slot de un folder (borra su linea del registro).
@@ -119,6 +125,31 @@ wt_slot_release() {  # uso: wt_slot_release <folder>   (correr bajo wt_registry_
   [ -f "$PM_WT_REGISTRY" ] || return 0
   local tmp="${PM_WT_REGISTRY}.tmp"
   awk -F'\t' -v f="$1" '$1!=f' "$PM_WT_REGISTRY" > "$tmp" && mv "$tmp" "$PM_WT_REGISTRY"
+}
+
+# Refresca el arrendamiento (owner_pid=este pid, heartbeat=ahora) del folder. Idempotente. Corre bajo
+# wt_registry_lock. Una fila vieja de 5 columnas se migra en sitio a 7 al refrescarla. Lo llaman los verbos que
+# operan sobre el slot (wt-up, wt-info, wt-heartbeat, e2e-url): un slot en uso activo nunca queda reclamable.
+wt_slot_touch() {  # uso: wt_slot_touch <folder>   (correr bajo wt_registry_lock)
+  [ -f "$PM_WT_REGISTRY" ] || return 0
+  local tmp="${PM_WT_REGISTRY}.tmp" now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  awk -F'\t' -v OFS='\t' -v f="$1" -v pid="$$" -v hb="$now" '
+    $1==f { $6=pid; $7=hb }
+    { print }
+  ' "$PM_WT_REGISTRY" > "$tmp" && mv "$tmp" "$PM_WT_REGISTRY"
+}
+
+# Verdadero si un arrendamiento es reclamable: su proceso dueno murio (kill -0 falla, o no hay pid) Y su heartbeat
+# (o 'created' si la fila es vieja) es mas viejo que PM_WT_LEASE_TTL. Un pid VIVO o un heartbeat FRESCO => NUNCA
+# reclamable (espeja guest-turn: no se roba el turno a una duena viva aunque el heartbeat este rancio). El kill -0
+# solo es valido en esta M1 (el registro y los pids son locales; limitacion documentada).
+wt_lease_reclaimable() {  # uso: wt_lease_reclaimable <owner_pid> <heartbeat> <created>
+  local pid="$1" hb="$2" cr="$3" ref age
+  if wt_is_num "$pid" && kill -0 "$pid" 2>/dev/null; then return 1; fi   # pid vivo: protegido
+  ref="$hb"; [ -n "$ref" ] || ref="$cr"                                  # sin heartbeat (fila vieja) -> created
+  age="$(wt_age_secs "$ref")"
+  wt_is_num "$age" || return 1                                           # edad ilegible -> conservador: no reclamar
+  [ "$age" -gt "$PM_WT_LEASE_TTL" ]
 }
 
 # Resuelve el folder del worktree de CODIGO: WT explicito, o autodeteccion por el toplevel git SOLO si el CWD
@@ -556,8 +587,10 @@ wt_is_num() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 # Formatea bytes -> "N.N" (GB, una decimal). Vacio si la entrada no es numerica.
 wt_gb() { wt_is_num "${1:-}" || return 0; awk -v b="$1" 'BEGIN{printf "%.1f", b/1073741824}'; }
 
-# Edad (segundos) sobre la cual wt-ls/wt-info marcan un slot como candidato "viejo". Solo informativo: el
-# reclamo automatico por heartbeat/TTL es un follow-up y NO se implementa aqui. Default 24 h.
+# Edad (segundos, sobre 'created') sobre la cual wt-ls/wt-info marcan un slot como "viejo": aviso informativo de
+# antiguedad, independiente del reclaim. El reclaim automatico por arrendamiento (pid muerto + heartbeat >
+# PM_WT_LEASE_TTL) SI se implementa (wt_lease_reclaimable / wt_reclaim_dead_leases); wt-ls tambien marca
+# "[reclamable]" el slot cuyo arrendamiento wt-gc retiraria. Default 24 h.
 WT_AGE_WARN_SECS="${PM_WT_AGE_WARN_SECS:-86400}"
 
 # Edad transcurrida (segundos) de un timestamp ISO-8601 UTC (p. ej. 2026-07-15T00:57:59Z). Vacio si no parsea.
@@ -630,6 +663,18 @@ wt_disk_gate() {
   fi
   min_bytes=$(( PM_WT_MIN_DISK_GB * 1073741824 ))
   if [ "$free" -lt "$min_bytes" ]; then
+    # Antes de rechazar, intenta recuperar disco reclamando arrendamientos muertos (pid muerto + heartbeat vencido):
+    # su Oracle+volumen+BD liberan el /dev/vdb1 de la VM colima. Solo reclama abandonados; no toca duenas vivas.
+    local reclaimed
+    wt_log "disco bajo umbral ($(wt_gb "$free") GB < $PM_WT_MIN_DISK_GB GB): reclamando arrendamientos muertos antes de rechazar ..."
+    reclaimed="$(wt_reclaim_dead_leases 0)"
+    if [ "${reclaimed:-0}" -gt 0 ]; then
+      free="$(wt_colima_disk_line | awk '{print $2}')"
+      if wt_is_num "$free" && [ "$free" -ge "$min_bytes" ]; then
+        wt_log "disco recuperado tras reclamar $reclaimed slot(s): $(wt_gb "$free") GB libres >= umbral $PM_WT_MIN_DISK_GB GB"
+        return 0
+      fi
+    fi
     wt_log "ERROR: disco de la VM colima por debajo del umbral: $(wt_gb "$free") GB libres < $PM_WT_MIN_DISK_GB GB (PM_WT_MIN_DISK_GB)."
     wt_log "       Es el disco /dev/vdb1 de la VM colima (NO el host de 6.7 TiB). Baja worktrees (make wt-down) o corre make wt-gc FORCE=1; sube PM_WT_MIN_DISK_GB para forzar."
     return 1
@@ -682,10 +727,24 @@ cmd_wt_up() {
   # asi un rechazo por umbral NO consume una fila de slots.tsv. Fail-open ante error de medicion (req5). Queda
   # FUERA del up-lock (no toca el slot); no confundir con el falla-cerrado de wt_check_port_free.
   wt_disk_gate || return 1
-  local folder slot
+  local folder slot reclaimed
   folder="$(wt_resolve_folder)" || return 1
   # La asignacion de slot se serializa por el registro (aparte del up-lock): folders distintos no compiten.
-  slot="$(wt_registry_lock wt_slot_assign "$folder")" || return 1
+  slot="$(wt_registry_lock wt_slot_assign "$folder")" || slot=""
+  if [ -z "$slot" ]; then
+    # Pool lleno: en vez de abortar, recupera arrendamientos muertos (pid muerto + heartbeat > PM_WT_LEASE_TTL) y
+    # reintenta. Un pool lleno de slots abandonados se auto-recupera; los slots de duenas vivas no se tocan.
+    wt_log "sin slots libres: reclamando arrendamientos muertos (pid muerto + heartbeat > ${PM_WT_LEASE_TTL}s) ..."
+    reclaimed="$(wt_reclaim_dead_leases 0)"
+    if [ "${reclaimed:-0}" -gt 0 ]; then
+      wt_log "reclamados $reclaimed slot(s); reintentando la asignacion"
+      slot="$(wt_registry_lock wt_slot_assign "$folder")" || slot=""
+    fi
+    [ -n "$slot" ] || { wt_die "sin slots libres (PM_WT_SLOTS=$PM_WT_SLOTS) y sin arrendamientos reclamables; baja un worktree (make wt-down) o sube PM_WT_SLOTS"; return 1; }
+  fi
+  # Refresca el arrendamiento (pid+heartbeat) del slot: cubre el reuso (wt_slot_assign no lo toca al reusar) y
+  # marca el slot como en uso activo para que no lo reclame otra sesion durante esta corrida.
+  wt_registry_lock wt_slot_touch "$folder"
   # Exclusion por slot (D29-2): dos wt-up del MISMO folder resuelven el mismo slot y se pisan rsync/build/run. El
   # aprovisionamiento se serializa por 'wt_lock up-<slot>'; el segundo espera (o reclama si el dueno murio). Los
   # locks internos (ln/bus/seed/bridge/oracle-wt<N>) llevan otros nombres: sin deadlock. wt_lock corre el helper
@@ -815,11 +874,13 @@ cmd_wt_ls() {
     echo "[wt] registro vacio ($PM_WT_REGISTRY)"
   else
     printf 'folder\tslot\tproject\toffset\tcreated\tage\n'
-    local f s pr off cr secs age
-    while IFS=$'\t' read -r f s pr off cr; do
+    local f s pr off cr pid hb secs age
+    while IFS=$'\t' read -r f s pr off cr pid hb; do
       [ -n "$f" ] || continue
       secs="$(wt_age_secs "$cr")"; age="$(wt_age_fmt "$secs")"; [ -n "$age" ] || age="n/d"
       if wt_is_num "$secs" && [ "$secs" -ge "$WT_AGE_WARN_SECS" ]; then age="$age [viejo]"; fi
+      # "[reclamable]": arrendamiento muerto (pid muerto + heartbeat/created > TTL) que wt-gc FORCE=1 retiraria.
+      if wt_lease_reclaimable "$pid" "$hb" "$cr"; then age="$age [reclamable]"; fi
       printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$f" "$s" "$pr" "$off" "$cr" "$age"
     done < "$PM_WT_REGISTRY"
   fi
@@ -847,16 +908,23 @@ cmd_wt_info() {
     return 1
   fi
   wt_derive "$slot"
+  # Consultar el slot propio es señal de vida: refresca el arrendamiento (pid+heartbeat) para que no lo reclame otra
+  # sesion mientras esta se apoya en wt-info. Idempotente, bajo lock del registro.
+  wt_registry_lock wt_slot_touch "$folder"
   # Presupuesto medido ANTES del heredoc (el heredoc solo interpola $var; no ejecuta subcomandos). Best-effort.
   local budget=""
   budget="$(wt_budget_lines)" || true
-  # Edad del slot (informativa; el reclamo por TTL/heartbeat es follow-up). 'created' es la col 5 del registro.
-  local created secs age old=""
+  # Edad ('created', informativa) y estado del arrendamiento (pid/heartbeat, cols 6/7). El reclaim por TTL SI se
+  # implementa (wt_lease_reclaimable): aqui se refresco el heartbeat, asi que este slot NO figura reclamable.
+  local created pid hb secs age old="" lease=""
   created="$(awk -F'\t' -v f="$folder" '$1==f{print $5; exit}' "$PM_WT_REGISTRY" 2>/dev/null)"
+  pid="$(awk -F'\t' -v f="$folder" '$1==f{print $6; exit}' "$PM_WT_REGISTRY" 2>/dev/null)"
+  hb="$(awk -F'\t' -v f="$folder" '$1==f{print $7; exit}' "$PM_WT_REGISTRY" 2>/dev/null)"
   secs="$(wt_age_secs "$created")"; age="$(wt_age_fmt "$secs")"
   if wt_is_num "$secs" && [ "$secs" -ge "$WT_AGE_WARN_SECS" ]; then old=" [viejo]"; fi
+  lease="arrendamiento pid ${pid:-<ninguno>}, heartbeat ${hb:-<created>}, TTL ${PM_WT_LEASE_TTL}s"
   cat <<EOF
-[wt] worktree '$folder' -> slot $slot   (creado ${created:-n/d}; edad ${age:-n/d}${old})
+[wt] worktree '$folder' -> slot $slot   (creado ${created:-n/d}; edad ${age:-n/d}${old}; ${lease})
 
   Backend (docker en ${PM_REMOTE_SSH:-macdata})
     contenedor API    pm-wt${slot}-api            puerto host ${PM_API_PORT}   (guest: ${PM_GUEST_GATEWAY}:${PM_API_PORT})
@@ -887,6 +955,52 @@ $budget
 EOF
 }
 
+# Reclama un slot con arrendamiento muerto: tumba sus recursos POR NOMBRE y, si quedaron ausentes, libera su fila.
+# Orden teardown->release (nunca al reves): mientras la fila existe, wt_slot_assign no puede reasignar el slot, asi
+# que un wt-up concurrente no puede colisionar con el teardown; solo tras liberar la fila el slot vuelve al pool.
+# Retorna != 0 si el Oracle del slot no se pudo retirar (la fila NO se libera: el siguiente dueno heredaria los
+# datos que el camino con flag OFF (PGE950RT) muto). Muta los globals de wt_derive: el llamador re-deriva su slot.
+_wt_reclaim_slot() {  # uso: _wt_reclaim_slot <slot> <folder>
+  local slot="$1" folder="$2" ctx tport tpid pw; ctx="$(remote_docker_ctx)"
+  wt_derive "$slot"
+  wt_log "reclamando slot $slot ('$folder'): arrendamiento muerto -> teardown de recursos"
+  on_intel "docker $ctx rm -f 'pm-wt${slot}-api' >/dev/null 2>&1; true"
+  if wt_oracle_exists; then
+    wt_oracle_down || { wt_die "reclaim del slot $slot: el Oracle no se retiro por completo; la fila NO se libera"; return 1; }
+  fi
+  # Site IIS del guest + tunel local del slot: best-effort (no bloquean el reclaim del slot).
+  ssh "$PM_REMOTE_SSH" "WINHOST=${PM_GUEST_WINHOST} SLOT=$slot bash ~/pm-host-windows/scripts/site-down.sh" >/dev/null 2>&1 || true
+  tport=$(( PM_WT_TUNNEL_PORT_BASE + slot ))
+  tpid="$(pgrep -f -- "-L ${tport}:${PM_GUEST_WINHOST}:" 2>/dev/null | head -1)"
+  [ -n "$tpid" ] && kill "$tpid" 2>/dev/null || true
+  # BD de producto del slot (higiene de disco del /dev/vdb1).
+  pw="$(wt_shared_sql_password 2>/dev/null)" && wt_drop_planning "$pw" >/dev/null 2>&1 || true
+  wt_registry_lock wt_slot_release "$folder"
+  wt_log "slot $slot reclamado (recursos retirados, fila liberada)"
+}
+
+# Reclama TODOS los arrendamientos muertos del registro (pid muerto + heartbeat/created > PM_WT_LEASE_TTL). Con
+# dry=1 solo los lista; con dry=0 los reclama (teardown + release via _wt_reclaim_slot). Imprime cuantos reclamo
+# (o cuantos son reclamables, en dry). Toma un snapshot bajo lock y NO sostiene el lock durante el teardown remoto.
+wt_reclaim_dead_leases() {  # uso: wt_reclaim_dead_leases <dry: 1|0>
+  local dry="${1:-1}" snap f s pr off cr pid hb n=0
+  [ -f "$PM_WT_REGISTRY" ] || { printf '0'; return 0; }
+  snap="$(wt_registry_lock cat "$PM_WT_REGISTRY")" || { wt_log "reclaim: registro no legible; no se reclama"; printf '0'; return 0; }
+  while IFS=$'\t' read -r f s pr off cr pid hb; do
+    [ -n "$f" ] || continue
+    wt_lease_reclaimable "$pid" "$hb" "$cr" || continue
+    if [ "$dry" = "1" ]; then
+      wt_log "arrendamiento reclamable: slot $s ('$f'; pid ${pid:-<ninguno>}, heartbeat ${hb:-<created:$cr>})"
+      n=$((n+1))
+    else
+      if _wt_reclaim_slot "$s" "$f"; then n=$((n+1)); else wt_log "reclaim del slot $s ('$f') fallo; se conserva"; fi
+    fi
+  done <<EOF
+$snap
+EOF
+  printf '%s' "$n"
+}
+
 # Owner (folder) de un slot segun el SNAPSHOT del registro (una linea 'folder<TAB>slot<TAB>...' por worktree).
 # Vacio si el slot esta libre. Consulta la copia en memoria; no re-lee ni re-lockea el archivo por cada plano.
 _wt_gc_owner() {  # uso: _wt_gc_owner <slot> <snapshot>
@@ -898,7 +1012,7 @@ _wt_gc_owner() {  # uso: _wt_gc_owner <slot> <snapshot>
 cmd_wt_gc() {
   wt_require_intel || return 1
   local ctx force="${PM_WT_GC_FORCE:-0}"; ctx="$(remote_docker_ctx)"
-  local apis oracles sites slot owner n orphans=0 clean_failures=0
+  local apis oracles sites slot owner n orphans=0 clean_failures=0 lease_reclaimed=0
   # Snapshot del registro tomado UNA vez bajo wt_registry_lock: el listado y todos los lookups de owner se hacen
   # contra esta copia en memoria, sin sostener el lock durante las llamadas remotas (docker/ssh) de los planos.
   local reg_snap="" reg_readable=1
@@ -919,6 +1033,30 @@ cmd_wt_gc() {
 
   echo "[wt-gc] registro de slots ($PM_WT_REGISTRY):"
   if [ -n "$reg_snap" ]; then printf '%s\n' "$reg_snap" | awk -F'\t' '{printf "  slot %-3s %s\n", $2, $1}'; else echo "  (vacio)"; fi
+
+  # Plano de arrendamientos: filas cuyo dueno murio (pid muerto) y con heartbeat/created > PM_WT_LEASE_TTL. Con
+  # FORCE=1 se reclaman de raiz (teardown de recursos + release de la fila via _wt_reclaim_slot, orden seguro); sin
+  # FORCE solo se informan. Corre ANTES de los planos de recursos: sus recursos ya no existen tras el reclaim.
+  echo "[wt-gc] plano de arrendamientos (pid muerto + heartbeat > ${PM_WT_LEASE_TTL}s):"
+  if [ "$reg_readable" = "1" ] && [ -n "$reg_snap" ]; then
+    local lf ls lpr loff lcr lpid lhb
+    while IFS=$'\t' read -r lf ls lpr loff lcr lpid lhb; do
+      [ -n "$lf" ] || continue
+      wt_lease_reclaimable "$lpid" "$lhb" "$lcr" || continue
+      echo "  slot $ls ('$lf')  -> ARRENDAMIENTO MUERTO (pid ${lpid:-<ninguno>}, heartbeat ${lhb:-<created:$lcr>})"
+      if [ "$force" = "1" ]; then
+        if _wt_reclaim_slot "$ls" "$lf"; then echo "     reclamado"; lease_reclaimed=$((lease_reclaimed+1))
+        else echo "     ERROR: no se pudo reclamar el slot $ls (Oracle no retirado); la fila se conserva"; clean_failures=$((clean_failures+1)); fi
+      fi
+    done <<EOF
+$reg_snap
+EOF
+    # Refresca el snapshot para que los planos de recursos usen owners exactos tras liberar filas.
+    if [ "$lease_reclaimed" -gt 0 ]; then reg_snap="$(wt_registry_lock cat "$PM_WT_REGISTRY" 2>/dev/null)" || true; fi
+  fi
+  if [ "$lease_reclaimed" -gt 0 ]; then echo "  ($lease_reclaimed reclamado(s))"
+  elif [ "$force" = "1" ]; then echo "  (ninguno reclamable)"
+  else echo "  (informativo; FORCE=1 para reclamar)"; fi
 
   apis="$(on_intel "docker $ctx ps -a --filter 'name=pm-wt' --format '{{.Names}}' 2>/dev/null" 2>/dev/null | tr -d '\r' | grep -E '^pm-wt[0-9]+-api$' || true)"
   oracles="$(on_intel "docker $ctx ps -a --filter 'name=pm-wt' --format '{{.Names}}' 2>/dev/null" 2>/dev/null | tr -d '\r' | grep -E '^pm-wt[0-9]+-oracle-1$' || true)"
@@ -1007,10 +1145,11 @@ EOF
   [ "$found" = "1" ] || echo "  (ninguno)"
 
   echo ""
-  if [ "$orphans" -eq 0 ]; then echo "[wt-gc] sin huerfanos."
-  elif [ "$force" != "1" ]; then echo "[wt-gc] $orphans huerfano(s); re-corre con FORCE=1 para retirarlos."
-  elif [ "$clean_failures" -gt 0 ]; then echo "[wt-gc] $orphans huerfano(s); $clean_failures retiro(s) fallaron (ver ERROR arriba)."
-  else echo "[wt-gc] $orphans huerfano(s) retirado(s)."; fi
+  [ "$lease_reclaimed" -eq 0 ] || echo "[wt-gc] $lease_reclaimed arrendamiento(s) muerto(s) reclamado(s) (slot liberado + recursos retirados)."
+  if [ "$orphans" -eq 0 ]; then echo "[wt-gc] sin huerfanos de recursos."
+  elif [ "$force" != "1" ]; then echo "[wt-gc] $orphans huerfano(s) de recursos; re-corre con FORCE=1 para retirarlos."
+  elif [ "$clean_failures" -gt 0 ]; then echo "[wt-gc] $orphans huerfano(s); $clean_failures retiro(s)/reclamo(s) fallaron (ver ERROR arriba)."
+  else echo "[wt-gc] $orphans huerfano(s) de recursos retirado(s)."; fi
 
   # Aviso de retencion prolongada del turno del guest singleton (vacio si esta libre o por debajo del umbral).
   local gt="$BASE_DIR/tools/guest-turn/guest-turn.sh"
@@ -1022,9 +1161,21 @@ EOF
   return 0
 }
 
-# Verbo independiente: siembra/asegura solo la referencia LN compartida (paso deliberado de una vez).
+# Verbo independiente: siembra/asegura solo la referencia LN compartida (paso deliberado de una vez). Con
+# PM_WT_SEED_FORCE=1 (make wt-seed-ln FORCE=1) RE-APLICA el grupo ln aunque la referencia ya este completa: es el
+# escape para meter un seed ln NUEVO en el pm_erpln106 ya provisionado (el guard have==need de wt_ensure_ln_singleton
+# mide presencia de tablas, no contenido, asi que un seed que agrega filas a una tabla existente se saltaria en
+# silencio). Patron SINGLETON=1/NUKE=1 del proyecto.
 cmd_wt_seed_ln() {
   wt_require_intel || return 1
+  # Si WT apunta a un worktree de codigo, siembra los ln/*.sql de ESE worktree (no solo el checkout central), para
+  # validar un seed nuevo del worktree. Mismo criterio que _cmd_wt_up_locked (marcador PL.PM.sln).
+  local folder
+  if folder="$(wt_resolve_folder 2>/dev/null)" && [ -f "$WRAPPER_DIR/worktrees/$folder/PL.PM.sln" ]; then
+    PM_SOLUTION_DIR="$WRAPPER_DIR/worktrees/$folder"
+    PM_CONTAINERS_DIR="$PM_SOLUTION_DIR/containers"
+    wt_log "seed-ln: usando los containers del worktree '$folder' ($PM_CONTAINERS_DIR)"
+  fi
   local pw; pw="$(wt_shared_sql_password)" || return 1
   sync_to_intel || return 1
   WT_REMOTE_CONTAINERS_ABS="$(on_intel "cd '$PM_REMOTE_DIR' && pwd" | tr -d '\r')" || WT_REMOTE_CONTAINERS_ABS=""
@@ -1032,5 +1183,90 @@ cmd_wt_seed_ln() {
   wt_shared_sql_check || return 1
   # Mismo lock del seed que cmd_wt_up: el 'docker cp' de los CSV va a rutas COMPARTIDAS del motor (F2).
   wt_lock seed wt_push_seed_assets || return 1
-  wt_lock ln wt_ensure_ln_singleton "$pw"
+  if [ "${PM_WT_SEED_FORCE:-0}" = "1" ]; then
+    wt_log "FORCE=1: re-aplicando el grupo ln sobre '$PM_WT_LN_DB' (salta el guard have==need de wt_ensure_ln_singleton)."
+    wt_log "AVISO: el grupo ln re-aplica los ln/*.sql sobre '$PM_WT_LN_DB' (compartido): si algun script aun hace DROP+CREATE disrupta a las sesiones que lo leen -> corre solo con el resto quieto."
+    wt_lock ln wt_seed_group "$pw" ln "_pm_unused" "$PM_WT_LN_DB"
+  else
+    wt_lock ln wt_ensure_ln_singleton "$pw"
+  fi
+}
+
+# --- Verbos de data-plane del slot (wt-sql / wt-oracle / wt-flag): encapsulan credenciales/puente/contexto para
+# que ningun agente los re-descubra. Slot-mandatorios: exigen WT con slot asignado (exit 2 sin el). ---
+
+# Resuelve el slot del worktree (WT) y deriva sus parametros. Retorna 2 si no hay slot asignado (guard compartido).
+_wt_bind_slot() {  # setea WT_SLOT/PM_*/WT_ORACLE_* via wt_derive; imprime nada.
+  local folder slot
+  folder="$(wt_resolve_folder)" || return 2
+  slot="$(wt_slot_lookup "$folder")"
+  [ -n "$slot" ] || { wt_die "el worktree '$folder' no tiene slot asignado: corre 'make wt-up WT=$folder' primero"; return 2; }
+  wt_derive "$slot"
+  WT_BOUND_FOLDER="$folder"
+}
+
+# wt-sql: corre SQL arbitrario contra la BD del slot (pm_planning_wt<N>) por el motor compartido. SCALAR=1 -> valor
+# escalar (sin encabezado). El SA, el host/puerto del motor y el nombre de la BD los resuelve el verbo.
+cmd_wt_sql() {
+  wt_require_intel || return 1
+  [ -n "${PM_WT_SQL:-}" ] || { wt_die "falta SQL=\"<consulta>\" (make wt-sql WT=<folder> SQL=\"SELECT ...\" [SCALAR=1])"; return 2; }
+  _wt_bind_slot || return $?
+  local pw; pw="$(wt_shared_sql_password)" || return 1
+  wt_shared_sql_check || return 1
+  # Fija la BD por el flag -d de sqlcmd (no 'USE [db]'): asi no emite el mensaje "Changed database context" que
+  # ensuciaria el escalar. El SQL llega intacto (con comillas simples) porque el Makefile exporta SQL (no lo
+  # interpola entre comillas simples en la linea de comando).
+  if [ "${PM_WT_SQL_SCALAR:-0}" = "1" ]; then
+    wt_shared_query "$pw" "SET NOCOUNT ON; $PM_WT_SQL" "-h -1 -W -d $PM_PLANNING_DB" 2>/dev/null | tr -d '\r'
+  else
+    wt_shared_query "$pw" "SET NOCOUNT ON; $PM_WT_SQL" "-d $PM_PLANNING_DB"
+  fi
+}
+
+# wt-oracle: corre SQL arbitrario (multi-fila) contra el Oracle ControlPiso del slot. Exige el contenedor Oracle
+# del slot activo (aprovisionado con ORACLE=1). ORACLE_HOME, sqlplus y credenciales los resuelve el verbo.
+cmd_wt_oracle() {
+  wt_require_intel || return 1
+  [ -n "${PM_WT_SQL:-}" ] || { wt_die "falta SQL=\"<consulta>\" (make wt-oracle WT=<folder> SQL=\"select ...\")"; return 2; }
+  _wt_bind_slot || return $?
+  wt_oracle_running || { wt_die "el Oracle del slot '$WT_ORACLE_CONTAINER' no esta corriendo: aprovisiona con 'make wt-up WT=$WT_BOUND_FOLDER ORACLE=1'"; return 1; }
+  local ctx; ctx="$(remote_docker_ctx)"
+  printf 'set head off feed off pages 0 lines 32767 trimspool on;\n%s\n' "$PM_WT_SQL" \
+    | on_intel "docker $ctx exec -i -e ORACLE_HOME='$PM_WT_ORACLE_HOME' '$WT_ORACLE_CONTAINER' bash -c 'export PATH=\$ORACLE_HOME/bin:\$PATH; exec sqlplus -S $PM_WT_ORACLE_USER/$PM_WT_ORACLE_PASS@localhost:1521/XE'"
+}
+
+# wt-flag: fija un feature flag en la BD del slot por el motor compartido. Es el canal SANCIONADO para el slot: el
+# endpoint POST /api/v1/tools/feature-flags rechaza el SQL del slot por la allowlist DEV (Server 'sqlserver,1433'
+# fuera de la allowlist). KEY=<flag> STATE=on|off [PLANT=RES]. Falla si el flag no existe (0 filas afectadas).
+cmd_wt_flag() {
+  wt_require_intel || return 1
+  [ -n "${PM_WT_FLAG_KEY:-}" ] || { wt_die "falta KEY=<flag> (make wt-flag WT=<folder> KEY=<flag> STATE=on|off [PLANT=RES])"; return 2; }
+  local v
+  case "${PM_WT_FLAG_STATE:-}" in
+    on|ON|1|true|TRUE)    v=1 ;;
+    off|OFF|0|false|FALSE) v=0 ;;
+    *) wt_die "falta STATE=on|off (make wt-flag WT=<folder> KEY=$PM_WT_FLAG_KEY STATE=on)"; return 2 ;;
+  esac
+  _wt_bind_slot || return $?
+  local plant="${PM_WT_FLAG_PLANT:-RES}" pw key_esc sql out
+  pw="$(wt_shared_sql_password)" || return 1
+  wt_shared_sql_check || return 1
+  key_esc="$(printf '%s' "$PM_WT_FLAG_KEY" | sed "s/'/''/g")"
+  sql="SET NOCOUNT ON; USE [$PM_PLANNING_DB]; UPDATE FeatureManagement.FeatureFlags SET IsEnabled=$v, UpdatedAt=SYSUTCDATETIME() WHERE [Key]=N'$key_esc' AND Plant=N'$plant'; SELECT @@ROWCOUNT;"
+  out="$(wt_shared_scalar "$pw" "$sql")"
+  if [ "${out:-0}" = "0" ]; then
+    wt_die "flag '$PM_WT_FLAG_KEY'/$plant no existe en $PM_PLANNING_DB (0 filas): revisa KEY/PLANT o que la BD tenga el seed del flag"; return 1
+  fi
+  wt_log "flag '$PM_WT_FLAG_KEY'/$plant -> IsEnabled=$v en $PM_PLANNING_DB ($out fila(s) actualizada(s))"
+}
+
+# wt-heartbeat: refresca el arrendamiento (pid+heartbeat) del slot sin re-aprovisionar. Para holds largos que no
+# tocan el slot por otros verbos (analogo a deploy-turn heartbeat), evita que el reclaim por TTL lo considere muerto.
+cmd_wt_heartbeat() {
+  local folder slot
+  folder="$(wt_resolve_folder)" || return 1
+  slot="$(wt_slot_lookup "$folder")"
+  [ -n "$slot" ] || { wt_die "el worktree '$folder' no tiene slot asignado"; return 2; }
+  wt_registry_lock wt_slot_touch "$folder"
+  wt_log "arrendamiento del slot $slot ('$folder') refrescado (pid $$, heartbeat $(date -u +%Y-%m-%dT%H:%M:%SZ))"
 }

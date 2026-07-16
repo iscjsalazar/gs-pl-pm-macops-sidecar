@@ -12,6 +12,8 @@
 #   make pm-api / pm-api-down     # levanta / detiene la API real en ESTA mac (M1)
 #   make pm-test                  # inner-loop: reusa la API si responde + dotnet test (default PROFILE=sql)
 #   [WT obligatorio] make pm-test-clean WT=<worktree>   # GATE limpio POR SLOT: wt-up (slot API+BD+seed+Oracle) + migrate por puente + suite; sin WT/slot falla (exit 2)
+#   [WT obligatorio] make pm-gate WT=<worktree>         # ONE-SHOT: encadena wt-up ORACLE=1 + pm-test-clean en un solo comando (aprovisiona-y-corre)
+#   [WT obligatorio] make pm-test-clean WT=<worktree> WARM=1   # re-run tras kill esporadico: reusa el slot sano (sin rsync/build/reseed/cold-init)
 #   make pm-test FILTER='FullyQualifiedName~RtSync'   # acota por filtro (inner-loop)
 #   make pm-test APIFORCE=1                            # relanza la API (api-down+api) antes de testear; no reusa
 #   make pm-unit                  # unit tests puros (*.UnitTests): sin Docker, sin red, sin data tier; FILTER= acota
@@ -53,8 +55,12 @@
 #   [WT obligatorio] make wt-info WT=<folder>                  # imprime la derivacion COMPLETA del slot ("que slot es mio")
 #   make wt-ls                                # lista el registro de slots (folder -> slot)
 #   make wt-status                            # estado de los contenedores PM por worktree y del bus
-#   make wt-gc / make wt-gc FORCE=1           # cruza registro/API/Oracle/sites: lista (o retira) huerfanos
-#   make wt-seed-ln                           # asegura la referencia LN compartida (pm_erpln106) una vez
+#   make wt-gc / make wt-gc FORCE=1           # reclama arrendamientos muertos (pid muerto + heartbeat > TTL) y huerfanos
+#   make wt-seed-ln / make wt-seed-ln FORCE=1 # asegura (o re-aplica con FORCE) la referencia LN compartida (pm_erpln106)
+#   [WT obligatorio] make wt-sql WT=<folder> SQL="SELECT ..." [SCALAR=1]   # SQL contra la BD del slot (pm_planning_wt<N>)
+#   [WT obligatorio] make wt-oracle WT=<folder> SQL="select ..."          # SQL contra el Oracle del slot (requiere ORACLE=1)
+#   [WT obligatorio] make wt-flag WT=<folder> KEY=<flag> STATE=on|off [PLANT=RES]   # fija un feature flag en la BD del slot
+#   [WT obligatorio] make wt-heartbeat WT=<folder>                        # refresca el arrendamiento del slot (holds largos)
 #   # Slot 0..N-1 (N=SLOTS, default 8) -> proyecto pm-wt<N>, API :5180+N*10, BD pm_planning_wt<N>, bus prefix wt<N>,
 #   #   site IIS pm-wt<N>::8100+N, tunel :18100+N, Oracle pm-wt<N>-oracle-1::15210+N. Ver README (tabla canonica).
 #   # Vars del SQL compartido (override): SHAREDSQL_NET/HOST/PORT/PASSWORD (default red nvoslabsc3-sharedsql-dt, sqlserver:1433).
@@ -187,14 +193,27 @@ SHAREDSQL_NET   ?=
 SHAREDSQL_HOST  ?=
 SHAREDSQL_PORT  ?=
 SHAREDSQL_PASSWORD ?=
+# Data-plane del slot (wt-sql/wt-oracle/wt-flag): SQL arbitrario, escalar, y toggle de feature flag.
+SQL         ?=
+SCALAR      ?= 0
+KEY         ?=
+STATE       ?=
+PLANT       ?= RES
+WARM        ?= 0
+# SQL se EXPORTA (no se interpola entre comillas simples en WT_ENV): un SQL con comillas simples
+# ('WHERE Plant=''RES''') rompe el quoting de make/shell si se interpola; exportado llega intacto al recipe,
+# que lo asigna a PM_WT_SQL con comillas dobles. wt-sql/wt-oracle lo consumen.
+export SQL
 
 WT_ENV = $(PM_ENV) WT=$(WT) PM_WT_SLOTS=$(SLOTS) PM_WT_ORACLE=$(ORACLE) PM_WT_GC_FORCE=$(FORCE) \
-         PM_WT_SOLUTION_DIR='$(SOLUTION)' \
+         PM_WT_SEED_FORCE=$(FORCE) PM_WT_SOLUTION_DIR='$(SOLUTION)' \
+         PM_WT_SQL_SCALAR=$(SCALAR) PM_WT_WARM=$(WARM) \
+         PM_WT_FLAG_KEY='$(KEY)' PM_WT_FLAG_STATE=$(STATE) PM_WT_FLAG_PLANT=$(PLANT) \
          PM_SHARED_SQL_NETWORK=$(SHAREDSQL_NET) PM_SHARED_SQL_HOST=$(SHAREDSQL_HOST) \
          PM_SHARED_SQL_PORT=$(SHAREDSQL_PORT) PM_SHARED_SQL_PASSWORD='$(SHAREDSQL_PASSWORD)'
 
-.PHONY: pm-run pm-watch pm-migrate pm-seed pm-api pm-api-down pm-test pm-test-clean pm-unit pm-format pm-format-check pm-down pm-nuke pm-ps pm-logs pm-port pm-bootstrap-intel \
-        wt-up wt-down wt-ls wt-info wt-status wt-gc wt-seed-ln \
+.PHONY: pm-run pm-watch pm-migrate pm-seed pm-api pm-api-down pm-test pm-test-clean pm-gate pm-unit pm-format pm-format-check pm-down pm-nuke pm-ps pm-logs pm-port pm-bootstrap-intel \
+        wt-up wt-down wt-ls wt-info wt-status wt-gc wt-seed-ln wt-sql wt-oracle wt-flag wt-heartbeat \
         e2e-backend e2e-backend-down e2e-net-check e2e-up e2e-smoke e2e-url e2e-down e2e-oracle-counts \
         legacy-launch legacy-data-up legacy-vm-up legacy-build legacy-deploy legacy-diag legacy-diag-logs \
         legacy-tunnel legacy-status legacy-url legacy-down legacy-site-down legacy-sites-status \
@@ -214,6 +233,9 @@ pm-test-clean: PROFILE := full
 pm-test-clean: ORACLE  := 1                     # gate full: aprovisiona el Oracle ControlPiso del slot
 pm-test-clean: ; $(WT_ENV) ./pm.sh test-clean   # gate limpio POR SLOT (WT=<worktree pl-programa-maestro>)
 pm-unit:     ; $(PM_ENV) ./pm.sh unit           # unit tests puros (*.UnitTests): sin Docker, sin red, sin data tier
+# One-shot (D1): aprovisiona el slot (wt-up ORACLE=1) y corre el gate en UN comando. No toca el guard de
+# pm-test-clean (que sigue exigiendo wt-up previo); pm-gate encadena ambos. wt-up es idempotente (reusa el slot).
+pm-gate: ; @[ -n "$(WT)" ] || { echo "pm-gate exige WT=<worktree>: aprovisiona-y-corre el gate en un paso" >&2; exit 2; }; $(MAKE) wt-up WT=$(WT) ORACLE=1 && $(MAKE) pm-test-clean WT=$(WT)
 pm-format:       ; $(PM_ENV) ./pm.sh format          # formatea .cs modificados vs develop (delega a scripts/format.sh in-repo)
 pm-format-check: ; $(PM_ENV) ./pm.sh format-check    # gate de formato changed-vs-develop (delega a scripts/format-check.sh)
 pm-down:     ; $(PM_ENV) ./pm.sh down
@@ -276,6 +298,17 @@ wt-seed-ln: REMOTE := macdata
 wt-seed-ln: ; $(WT_ENV) ./wt.sh seed-ln
 wt-ls:      ; $(WT_ENV) ./wt.sh ls
 wt-info:    ; $(WT_ENV) ./wt.sh info
+# Data-plane del slot: encapsulan credenciales/puente/contexto (nadie los re-descubre). Slot-mandatorios.
+wt-sql:      override TARGET := intel
+wt-sql:      REMOTE := macdata
+wt-sql:      ; PM_WT_SQL="$$SQL" $(WT_ENV) ./wt.sh sql
+wt-oracle:   override TARGET := intel
+wt-oracle:   REMOTE := macdata
+wt-oracle:   ; PM_WT_SQL="$$SQL" $(WT_ENV) ./wt.sh oracle
+wt-flag:     override TARGET := intel
+wt-flag:     REMOTE := macdata
+wt-flag:     ; $(WT_ENV) ./wt.sh flag
+wt-heartbeat: ; $(WT_ENV) ./wt.sh heartbeat
 
 # --- legado ---
 legacy-launch:    ; $(LEGACY_ENV) ./legacy.sh launch

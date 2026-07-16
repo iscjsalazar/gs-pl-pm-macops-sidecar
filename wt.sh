@@ -10,8 +10,12 @@
 #   WT=<folder> ./wt.sh info    # imprime la derivacion completa del slot (API, BD, bus, Oracle, site, tunel)
 #   ./wt.sh ls                  # lista el registro de slots (folder -> slot)
 #   ./wt.sh status              # estado de los contenedores PM por worktree y del bus
-#   ./wt.sh gc                  # cruza registro / API / Oracle / sites y marca huerfanos (FORCE=1 los retira)
-#   ./wt.sh seed-ln             # asegura la referencia LN compartida (pm_erpln106) una sola vez
+#   ./wt.sh gc                  # cruza registro / API / Oracle / sites; reclama arrendamientos muertos y huerfanos (FORCE=1)
+#   ./wt.sh seed-ln             # asegura la referencia LN compartida (pm_erpln106); FORCE=1 la re-aplica (seed nuevo)
+#   WT=<folder> SQL="..." ./wt.sh sql        # SQL contra la BD del slot (pm_planning_wt<N>); SCALAR=1 -> valor
+#   WT=<folder> SQL="..." ./wt.sh oracle     # SQL contra el Oracle del slot (requiere ORACLE=1)
+#   WT=<folder> KEY=<flag> STATE=on|off ./wt.sh flag   # fija un feature flag en la BD del slot (canal sancionado)
+#   WT=<folder> ./wt.sh heartbeat            # refresca el arrendamiento del slot (holds largos)
 # WT se autodetecta con 'git rev-parse --show-toplevel' si el comando se corre dentro del worktree.
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib/common.sh"
@@ -26,7 +30,11 @@ case "$VERB" in
   ls)       cmd_wt_ls ;;
   info)     cmd_wt_info ;;
   status)   cmd_wt_status ;;
-  gc)       cmd_wt_gc ;;
-  seed-ln)  cmd_wt_seed_ln ;;
-  *) echo "uso: $0 {up|down|ls|info|status|gc|seed-ln}   (WT=<folder>; requiere PM_TARGET=intel REMOTE=macdata)"; exit 2 ;;
+  gc)        cmd_wt_gc ;;
+  seed-ln)   cmd_wt_seed_ln ;;
+  sql)       cmd_wt_sql ;;
+  oracle)    cmd_wt_oracle ;;
+  flag)      cmd_wt_flag ;;
+  heartbeat) cmd_wt_heartbeat ;;
+  *) echo "uso: $0 {up|down|ls|info|status|gc|seed-ln|sql|oracle|flag|heartbeat}   (WT=<folder>; requiere PM_TARGET=intel REMOTE=macdata)"; exit 2 ;;
 esac
