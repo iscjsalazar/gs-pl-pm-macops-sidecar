@@ -235,7 +235,7 @@ pm-test-clean: ; $(WT_ENV) ./pm.sh test-clean   # gate limpio POR SLOT (WT=<work
 pm-unit:     ; $(PM_ENV) ./pm.sh unit           # unit tests puros (*.UnitTests): sin Docker, sin red, sin data tier
 # One-shot (D1): aprovisiona el slot (wt-up ORACLE=1) y corre el gate en UN comando. No toca el guard de
 # pm-test-clean (que sigue exigiendo wt-up previo); pm-gate encadena ambos. wt-up es idempotente (reusa el slot).
-pm-gate: ; @[ -n "$(WT)" ] || { echo "pm-gate exige WT=<worktree>: aprovisiona-y-corre el gate en un paso" >&2; exit 2; }; $(MAKE) wt-up WT=$(WT) ORACLE=1 && $(MAKE) pm-test-clean WT=$(WT)
+pm-gate: ; @[ -n "$(WT)" ] || { echo "pm-gate exige WT=<worktree>: aprovisiona-y-corre el gate en un paso" >&2; exit 2; }; $(MAKE) wt-up WT=$(WT) ORACLE=1 && $(MAKE) pm-test-clean WT=$(WT) WARM=1
 pm-format:       ; $(PM_ENV) ./pm.sh format          # formatea .cs modificados vs develop (delega a scripts/format.sh in-repo)
 pm-format-check: ; $(PM_ENV) ./pm.sh format-check    # gate de formato changed-vs-develop (delega a scripts/format-check.sh)
 pm-gate-wait:    ; $(PM_ENV) ./pm.sh wait-gate    # espera el veredicto del gate leyendo el .rc canonico (LOG=<ruta.log> o el mas reciente)
