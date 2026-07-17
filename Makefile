@@ -297,7 +297,9 @@ wt-gc:      ; $(WT_ENV) ./wt.sh gc
 wt-seed-ln: override TARGET := intel
 wt-seed-ln: REMOTE := macdata
 wt-seed-ln: ; $(WT_ENV) ./wt.sh seed-ln
+wt-ls:      REMOTE := macdata
 wt-ls:      ; $(WT_ENV) ./wt.sh ls
+wt-info:    REMOTE := macdata
 wt-info:    ; $(WT_ENV) ./wt.sh info
 # Data-plane del slot: encapsulan credenciales/puente/contexto (nadie los re-descubre). Slot-mandatorios.
 wt-sql:      override TARGET := intel
