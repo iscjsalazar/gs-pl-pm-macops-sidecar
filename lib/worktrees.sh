@@ -743,6 +743,11 @@ wt_budget_lines() {
 
 cmd_wt_up() {
   wt_require_intel || return 1
+  # Higiene incondicional (I1): reclama arrendamientos MUERTOS (pid muerto por kill -0 + heartbeat > PM_WT_LEASE_TTL)
+  # en CADA wt-up, no solo con pool lleno (:759) o disco bajo (:690). Un zombi sangra RAM/volumen hasta el OOM del
+  # bus compartido aunque haya numeros de slot libres y disco sano; asi cualquier sesion que aprovisiona lo limpia.
+  # wt_lease_reclaimable protege a las duenas VIVAS (kill -0); el conteo va a stdout -> se descarta con >/dev/null.
+  wt_reclaim_dead_leases 0 >/dev/null || true
   # Gate de disco de la VM colima ANTES de asignar el slot (D44): solo mide disco de colima (no depende del slot),
   # asi un rechazo por umbral NO consume una fila de slots.tsv. Fail-open ante error de medicion (req5). Queda
   # FUERA del up-lock (no toca el slot); no confundir con el falla-cerrado de wt_check_port_free.
