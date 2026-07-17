@@ -530,13 +530,20 @@ wt_check_api_port_free() {
 # content-store (CreateDiff/rename ingest->blobs), fallo que la poda no cura de raiz. ctx/img llegan por args; el
 # resto son globals ya fijados por _cmd_wt_up_locked. wt_lock reclama el lock si el dueno muere (no deadlock).
 _wt_build_api_image() {  # uso: _wt_build_api_image <ctx> <img>
-  local ctx="$1" img="$2"
-  wt_log "build imagen $img (contexto $PM_REMOTE_SSH:$PM_REMOTE_SOLUTION_DIR; primera vez ~varios min; serializado por wt_lock build) ..."
-  on_intel "cd '$PM_REMOTE_SOLUTION_DIR' && docker $ctx build -t '$img' -f- ." < "$BASE_DIR/e2e/Dockerfile" \
-    || { wt_die "fallo el build de la imagen de la API del worktree"; return 1; }
-  # Retira las capas dangling que el rebuild del mismo tag deja huerfanas; bajo el mismo lock para no podar
-  # mientras otra sesion construye.
-  on_intel "docker $ctx image prune -f" || true
+  local ctx="$1" img="$2" attempt
+  # Corre bajo wt_lock build (global): el retry no compite con otro build. La corrupcion del store containerd
+  # (CreateDiff/apply diff/Lchown/commit rename ingest->blobs) suele ser transitoria -> 1 reintento la sortea
+  # (ledger I6/I8). Entre intentos SOLO poda dangling (segura, no toca contenedores/volumenes vivos); la poda
+  # agresiva es manual (make wt-prune-cache HARD=1).
+  for attempt in 1 2; do
+    wt_log "build imagen $img (intento $attempt/2; contexto $PM_REMOTE_SSH:$PM_REMOTE_SOLUTION_DIR; ~varios min) ..."
+    if on_intel "cd '$PM_REMOTE_SOLUTION_DIR' && docker $ctx build -t '$img' -f- ." < "$BASE_DIR/e2e/Dockerfile"; then
+      on_intel "docker $ctx image prune -f" || true
+      return 0
+    fi
+    [ "$attempt" = 1 ] && { wt_log "build fallo (posible flake transitorio del store containerd); poda dangling + reintento unico ..."; on_intel "docker $ctx image prune -f" >/dev/null 2>&1 || true; }
+  done
+  wt_die "fallo el build de la imagen de la API del worktree (2 intentos)"; return 1
 }
 
 # Construye la imagen de la API desde el CODIGO DEL WORKTREE y corre su contenedor unido al SQL compartido
@@ -1407,4 +1414,22 @@ EOF
   # internas ('; true', '|| true') asumen set -e SUPRIMIDO; llamarlo BARE abortaria el teardown a media via.
   if _wt_reclaim_slot "$slot" "$folder"; then return 0; fi
   return 1
+}
+
+# wt-prune-cache: poda SANCIONADA del store de la VM colima (reemplaza los comandos ad-hoc). Por default SEGURA:
+# contenedores Exited + imagenes dangling (no toca Up ni volumenes). HARD=1 anade 'image prune -a' (limpia capas
+# tagged no referenciadas -> util ante corrupcion del store, PERO fuerza rebuilds de imagenes de slots detenidos:
+# correr con ventana quieta). NUNCA 'volume prune' (borraria el Oracle de un slot detenido).
+cmd_wt_prune_cache() {
+  wt_require_intel || return 1
+  local ctx hard="${PM_WT_PRUNE_HARD:-0}"; ctx="$(remote_docker_ctx)"
+  wt_log "reclamable ANTES: $(wt_docker_reclaimable)"
+  # Exited: lista lo que se retiraria; los contenedores Up (slots vivos) estan protegidos por docker (prune solo Exited).
+  wt_log "podando contenedores Exited + imagenes dangling (Up y volumenes intactos) ..."
+  on_intel "docker $ctx container prune -f; docker $ctx image prune -f" || true
+  if [ "$hard" = "1" ]; then
+    wt_log "HARD=1: 'image prune -a' (imagenes no referenciadas por NINGUN contenedor; fuerza rebuilds de slots detenidos) ..."
+    on_intel "docker $ctx image prune -af" || true
+  fi
+  wt_log "reclamable DESPUES: $(wt_docker_reclaimable)"
 }
