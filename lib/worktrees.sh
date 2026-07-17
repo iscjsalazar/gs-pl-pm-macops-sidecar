@@ -678,6 +678,13 @@ wt_colima_ram_line() {
   on_intel "colima ssh -p '$prof' -- free -b" 2>/dev/null | awk '/^Mem:/{print $2, $NF; exit}' || true
 }
 
+# Estado/uptime del bus emulado compartido (singleton ${PM_WT_BUS_PROJECT}-servicebus-1; no se recrea por slot).
+# Vacio si no se pudo medir. Fail-open. Un slot "en frio" (wt-down/up) NO reinicia el bus: su uptime lo revela.
+wt_bus_status_line() {
+  [ -n "$PM_REMOTE_SSH" ] || return 0
+  on_intel "docker $(remote_docker_ctx) ps --filter 'name=${PM_WT_BUS_PROJECT}-servicebus-1' --format '{{.Status}}'" 2>/dev/null | tr -d '\r' || true
+}
+
 # docker system df del docker remoto: reclaimable por tipo en una linea (informativo, NO entra en la aritmetica
 # del umbral; el prune-hook de wt_up_api retira las capas dangling). Vacio si no se pudo medir. Fail-open.
 wt_docker_reclaimable() {
@@ -764,10 +771,11 @@ wt_mem_gate() {
 # Seccion "Presupuesto" de wt-info: topes reales del aprovisionamiento. Best-effort (cada metrica no medible
 # degrada a 'n/d'); las lecturas remotas van por on_intel. Imprime las lineas ya indentadas para el heredoc.
 wt_budget_lines() {
-  local dl rl recl gm total free pct ram_total ram_avail g_av g_pg g_w3 live min_bytes status
+  local dl rl recl gm total free pct ram_total ram_avail g_av g_pg g_w3 live min_bytes status bus
   dl="$(wt_colima_disk_line)"
   rl="$(wt_colima_ram_line)"
   recl="$(wt_docker_reclaimable)"
+  bus="$(wt_bus_status_line)"
   gm="$(wt_guest_mem_line)"
   total="$(printf '%s' "$dl" | awk '{print $1}')"
   free="$(printf '%s' "$dl" | awk '{print $2}')"
@@ -789,6 +797,7 @@ wt_budget_lines() {
     echo "    disco VM colima   n/d (sin REMOTE=macdata o colima sin responder)   umbral wt-up: ${PM_WT_MIN_DISK_GB} GB"
   fi
   echo "    docker reclamable ${recl:-n/d}"
+  echo "    bus compartido    ${bus:-n/d}  (singleton ${PM_WT_BUS_PROJECT}-servicebus-1; un slot en frio NO lo reinicia)"
   if wt_is_num "$ram_avail"; then
     echo "    RAM VM colima     $(wt_gb "$ram_avail") GB disponibles / $(wt_gb "$ram_total") GB"
   else
