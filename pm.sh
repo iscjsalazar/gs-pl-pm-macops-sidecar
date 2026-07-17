@@ -293,6 +293,28 @@ cmd_format_check() {
   ( cd "$PM_SOLUTION_DIR" && ./scripts/format-check.sh "$@" )
 }
 
+# Espera el veredicto del gate leyendo el ARCHIVO .rc canonico (running -> codigo), la UNICA lectura correcta:
+# nunca por '| tail', 'ps', ${PIPESTATUS[0]} (vacio en zsh) ni el status del background, que mienten en los huecos
+# entre suites o al capturar el rc de un pipe. Resuelve el .rc: LOG=<ruta.log> -> ${LOG%.log}.rc (misma transformacion
+# que cmd_test); por default, el test-*.rc mas reciente en artifacts/test-logs. Imprime EXIT=<codigo> y retorna ese
+# codigo (0 = gate verde). Corta con codigo 3 si tras PM_GATE_WAIT_MAX s el rc sigue 'running' (proceso SIGKILL sin trap).
+cmd_wait_gate() {
+  local logdir="$BASE_DIR/artifacts/test-logs" rcf v waited=0 max="${PM_GATE_WAIT_MAX:-5400}"
+  if [ -n "${LOG:-}" ]; then
+    rcf="${LOG%.log}.rc"
+  else
+    rcf="$(ls -t "$logdir"/test-*.rc 2>/dev/null | head -1)"
+  fi
+  [ -n "$rcf" ] && [ -e "$rcf" ] || { echo "[pm] wait-gate: no hay .rc en $logdir (corrio un gate?); o pasa LOG=<ruta.log>" >&2; return 2; }
+  echo "[pm] wait-gate: esperando veredicto en $rcf ..." >&2
+  until [ -s "$rcf" ] && v="$(cat "$rcf" 2>/dev/null)" && [ "$v" != running ]; do
+    [ "$waited" -ge "$max" ] && { echo "[pm] wait-gate: timeout ${max}s (rc sigue 'running'; proceso SIGKILL sin trap?)" >&2; return 3; }
+    sleep 2; waited=$((waited+2))
+  done
+  echo "[pm] wait-gate: EXIT=$v (rc -> $rcf)"
+  [ "$v" = 0 ]
+}
+
 case "$VERB" in
   # Warning (no bloquea) SOLO en el camino directo de pm-run/pm-watch: la via wt fija PM_PROJECT/PM_PORT_OFFSET
   # via wt_derive y entra por otros verbos (test-clean) o por wt.sh, nunca por 'run'.
@@ -310,6 +332,7 @@ case "$VERB" in
   test)       cmd_test "$@" ;;
   test-clean) cmd_test_clean "$@" ;;
   unit)       cmd_unit ;;
+  wait-gate)  cmd_wait_gate "$@" ;;
   format)       cmd_format "$@" ;;
   format-check) cmd_format_check "$@" ;;
   down)     cmd_down ;;
@@ -317,5 +340,5 @@ case "$VERB" in
   ps)       cmd_ps ;;
   logs)     cmd_logs ;;
   port)     cmd_port ;;
-  *) echo "uso: $0 {run [--watch]|migrate|seed|api|api-down|e2e-backend (DEPRECADO)|e2e-backend-down (DEPRECADO)|test|test-clean|unit|format|format-check|down|nuke|ps|logs|port}"; exit 2 ;;
+  *) echo "uso: $0 {run [--watch]|migrate|seed|api|api-down|e2e-backend (DEPRECADO)|e2e-backend-down (DEPRECADO)|test|test-clean|unit|wait-gate|format|format-check|down|nuke|ps|logs|port}"; exit 2 ;;
 esac

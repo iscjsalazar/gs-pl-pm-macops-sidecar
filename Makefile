@@ -238,6 +238,7 @@ pm-unit:     ; $(PM_ENV) ./pm.sh unit           # unit tests puros (*.UnitTests)
 pm-gate: ; @[ -n "$(WT)" ] || { echo "pm-gate exige WT=<worktree>: aprovisiona-y-corre el gate en un paso" >&2; exit 2; }; $(MAKE) wt-up WT=$(WT) ORACLE=1 && $(MAKE) pm-test-clean WT=$(WT)
 pm-format:       ; $(PM_ENV) ./pm.sh format          # formatea .cs modificados vs develop (delega a scripts/format.sh in-repo)
 pm-format-check: ; $(PM_ENV) ./pm.sh format-check    # gate de formato changed-vs-develop (delega a scripts/format-check.sh)
+pm-gate-wait:    ; $(PM_ENV) ./pm.sh wait-gate    # espera el veredicto del gate leyendo el .rc canonico (LOG=<ruta.log> o el mas reciente)
 pm-down:     ; $(PM_ENV) ./pm.sh down
 # Guard de confirmacion (patron in-recipe de pm-bootstrap-intel): sin NUKE=1 corta antes de invocar pm.sh.
 pm-nuke:     ; @[ "$(NUKE)" = "1" ] || { echo "pm-nuke borra los volumenes del stack (compartidos con el legado en vivo): confirma con make pm-nuke NUKE=1" >&2; exit 2; }; $(PM_ENV) ./pm.sh nuke
