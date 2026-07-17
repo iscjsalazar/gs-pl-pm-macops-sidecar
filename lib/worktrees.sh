@@ -209,6 +209,10 @@ wt_shared_sql_check() {
     || { wt_die "la red del SQL compartido '$PM_SHARED_SQL_NETWORK' no existe en $PM_REMOTE_SSH (nvoslabs apagado?)"; return 1; }
   on_intel "[ \"\$(docker $ctx inspect -f '{{.State.Running}}' '$PM_SHARED_SQL_CONTAINER' 2>/dev/null)\" = true ]" \
     || { wt_die "el contenedor del SQL compartido '$PM_SHARED_SQL_CONTAINER' no esta corriendo en $PM_REMOTE_SSH"; return 1; }
+  # Asegura que el singleton compartido reinicie solo tras un restart de la VM/daemon (sin esto quedaba en
+  # restart=no y no volvia, bloqueando TODO pm-test-clean/pm-gate de la maquina). Idempotente y no destructivo
+  # (docker update --restart cambia metadata, NO reinicia). Best-effort: no bloquea el check si falla.
+  on_intel "docker $ctx update --restart=unless-stopped '$PM_SHARED_SQL_CONTAINER' >/dev/null 2>&1" || true
   wt_log "SQL compartido OK: red '$PM_SHARED_SQL_NETWORK', contenedor '$PM_SHARED_SQL_CONTAINER' (alias $PM_SHARED_SQL_HOST:$PM_SHARED_SQL_PORT)"
 }
 
