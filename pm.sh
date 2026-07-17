@@ -118,6 +118,12 @@ cmd_test() {           # asegura la API real arriba (M1) y corre dotnet test con
   local target="${PM_TEST_PROJECT:-PL.PM.sln}"   # default: toda la suite
   echo "[pm] test: $target (filtro: ${PM_TEST_FILTER:-<todos>}) -> api $base"
   local args=(test "$PM_SOLUTION_DIR/$target")
+  # Guard warn-only (I6): un FILTER sin operador vstest (~ = ! ( & |) casa 0 pruebas y sale EXIT=0 -> falso verde
+  # de "0 tests corridos". No bloquea (podria haber un caso legitimo); solo avisa para no leerlo como evidencia.
+  case "${PM_TEST_FILTER:-}" in
+    ''|*'~'*|*'='*|*'!'*|*'('*|*'&'*|*'|'*) : ;;
+    *) echo "[pm] AVISO: FILTER='$PM_TEST_FILTER' sin operador vstest: puede casar 0 pruebas y dar verde vacuo. Usa FullyQualifiedName~$PM_TEST_FILTER (o Name~...). La corrida de EVIDENCIA de cierre va SIN FILTER." >&2 ;;
+  esac
   [ -n "${PM_TEST_FILTER:-}" ] && args+=(--filter "$PM_TEST_FILTER")
   local sbcs=""; [ "$PM_PROFILE" = "full" ] && sbcs="$(pm_servicebus_connstr)"
   # Con perfil full viaja tambien la connstring Oracle del data tier: habilita la prueba de
@@ -255,6 +261,12 @@ cmd_unit() {           # unit tests puros (*.UnitTests): 100% locales en esta ma
     echo "[pm] unit: ningun *.UnitTests.csproj ni *.ArchitectureTests.csproj bajo $PM_SOLUTION_DIR/tests; la raiz resuelta no parece la solucion pl-programa-maestro (revisa WT=<worktree> / PM_SOLUTION_DIR)" >&2
     return 2
   fi
+  # Guard warn-only (I6): un FILTER sin operador vstest (~ = ! ( & |) casa 0 pruebas y sale EXIT=0 -> falso verde
+  # de "0 tests corridos". No bloquea (podria haber un caso legitimo); solo avisa para no leerlo como evidencia.
+  case "${PM_TEST_FILTER:-}" in
+    ''|*'~'*|*'='*|*'!'*|*'('*|*'&'*|*'|'*) : ;;
+    *) echo "[pm] AVISO: FILTER='$PM_TEST_FILTER' sin operador vstest: puede casar 0 pruebas y dar verde vacuo. Usa FullyQualifiedName~$PM_TEST_FILTER (o Name~...). La corrida de EVIDENCIA de cierre va SIN FILTER." >&2 ;;
+  esac
   local args=(); [ -n "${PM_TEST_FILTER:-}" ] && args+=(--filter "$PM_TEST_FILTER")
   echo "[pm] unit: ${#projects[@]} proyectos *.UnitTests + *.ArchitectureTests bajo $PM_SOLUTION_DIR/tests (filtro: ${PM_TEST_FILTER:-<todos>})"
   # Corre TODOS los proyectos aunque alguno falle (reporte completo); exit !=0 si CUALQUIERA fallo.
