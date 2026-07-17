@@ -1317,7 +1317,15 @@ cmd_wt_oracle() {
   _wt_bind_slot || return $?
   wt_oracle_running || { wt_die "el Oracle del slot '$WT_ORACLE_CONTAINER' no esta corriendo: aprovisiona con 'make wt-up WT=$WT_BOUND_FOLDER ORACLE=1'"; return 1; }
   local ctx; ctx="$(remote_docker_ctx)"
-  printf 'set head off feed off pages 0 lines 32767 trimspool on;\n%s\n' "$PM_WT_SQL" \
+  # I7: sqlplus DESCARTA un statement sin terminador al llegar a EOF -> salida vacia + exit 0, indistinguible de
+  # "tabla vacia" (falso negativo). Auto-anexa ';' si el ultimo caracter no-blanco no es ';' ni '/'. No cubre
+  # multi-statement (';' intermedio da ORA-00911; gotcha aparte documentado) ni el escape '$'->'$$' de Make.
+  local sql_norm="$PM_WT_SQL"
+  case "$(printf '%s' "$sql_norm" | tr -d '[:space:]' | tail -c1)" in
+    ''|';'|'/') : ;;
+    *) sql_norm="${sql_norm};" ;;
+  esac
+  printf 'set head off feed off pages 0 lines 32767 trimspool on;\n%s\n' "$sql_norm" \
     | on_intel "docker $ctx exec -i -e ORACLE_HOME='$PM_WT_ORACLE_HOME' '$WT_ORACLE_CONTAINER' bash -c 'export PATH=\$ORACLE_HOME/bin:\$PATH; exec sqlplus -S $PM_WT_ORACLE_USER/$PM_WT_ORACLE_PASS@localhost:1521/XE'"
 }
 
