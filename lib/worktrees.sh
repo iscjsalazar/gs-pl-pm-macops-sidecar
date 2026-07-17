@@ -702,6 +702,38 @@ wt_disk_gate() {
   wt_log "disco de la VM colima OK: $(wt_gb "$free") GB libres >= umbral $PM_WT_MIN_DISK_GB GB"
 }
 
+# Gate de RAM de wt-up: rechaza aprovisionar si la RAM disponible de la VM colima esta por debajo de
+# PM_WT_MIN_MEM_GB, ANTES de gastar rsync/build. Espejo de wt_disk_gate. Motivo: con la RAM saturada por varios
+# slots, el store del bus compartido (pm-shared-sbsqledge-1) hace OOM (Error 701) y tumba pruebas de OTRAS
+# sesiones. Fail-open: si la medicion FALLA (colima sin responder, parse vacio) avisa y continua; SOLO aborta con
+# una medicion exitosa por debajo del umbral. Reclama arrendamientos muertos antes de rechazar (usualmente no-op
+# porque cmd_wt_up ya reclamo al tope por I1; se conserva por robustez si ese orden cambia).
+wt_mem_gate() {
+  local avail min_bytes
+  avail="$(wt_colima_ram_line | awk '{print $2}')"
+  if ! wt_is_num "$avail"; then
+    wt_log "aviso: no se pudo medir la RAM de la VM colima (colima sin responder o parse vacio); se continua sin gate de RAM"
+    return 0
+  fi
+  min_bytes=$(( PM_WT_MIN_MEM_GB * 1073741824 ))
+  if [ "$avail" -lt "$min_bytes" ]; then
+    local reclaimed
+    wt_log "RAM disponible bajo umbral ($(wt_gb "$avail") GB < $PM_WT_MIN_MEM_GB GB): reclamando arrendamientos muertos antes de rechazar ..."
+    reclaimed="$(wt_reclaim_dead_leases 0)"
+    if [ "${reclaimed:-0}" -gt 0 ]; then
+      avail="$(wt_colima_ram_line | awk '{print $2}')"
+      if wt_is_num "$avail" && [ "$avail" -ge "$min_bytes" ]; then
+        wt_log "RAM recuperada tras reclamar $reclaimed slot(s): $(wt_gb "$avail") GB disponibles >= umbral $PM_WT_MIN_MEM_GB GB"
+        return 0
+      fi
+    fi
+    wt_log "ERROR: RAM disponible de la VM colima por debajo del umbral: $(wt_gb "$avail") GB < $PM_WT_MIN_MEM_GB GB (PM_WT_MIN_MEM_GB)."
+    wt_log "       El store del bus compartido puede OOMear (Error 701). Baja worktrees (make wt-down) o espera a que liberen; sube PM_WT_MIN_MEM_GB para forzar."
+    return 1
+  fi
+  wt_log "RAM de la VM colima OK: $(wt_gb "$avail") GB disponibles >= umbral $PM_WT_MIN_MEM_GB GB"
+}
+
 # Seccion "Presupuesto" de wt-info: topes reales del aprovisionamiento. Best-effort (cada metrica no medible
 # degrada a 'n/d'); las lecturas remotas van por on_intel. Imprime las lineas ya indentadas para el heredoc.
 wt_budget_lines() {
@@ -752,6 +784,7 @@ cmd_wt_up() {
   # asi un rechazo por umbral NO consume una fila de slots.tsv. Fail-open ante error de medicion (req5). Queda
   # FUERA del up-lock (no toca el slot); no confundir con el falla-cerrado de wt_check_port_free.
   wt_disk_gate || return 1
+  wt_mem_gate || return 1
   local folder slot reclaimed
   folder="$(wt_resolve_folder)" || return 1
   # La asignacion de slot se serializa por el registro (aparte del up-lock): folders distintos no compiten.
