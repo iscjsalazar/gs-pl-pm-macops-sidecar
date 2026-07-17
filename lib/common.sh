@@ -126,6 +126,7 @@ load_env() {
   PM_WT_SLOTS_MAX="${PM_WT_SLOTS_MAX:-8}"               # reserva documentada 18100-18107 (cota de gc, no de asignacion)
   # Umbral de disco libre de la VM colima (GB) bajo el cual wt-up rechaza aprovisionar (el tope real, no el host).
   PM_WT_MIN_DISK_GB="${PM_WT_MIN_DISK_GB:-6}"           # ~4 slots E2E de margen (~1.3-1.4 GB por volumen Oracle)
+  PM_WT_MIN_MEM_GB="${PM_WT_MIN_MEM_GB:-3}"             # RAM libre minima de la VM colima para aprovisionar (evita OOM del store del bus compartido); umbral inicial, re-calibrar (R1/D1)
   # Oracle ControlPiso por slot (fase 2, lazy): solo se aprovisiona con PM_WT_ORACLE=1 (la via e2e-up lo enciende).
   PM_WT_ORACLE="${PM_WT_ORACLE:-0}"                     # 1 = aprovisiona pm-wt<N>-oracle-1 y cablea la API a el
   # Base dedicada del puerto host del Oracle per-slot. NO se usa 1521+offset (ver compute_ports).
