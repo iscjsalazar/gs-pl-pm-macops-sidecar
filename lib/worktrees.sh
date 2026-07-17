@@ -441,6 +441,17 @@ wt_oracle_ready() {
              0) wt_log "aviso: el Oracle del slot no trae las rutas de menu de work-centers/manufacturing-lines (seed 9003 ausente en el arbol de la solucion)" ;;
              *) wt_log "menu: $menu ruta(s) de work-centers/manufacturing-lines presentes (seed 9003)" ;;
            esac
+           # I9: objetos INVALID (p. ej. builtin UTL_SMTP/UTL_HTTP ausente -> SENDMAIL/MPSRT no compilan).
+           # Informativo, NO bloquea (como el aviso de menu): surface el schema Oracle roto AL APROVISIONAR, no
+           # horas despues corriendo un golden. Diagnostico: select object_name,object_type from user_objects
+           # where status='INVALID'.
+           local invalid
+           invalid="$(wt_oracle_scalar "select count(*) from user_objects where status='INVALID';")"
+           case "$invalid" in
+             ''|*[!0-9]*) : ;;
+             0) : ;;
+             *) wt_log "AVISO: el Oracle del slot tiene $invalid objeto(s) INVALID (p. ej. builtin UTL_* ausente); un package roto puede fallar horas despues. Diagnostico: select object_name,object_type from user_objects where status='INVALID'." ;;
+           esac
            return 0
          fi ;;
     esac
