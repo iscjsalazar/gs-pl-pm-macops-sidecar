@@ -79,7 +79,7 @@ wt_lock() {
       rmdir "$lock" 2>/dev/null || true
       continue
     fi
-    i=$((i+1)); [ "$i" -gt 180 ] && { wt_die "timeout esperando el lock '$name' (lo tiene el pid ${opid:-?})"; return 1; }
+    i=$((i+1)); [ "$i" -gt "${WT_LOCK_WAIT_MAX:-180}" ] && { wt_die "timeout esperando el lock '$name' (lo tiene el pid ${opid:-?})"; return 1; }
     sleep 1
   done
   mkdir "$lock/pid.$$" 2>/dev/null || true
@@ -510,6 +510,20 @@ wt_check_api_port_free() {
   wt_check_port_free "$PM_API_PORT" "pm-wt${WT_SLOT}-api" "API" || return 1
 }
 
+# Build de la imagen API + poda de capas dangling, aislado en un helper para poder serializarlo con 'wt_lock build'
+# (lock GLOBAL entre slots): dos 'docker build' concurrentes sobre el mismo daemon containerd corrompen el
+# content-store (CreateDiff/rename ingest->blobs), fallo que la poda no cura de raiz. ctx/img llegan por args; el
+# resto son globals ya fijados por _cmd_wt_up_locked. wt_lock reclama el lock si el dueno muere (no deadlock).
+_wt_build_api_image() {  # uso: _wt_build_api_image <ctx> <img>
+  local ctx="$1" img="$2"
+  wt_log "build imagen $img (contexto $PM_REMOTE_SSH:$PM_REMOTE_SOLUTION_DIR; primera vez ~varios min; serializado por wt_lock build) ..."
+  on_intel "cd '$PM_REMOTE_SOLUTION_DIR' && docker $ctx build -t '$img' -f- ." < "$BASE_DIR/e2e/Dockerfile" \
+    || { wt_die "fallo el build de la imagen de la API del worktree"; return 1; }
+  # Retira las capas dangling que el rebuild del mismo tag deja huerfanas; bajo el mismo lock para no podar
+  # mientras otra sesion construye.
+  on_intel "docker $ctx image prune -f" || true
+}
+
 # Construye la imagen de la API desde el CODIGO DEL WORKTREE y corre su contenedor unido al SQL compartido
 # y al bus. Connstrings por entorno; aislamiento del bus por prefijo de instancia wt<N>.
 wt_up_api() {  # uso: wt_up_api <password>
@@ -518,11 +532,9 @@ wt_up_api() {  # uso: wt_up_api <password>
   local hl="http://127.0.0.1:$PM_API_PORT/health/live"
   # build desde el contexto del worktree (rsync de la solucion del worktree a su dir remoto).
   sync_solution_to_intel
-  wt_log "build imagen $img (contexto $PM_REMOTE_SSH:$PM_REMOTE_SOLUTION_DIR; primera vez ~varios min) ..."
-  on_intel "cd '$PM_REMOTE_SOLUTION_DIR' && docker $ctx build -t '$img' -f- ." < "$BASE_DIR/e2e/Dockerfile" \
-    || { wt_die "fallo el build de la imagen de la API del worktree"; return 1; }
-  # Retira las capas dangling que el rebuild del mismo tag deja huerfanas; evita que el disco del VM se sature.
-  on_intel "docker $ctx image prune -f" || true
+  # Serializa el build entre TODOS los slots/sesiones (raiz de la corrupcion de containerd). WT_LOCK_WAIT_MAX=1800:
+  # un build cold toma varios min, la espera detras de otro build debe superar el default 180 s de wt_lock.
+  WT_LOCK_WAIT_MAX=1800 wt_lock build _wt_build_api_image "$ctx" "$img" || return 1
   # connstrings vistas desde el contenedor: SQL por alias de la red compartida; bus por alias del singleton.
   local cs ln sbcs
   cs="Server=$PM_SHARED_SQL_HOST,$PM_SHARED_SQL_PORT;Database=$PM_PLANNING_DB;User Id=sa;Password=$pw;TrustServerCertificate=True"
