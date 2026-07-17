@@ -37,5 +37,6 @@ case "$VERB" in
   flag)      cmd_wt_flag ;;
   heartbeat) cmd_wt_heartbeat ;;
   reclaim)   cmd_wt_reclaim ;;
-  *) echo "uso: $0 {up|down|ls|info|status|gc|seed-ln|sql|oracle|flag|heartbeat|reclaim}   (WT=<folder>; requiere PM_TARGET=intel REMOTE=macdata)"; exit 2 ;;
+  prune-cache) cmd_wt_prune_cache ;;
+  *) echo "uso: $0 {up|down|ls|info|status|gc|seed-ln|sql|oracle|flag|heartbeat|reclaim|prune-cache}   (WT=<folder>; requiere PM_TARGET=intel REMOTE=macdata)"; exit 2 ;;
 esac

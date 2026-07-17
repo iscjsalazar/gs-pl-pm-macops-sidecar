@@ -200,6 +200,7 @@ KEY         ?=
 STATE       ?=
 PLANT       ?= RES
 WARM        ?= 0
+HARD        ?= 0
 # SQL se EXPORTA (no se interpola entre comillas simples en WT_ENV): un SQL con comillas simples
 # ('WHERE Plant=''RES''') rompe el quoting de make/shell si se interpola; exportado llega intacto al recipe,
 # que lo asigna a PM_WT_SQL con comillas dobles. wt-sql/wt-oracle lo consumen.
@@ -207,13 +208,13 @@ export SQL
 
 WT_ENV = $(PM_ENV) WT=$(WT) PM_WT_SLOTS=$(SLOTS) PM_WT_ORACLE=$(ORACLE) PM_WT_GC_FORCE=$(FORCE) \
          PM_WT_SEED_FORCE=$(FORCE) PM_WT_SOLUTION_DIR='$(SOLUTION)' \
-         PM_WT_SQL_SCALAR=$(SCALAR) PM_WT_WARM=$(WARM) \
+         PM_WT_SQL_SCALAR=$(SCALAR) PM_WT_WARM=$(WARM) PM_WT_PRUNE_HARD=$(HARD) \
          PM_WT_FLAG_KEY='$(KEY)' PM_WT_FLAG_STATE=$(STATE) PM_WT_FLAG_PLANT=$(PLANT) \
          PM_SHARED_SQL_NETWORK=$(SHAREDSQL_NET) PM_SHARED_SQL_HOST=$(SHAREDSQL_HOST) \
          PM_SHARED_SQL_PORT=$(SHAREDSQL_PORT) PM_SHARED_SQL_PASSWORD='$(SHAREDSQL_PASSWORD)'
 
 .PHONY: pm-run pm-watch pm-migrate pm-seed pm-api pm-api-down pm-test pm-test-clean pm-gate pm-unit pm-format pm-format-check pm-down pm-nuke pm-ps pm-logs pm-port pm-bootstrap-intel \
-        wt-up wt-down wt-ls wt-info wt-status wt-gc wt-seed-ln wt-sql wt-oracle wt-flag wt-heartbeat wt-reclaim \
+        wt-up wt-down wt-ls wt-info wt-status wt-gc wt-prune-cache wt-seed-ln wt-sql wt-oracle wt-flag wt-heartbeat wt-reclaim \
         e2e-backend e2e-backend-down e2e-net-check e2e-up e2e-smoke e2e-url e2e-down e2e-oracle-counts \
         legacy-launch legacy-data-up legacy-vm-up legacy-build legacy-deploy legacy-diag legacy-diag-logs \
         legacy-tunnel legacy-status legacy-url legacy-down legacy-site-down legacy-sites-status \
@@ -294,6 +295,9 @@ wt-status:  ; $(WT_ENV) ./wt.sh status
 wt-gc:      override TARGET := intel
 wt-gc:      REMOTE := macdata
 wt-gc:      ; $(WT_ENV) ./wt.sh gc
+wt-prune-cache: override TARGET := intel
+wt-prune-cache: REMOTE := macdata
+wt-prune-cache: ; $(WT_ENV) ./wt.sh prune-cache   # poda SEGURA (Exited+dangling); HARD=1 anade image prune -a (ventana quieta)
 wt-seed-ln: override TARGET := intel
 wt-seed-ln: REMOTE := macdata
 wt-seed-ln: ; $(WT_ENV) ./wt.sh seed-ln
