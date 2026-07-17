@@ -13,6 +13,9 @@ set +e   # common.sh fija 'set -e'; el smoke NO debe abortar a mitad: reporta PA
 load_env
 
 MD="${PM_REMOTE_SSH:-macdata}"          # alias SSH de la Intel
+# 'macdata' es alias SSH (no resuelve por DNS/mDNS); ssh -G da el hostname real (.local, SI resoluble). Se usa
+# para los checks host-based del M1 (dscacheutil/nc/curl); $MD (alias) se conserva para ssh. Fallback al .local.
+MDLAN="$(ssh -G "$MD" 2>/dev/null | awk '/^hostname /{print $2; exit}')"; MDLAN="${MDLAN:-macbook-pro-de-diana.local}"
 GWIN="$PM_GUEST_WINHOST"                # IP NAT del guest Windows
 GKEY="$PM_GUEST_KEY"                    # llave SSH al guest (residente en macdata)
 GW="$PM_GUEST_GATEWAY"                  # macdata vista desde el guest (pasarela NAT)
@@ -55,7 +58,7 @@ echo "   Intel(macdata)=$MD  guest=$GWIN  gateway(guest->macdata)=$GW  api:$APIP
 
 echo "-- M1 -> Intel / data tier / API --"
 ok "M1 alcanza la Intel por SSH ($MD)"                 "ssh -o ConnectTimeout=8 $MD true"
-ok "'macdata' resuelve a IP en el M1 (/etc/hosts)"     "dscacheutil -q host -a name $MD | grep -q ip_address"
+ok "'$MDLAN' resuelve a IP en el M1 (mDNS/.local)"     "dscacheutil -q host -a name $MDLAN | grep -q _address"
 if [ -n "${WT:-}" ]; then
   # Via slot (WT=<folder>): el data tier NO publica 1433/1521/5672+offset en el host de macdata. El SQL se
   # alcanza por el puente 60211, el Oracle del slot por 15210+N y el bus por 15672; estos checks M1-directos por
@@ -63,16 +66,16 @@ if [ -n "${WT:-}" ]; then
   ok "WT=$WT resuelve a un slot registrado (si falla: corre 'make wt-up WT=$WT' antes)"  "[ \"$WT_SLOT_OK\" = 1 ]"
   skip "M1 -> data tier SQL/Oracle/bus por offset (via slot WT=$WT: SQL por puente 60211, Oracle 15210+N, bus 15672)"
 else
-  ok "M1 -> data tier SQL ($MD:$SQLP)"                   "nc -z -G 6 $MD $SQLP"
+  ok "M1 -> data tier SQL ($MDLAN:$SQLP)"                   "nc -z -G 6 $MDLAN $SQLP"
   if [ "$PM_PROFILE" = "full" ]; then
-    ok "M1 -> data tier Oracle ($MD:$ORAP)"              "nc -z -G 6 $MD $ORAP"
-    ok "M1 -> data tier bus/AMQP ($MD:$BUSP)"            "nc -z -G 6 $MD $BUSP"
+    ok "M1 -> data tier Oracle ($MDLAN:$ORAP)"              "nc -z -G 6 $MDLAN $ORAP"
+    ok "M1 -> data tier bus/AMQP ($MDLAN:$BUSP)"            "nc -z -G 6 $MDLAN $BUSP"
   else
     skip "data tier Oracle/bus (perfil != full)"
   fi
 fi
 ok "API .NET 10 viva en la Intel (local 127.0.0.1)"    "ssh -o ConnectTimeout=8 $MD \"curl -fsS -o /dev/null --max-time 8 http://127.0.0.1:$APIP/health/live\""
-ok "M1 -> API en la LAN ($MD:$APIP/health/live)"        "curl -fsS -o /dev/null --max-time 8 http://$MD:$APIP/health/live"
+ok "M1 -> API en la LAN ($MDLAN:$APIP/health/live)"        "curl -fsS -o /dev/null --max-time 8 http://$MDLAN:$APIP/health/live"
 
 echo "-- guest (VM legado) -> backend / data tier --"
 if [ "${PM_E2E_CHECK_GUEST:-1}" != "1" ]; then
