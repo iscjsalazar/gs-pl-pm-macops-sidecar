@@ -281,7 +281,7 @@ wt_ensure_ln_singleton() {  # uso: wt_ensure_ln_singleton <password>
   fi
   have="${have:-0}"
   if [ "$have" = "$need" ]; then
-    wt_log "referencia LN '$PM_WT_LN_DB' completa ($have/$need tablas): se reusa (no re-seed)"
+    wt_log "referencia LN '$PM_WT_LN_DB' completa ($have/$need tablas): se reusa por PRESENCIA de tablas (no por filas): un seed LN NUEVO que agrega filas a tablas existentes NO se aplica aqui -> corre 'make wt-seed-ln FORCE=1' con el pool quieto y verifica por SELECT COUNT"
     return 0
   fi
   wt_log "referencia LN '$PM_WT_LN_DB' ausente/incompleta ($have/$need): sembrando una vez (grupo ln) ..."
