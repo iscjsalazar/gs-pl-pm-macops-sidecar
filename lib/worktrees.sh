@@ -1433,3 +1433,36 @@ cmd_wt_prune_cache() {
   fi
   wt_log "reclamable DESPUES: $(wt_docker_reclaimable)"
 }
+
+# vm-restart-coordinated: reinicia la VM colima (re-inicializa containerd; unica cura de fondo de la corrupcion
+# persistente del store). DESTRUCTIVO: mata TODOS los slots/gates vivos. Por eso: (1) rehusa si hay slots VIVOS
+# (owner con kill -0 o heartbeat fresco) salvo ACK_LIVE=1; (2) exige CONFIRM=RESTART para ejecutar; sin el, imprime
+# el runbook y sale. NO emite el BROADCAST del wrapper (frontera): lo lista como paso manual. Tras el reinicio, el
+# shared SQL y el bus vuelven por su restart policy (unless-stopped, ver I4); los slots se re-aprovisionan con wt-up.
+cmd_vm_restart_coordinated() {
+  wt_require_intel || return 1
+  local ctx total dead live confirm="${PM_VM_RESTART_CONFIRM:-}" ack="${PM_VM_RESTART_ACK_LIVE:-0}"; ctx="$(remote_docker_ctx)"
+  total="$(wt_live_slots)"; dead="$(wt_reclaim_dead_leases 1 2>/dev/null | tail -1)"; dead="${dead:-0}"
+  case "$dead" in ''|*[!0-9]*) dead=0 ;; esac
+  live=$(( total - dead )); [ "$live" -lt 0 ] && live=0
+  if [ "$live" -gt 0 ] && [ "$ack" != "1" ]; then
+    wt_log "ABORTA: hay $live slot(s) con dueno VIVO en el registro; este reinicio MATARIA sus gates en vuelo."
+    wt_log "Coordina PRIMERO (avisa a esas sesiones / espera ventana quieta). Re-invoca con ACK_LIVE=1 cuando sea seguro."
+    return 3
+  fi
+  echo "== vm-restart-coordinated (runbook) =="
+  echo "  Reinicia la VM colima '$(wt_colima_profile)' -> re-inicializa containerd (cura la corrupcion persistente del store)."
+  echo "  DESTRUCTIVO: detiene TODOS los contenedores (slots API/Oracle, bus, shared SQL). Al volver:"
+  echo "   - shared SQL y bus regresan por restart policy (unless-stopped, I4); los slots se re-aprovisionan con 'make wt-up WT=<folder> [ORACLE=1]'."
+  echo "  Coordinacion (manual, frontera): emite un aviso a las otras sesiones (p. ej. .locks/orq/BROADCAST-*.md en el wrapper) ANTES de ejecutar."
+  echo "  Comando de reinicio: colima restart -p $(wt_colima_profile)   (en $PM_REMOTE_SSH)"
+  if [ "$confirm" != "RESTART" ]; then
+    wt_log "DRY-RUN: no se reinicia. Para EJECUTAR (tras coordinar): make vm-restart-coordinated CONFIRM=RESTART [ACK_LIVE=1]"
+    return 2
+  fi
+  wt_log "CONFIRM=RESTART: reiniciando la VM colima '$(wt_colima_profile)' en $PM_REMOTE_SSH ..."
+  on_intel "colima restart -p $(wt_colima_profile)" || { wt_die "el reinicio de la VM colima fallo"; return 1; }
+  wt_log "reinicio hecho; re-aplicando restart policy del shared SQL (belt-and-suspenders con I4) ..."
+  on_intel "docker $ctx update --restart=unless-stopped '$PM_SHARED_SQL_CONTAINER' >/dev/null 2>&1" || true
+  wt_log "VM reiniciada. Re-aprovisiona los slots con 'make wt-up WT=<folder> [ORACLE=1]'."
+}
