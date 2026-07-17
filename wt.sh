@@ -38,5 +38,6 @@ case "$VERB" in
   heartbeat) cmd_wt_heartbeat ;;
   reclaim)   cmd_wt_reclaim ;;
   prune-cache) cmd_wt_prune_cache ;;
-  *) echo "uso: $0 {up|down|ls|info|status|gc|seed-ln|sql|oracle|flag|heartbeat|reclaim|prune-cache}   (WT=<folder>; requiere PM_TARGET=intel REMOTE=macdata)"; exit 2 ;;
+  vm-restart-coordinated) cmd_vm_restart_coordinated ;;
+  *) echo "uso: $0 {up|down|ls|info|status|gc|seed-ln|sql|oracle|flag|heartbeat|reclaim|prune-cache|vm-restart-coordinated}   (WT=<folder>; requiere PM_TARGET=intel REMOTE=macdata)"; exit 2 ;;
 esac
