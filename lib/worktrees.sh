@@ -755,7 +755,8 @@ cmd_wt_up() {
     # Pool lleno: en vez de abortar, recupera arrendamientos muertos (pid muerto + heartbeat > PM_WT_LEASE_TTL) y
     # reintenta. Un pool lleno de slots abandonados se auto-recupera; los slots de duenas vivas no se tocan.
     wt_log "sin slots libres: reclamando arrendamientos muertos (pid muerto + heartbeat > ${PM_WT_LEASE_TTL}s) ..."
-    reclaimed="$(wt_reclaim_dead_leases 0)"
+    # max=1: basta liberar UN slot (el mas viejo muerto, por oldest-first) para reintentar la asignacion.
+    reclaimed="$(wt_reclaim_dead_leases 0 1)"
     if [ "${reclaimed:-0}" -gt 0 ]; then
       wt_log "reclamados $reclaimed slot(s); reintentando la asignacion"
       slot="$(wt_registry_lock wt_slot_assign "$folder")" || slot=""
@@ -999,13 +1000,18 @@ _wt_reclaim_slot() {  # uso: _wt_reclaim_slot <slot> <folder>
   wt_log "slot $slot reclamado (recursos retirados, fila liberada)"
 }
 
-# Reclama TODOS los arrendamientos muertos del registro (pid muerto + heartbeat/created > PM_WT_LEASE_TTL). Con
-# dry=1 solo los lista; con dry=0 los reclama (teardown + release via _wt_reclaim_slot). Imprime cuantos reclamo
-# (o cuantos son reclamables, en dry). Toma un snapshot bajo lock y NO sostiene el lock durante el teardown remoto.
-wt_reclaim_dead_leases() {  # uso: wt_reclaim_dead_leases <dry: 1|0>
-  local dry="${1:-1}" snap f s pr off cr pid hb n=0
+# Reclama arrendamientos muertos del registro (pid muerto + heartbeat/created > PM_WT_LEASE_TTL), del mas viejo al
+# mas nuevo por 'created' (col 5). Con dry=1 solo los lista; con dry=0 los reclama (teardown + release via
+# _wt_reclaim_slot). Con 'max' > 0 detiene el barrido tras reclamar 'max' slots (early-stop, para liberar solo lo
+# necesario); sin max (o max<=0) reclama todas. Imprime cuantos reclamo (o cuantos son reclamables, en dry). Toma
+# un snapshot bajo lock y NO sostiene el lock durante el teardown remoto.
+wt_reclaim_dead_leases() {  # uso: wt_reclaim_dead_leases <dry: 1|0> [max]
+  local dry="${1:-1}" max="${2:-0}" snap f s pr off cr pid hb n=0
   [ -f "$PM_WT_REGISTRY" ] || { printf '0'; return 0; }
   snap="$(wt_registry_lock cat "$PM_WT_REGISTRY")" || { wt_log "reclaim: registro no legible; no se reclama"; printf '0'; return 0; }
+  # Ordena el snapshot por 'created' (col 5, TAB) ascendente: la reclamacion procede del arrendamiento muerto mas
+  # viejo al mas nuevo. Solo reordena las filas; el filtro por wt_lease_reclaimable no cambia.
+  snap="$(printf '%s' "$snap" | sort -t"$(printf '\t')" -k5,5)"
   while IFS=$'\t' read -r f s pr off cr pid hb; do
     [ -n "$f" ] || continue
     wt_lease_reclaimable "$pid" "$hb" "$cr" || continue
@@ -1013,7 +1019,13 @@ wt_reclaim_dead_leases() {  # uso: wt_reclaim_dead_leases <dry: 1|0>
       wt_log "arrendamiento reclamable: slot $s ('$f'; pid ${pid:-<ninguno>}, heartbeat ${hb:-<created:$cr>})"
       n=$((n+1))
     else
-      if _wt_reclaim_slot "$s" "$f"; then n=$((n+1)); else wt_log "reclaim del slot $s ('$f') fallo; se conserva"; fi
+      if _wt_reclaim_slot "$s" "$f"; then
+        n=$((n+1))
+        # Early-stop: con max > 0, detiene tras reclamar 'max' slots (cmd_wt_up solo necesita liberar uno).
+        if [ "$max" -gt 0 ] && [ "$n" -ge "$max" ]; then break; fi
+      else
+        wt_log "reclaim del slot $s ('$f') fallo; se conserva"
+      fi
     fi
   done <<EOF
 $snap
@@ -1289,4 +1301,28 @@ cmd_wt_heartbeat() {
   [ -n "$slot" ] || { wt_die "el worktree '$folder' no tiene slot asignado"; return 2; }
   wt_registry_lock wt_slot_touch "$folder"
   wt_log "arrendamiento del slot $slot ('$folder') refrescado (pid $$, heartbeat $(date -u +%Y-%m-%dT%H:%M:%SZ))"
+}
+
+# wt-reclaim: reclama UN arrendamiento reclamable especifico (el worktree WT, cuyo dueno murio + heartbeat vencido).
+# Respeta "nunca robar a una duena viva": gatea con wt_lease_reclaimable ANTES de tumbar recursos; un pid vivo o un
+# heartbeat fresco => rechaza (return 3). Reusa _wt_reclaim_slot (teardown por nombre + release de la fila) y
+# propaga su rc. Sin slot asignado => return 2. Requiere intel (el teardown usa docker/ssh a macdata).
+cmd_wt_reclaim() {
+  wt_require_intel || return 1
+  local folder slot row cr pid hb
+  folder="$(wt_resolve_folder)" || return 1
+  slot="$(wt_slot_lookup "$folder")"
+  [ -n "$slot" ] || { wt_die "el worktree '$folder' no tiene slot asignado"; return 2; }
+  # Lee las columnas del arrendamiento (created=5, owner_pid=6, heartbeat=7) bajo lock para una lectura consistente.
+  # Orden created<TAB>pid<TAB>heartbeat: el heartbeat (posiblemente vacio en filas viejas) queda ULTIMO, para que
+  # 'read' no colapse un TAB intermedio (TAB es whitespace de IFS y colapsaria un campo vacio del medio).
+  row="$(wt_registry_lock awk -F'\t' -v f="$folder" '$1==f{print $5"\t"$6"\t"$7; exit}' "$PM_WT_REGISTRY")"
+  IFS=$'\t' read -r cr pid hb <<EOF
+$row
+EOF
+  wt_lease_reclaimable "$pid" "$hb" "$cr" || { wt_die "el arrendamiento del slot $slot ('$folder') NO es reclamable (pid vivo o heartbeat fresco): no se roba a una duena viva"; return 3; }
+  # _wt_reclaim_slot se invoca en contexto de condicion (como en wt_reclaim_dead_leases y cmd_wt_gc): sus guardas
+  # internas ('; true', '|| true') asumen set -e SUPRIMIDO; llamarlo BARE abortaria el teardown a media via.
+  if _wt_reclaim_slot "$slot" "$folder"; then return 0; fi
+  return 1
 }

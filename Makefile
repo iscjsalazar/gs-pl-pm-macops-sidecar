@@ -213,7 +213,7 @@ WT_ENV = $(PM_ENV) WT=$(WT) PM_WT_SLOTS=$(SLOTS) PM_WT_ORACLE=$(ORACLE) PM_WT_GC
          PM_SHARED_SQL_PORT=$(SHAREDSQL_PORT) PM_SHARED_SQL_PASSWORD='$(SHAREDSQL_PASSWORD)'
 
 .PHONY: pm-run pm-watch pm-migrate pm-seed pm-api pm-api-down pm-test pm-test-clean pm-gate pm-unit pm-format pm-format-check pm-down pm-nuke pm-ps pm-logs pm-port pm-bootstrap-intel \
-        wt-up wt-down wt-ls wt-info wt-status wt-gc wt-seed-ln wt-sql wt-oracle wt-flag wt-heartbeat \
+        wt-up wt-down wt-ls wt-info wt-status wt-gc wt-seed-ln wt-sql wt-oracle wt-flag wt-heartbeat wt-reclaim \
         e2e-backend e2e-backend-down e2e-net-check e2e-up e2e-smoke e2e-url e2e-down e2e-oracle-counts \
         legacy-launch legacy-data-up legacy-vm-up legacy-build legacy-deploy legacy-diag legacy-diag-logs \
         legacy-tunnel legacy-status legacy-url legacy-down legacy-site-down legacy-sites-status \
@@ -309,6 +309,9 @@ wt-flag:     override TARGET := intel
 wt-flag:     REMOTE := macdata
 wt-flag:     ; $(WT_ENV) ./wt.sh flag
 wt-heartbeat: ; $(WT_ENV) ./wt.sh heartbeat
+wt-reclaim: override TARGET := intel
+wt-reclaim: REMOTE := macdata
+wt-reclaim: ; $(WT_ENV) ./wt.sh reclaim
 
 # --- legado ---
 legacy-launch:    ; $(LEGACY_ENV) ./legacy.sh launch
