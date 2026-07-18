@@ -18,6 +18,7 @@
 #
 #   make e2e-up    WT=<folder> LEGACYSRC=<path>   # data tier + backend(slot) + Oracle(slot) + puente SQL + legacy(+inyeccion) + flag ON + smoke
 #   make e2e-smoke WT=<folder>                    # solo el smoke funcional (asume e2e-up ya dejo todo arriba)
+#   make e2e-playwright WT=<folder> LEGACYSRC=<path>  # focal tnuc02, OFF/ON, seed y teardown por slot
 #   make e2e-url   WT=<folder>                    # reimprime el recuadro de acceso del slot (re-levanta el tunel si murio)
 #   make e2e-down  WT=<folder>                    # baja tunel + site + API + Oracle del slot + puente (singletons intactos)
 #   make e2e-down  WT=<folder> ... PM_E2E_KEEP_FRONT=1   # conserva el site del legado (re-usar con FORCE=1)
@@ -25,11 +26,15 @@ set -uo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/worktrees.sh"
 set +e   # common.sh fija 'set -e'; el driver reporta y decide, no aborta a mitad.
-load_env
-# El backend wt, el SQL compartido y el bus viven en macdata; fija el contexto docker remoto (colima-nlc3runner).
-wt_require_intel || { printf 'ERROR [e2e]: requiere PM_TARGET=intel y REMOTE=macdata\n' >&2; exit 2; }
-
+E2E_CONTRACT_SOURCE_ONLY=0
+if [ "${PM_E2E_CONTRACT_SOURCE_ONLY:-0}" = 1 ] && [ "${BASH_SOURCE[0]}" != "$0" ]; then E2E_CONTRACT_SOURCE_ONLY=1; fi
 VERB="${1:-up}"
+if [ "$E2E_CONTRACT_SOURCE_ONLY" != 1 ]; then
+  [ "$VERB" != down ] || PM_ALLOW_MISSING_WT_LEASE=1
+  load_env
+  # El backend wt, el SQL compartido y el bus viven en macdata; fija el contexto docker remoto.
+  wt_require_intel || { printf 'ERROR [e2e]: requiere PM_TARGET=intel y REMOTE=macdata\n' >&2; exit 2; }
+fi
 
 # --- inputs (el Makefile traduce las vars cortas a estas) ---
 WT="${WT:-}"                                    # worktree de pl-programa-maestro (PL.PM.sln) -> slot del backend
@@ -52,6 +57,21 @@ BRIDGE_IMAGE="${PM_E2E_BRIDGE_IMAGE:-alpine/socat}"
 BRIDGE_DOWN="${PM_E2E_BRIDGE_DOWN:-0}"
 # 'e2e-down' desmonta el site del legado del slot por simetria con wt-down (que borra API y BD). 1 lo conserva.
 KEEP_FRONT="${PM_E2E_KEEP_FRONT:-0}"
+
+# Runner focal de Nucleos. Se valida el contrato exacto antes de consultar el registro de slots o tocar red.
+PW_SCENARIO="${PM_E2E_PW_SCENARIO:-tnuc02}"
+PW_GREP="${PM_E2E_PW_GREP:-@nucleos-full}"
+PW_PROJECT="${PM_E2E_PW_PROJECT:-plant-res}"
+PW_FLAG_KEY="${PM_E2E_PW_FLAG_KEY:-subordinate-nucleos-backend}"
+PW_STATE_ENV="${PM_E2E_PW_STATE_ENV:-PM_E2E_NUCLEOS_FLAG_STATE}"
+PW_FLAG_FINAL="${PM_E2E_PW_FLAG_FINAL:-off}"
+PW_CREDENTIALS_FILE="${PM_E2E_PW_CREDENTIALS_FILE:-}"
+PW_NODE_BIN="${PM_E2E_PW_NODE_BIN:-}"
+PW_INSTALL="${PM_E2E_PW_INSTALL:-0}"
+PW_TIMEOUT="${PM_E2E_PW_TIMEOUT:-900}"
+PW_RETRIES="${PM_E2E_PW_RETRIES:-0}"
+PW_WARM="${PM_E2E_PW_WARM:-0}"
+PW_DOTNET_IMAGE="${PM_E2E_PW_DOTNET_IMAGE:-mcr.microsoft.com/dotnet/sdk:10.0}"
 
 VDIR="ProgramaMaestroLN"
 # Componentes WCF de la pantalla ValidacionParidad (260701-2323): disparo async + poll de estado + reporte.
@@ -76,7 +96,13 @@ edie(){ printf 'ERROR [e2e]: %s\n' "$*" >&2; exit 1; }
 # Intento TOLERANTE de resolver el slot: 0 si lo resolvio, 1 si no. No aborta (cmd_down lo usa para degradar).
 e2e_slot_try(){
   [ -n "$WT" ] || return 1
-  E2E_SLOT="$(wt_slot_lookup "$WT")"
+  local wt_input="$WT" wt_abs wt_short
+  E2E_SLOT="$(wt_slot_lookup "$wt_input")"
+  if [ -n "$E2E_SLOT" ]; then wt_derive "$E2E_SLOT"; return 0; fi
+  wt_abs="$(pm_resolve_worktree_dir "$WT" 2>/dev/null)" || return 1
+  wt_short="$(basename "$wt_abs")"
+  E2E_SLOT="$(wt_slot_lookup "$wt_abs")"; [ -n "$E2E_SLOT" ] && WT="$wt_abs"
+  if [ -z "$E2E_SLOT" ]; then E2E_SLOT="$(wt_slot_lookup "$wt_short")"; [ -n "$E2E_SLOT" ] && WT="$wt_short"; fi
   [ -n "$E2E_SLOT" ] || return 1
   wt_derive "$E2E_SLOT"     # PM_PLANNING_DB=pm_planning_wt<N>, PM_PORT_OFFSET, WT_ORACLE_*, WT_SITE_*, etc.
   return 0
@@ -118,19 +144,34 @@ e2e_oracle_port(){
 
 # Wiring REALMENTE desplegado en el site del slot (clave=valor). Fuente de verdad: el valor solo vive en el guest.
 e2e_deployed_wiring(){
-  ssh -o ConnectTimeout=15 "$PM_REMOTE_SSH" "WINHOST=$PM_GUEST_WINHOST SLOT=$E2E_SLOT bash ~/pm-host-windows/scripts/read-wiring.sh" 2>/dev/null
+  ssh -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$PM_REMOTE_SSH" \
+    "WINHOST=$PM_GUEST_WINHOST SLOT=$E2E_SLOT bash ~/pm-host-windows/scripts/read-wiring.sh" 2>/dev/null
+}
+
+e2e_conn_field(){
+  local cs="$1" wanted="$2"
+  printf '%s\n' "$cs" | awk -v wanted="$wanted" 'BEGIN { RS=";" }
+    { p=index($0,"="); if (!p) next; k=substr($0,1,p-1); v=substr($0,p+1);
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", k); gsub(/^[[:space:]]+|[[:space:]]+$/, "", v);
+      if (tolower(k)==tolower(wanted)) { print v; exit } }'
 }
 
 # ¿El site del slot esta cableado a SU backend, SU Oracle y SU catalogo? Los tres tienen que coincidir: un
 # slot reciclado hereda el sitio anterior y el skip por health 200 conservaria su wiring en silencio.
 e2e_wiring_matches(){  # uso: e2e_wiring_matches <salida-de-read-wiring>
-  local w="$1" ok=0 dep_oracle dep_backend dep_pm dep_reader
+  local w="$1" ok=0 dep_oracle dep_oracle_host dep_backend dep_pm dep_reader dep_pm_server dep_reader_server
   dep_oracle="$(printf '%s\n' "$w"  | sed -n 's/^oraclePort=//p' | head -1)"
+  dep_oracle_host="$(printf '%s\n' "$w" | sed -n 's/^oracleHost=//p' | head -1)"
   dep_backend="$(printf '%s\n' "$w" | sed -n 's/^backendBaseUrl=//p' | head -1)"
   dep_pm="$(printf '%s\n' "$w"      | sed -n 's/^ConStrPm=//p' | head -1)"
   dep_reader="$(printf '%s\n' "$w"  | sed -n 's/^ConStrJobsReader=//p' | head -1)"
+  dep_pm_server="$(e2e_conn_field "$dep_pm" Server)"
+  dep_reader_server="$(e2e_conn_field "$dep_reader" Server)"
   [ "$dep_oracle" = "$E2E_ORACLE_PORT" ] || { ewarn "      oraclePort desplegado='$dep_oracle' esperado='$E2E_ORACLE_PORT'"; ok=1; }
+  [ "$dep_oracle_host" = "$PM_GUEST_GATEWAY" ] || { ewarn "      oracleHost desplegado='$dep_oracle_host' esperado='$PM_GUEST_GATEWAY'"; ok=1; }
   [ "$dep_backend" = "$BACKEND_URL" ]    || { ewarn "      backendBaseUrl desplegado='$dep_backend' esperado='$BACKEND_URL'"; ok=1; }
+  [ "$dep_pm_server" = "$SQL_PM_HOST" ] || { ewarn "      ConStrPm Server desplegado='$dep_pm_server' esperado='$SQL_PM_HOST'"; ok=1; }
+  [ "$dep_reader_server" = "$SQL_PM_HOST" ] || { ewarn "      ConStrJobsReader Server desplegado='$dep_reader_server' esperado='$SQL_PM_HOST'"; ok=1; }
   case "$dep_pm" in
     *"Initial Catalog=$PM_PLANNING_DB;"*) : ;;
     *) ewarn "      ConStrPm no apunta a 'Initial Catalog=$PM_PLANNING_DB' (desplegado: ${dep_pm:-<ausente>})"; ok=1 ;;
@@ -252,7 +293,9 @@ ELSE UPDATE [FeatureManagement].[FeatureFlags] SET IsEnabled=1,UpdatedAt=SYSUTCD
     elog "esquema del feature flag asegurado en $PM_PLANNING_DB (carga-backend + login-skip-password=ON [solo pruebas])"
   else
     ewarn "no se pudo asegurar el esquema del flag en $PM_PLANNING_DB"
+    return 1
   fi
+  return 0
 }
 
 # Asegura el login de solo-lectura pm_reader + GRANT SELECT sobre el schema Jobs en la BD del slot, para que el
@@ -270,7 +313,9 @@ IF SCHEMA_ID(N'Jobs') IS NOT NULL GRANT SELECT ON SCHEMA::[Jobs] TO [$JOBS_READE
     elog "login lector $JOBS_READER_USER asegurado + GRANT SELECT en schema Jobs ($PM_PLANNING_DB)"
   else
     ewarn "no se pudo asegurar $JOBS_READER_USER/GRANT en $PM_PLANNING_DB (¿schema Jobs aun no creado por la migracion?)"
+    return 1
   fi
+  return 0
 }
 
 e2e_set_flag(){  # uso: e2e_set_flag <0|1>
@@ -494,23 +539,292 @@ cmd_up(){
   return $smoke_rc
 }
 
+# --- runner focal Playwright por slot (I13; assets en I12, corrida fisica en I14) ---
+
+PW_SEED_PROJECT='seed-data/Pl.Pm.Legacy.E2E.SeedData/Pl.Pm.Legacy.E2E.SeedData.csproj'
+PW_CLEANUP_ARMED=0
+PW_CLEANUP_RUNNING=0
+PW_SEED_ATTEMPTED=0
+PW_FLAG_TOUCHED=0
+
+e2e_playwright_validate_inputs(){
+  local wt_abs specs spec_count expected_project credentials_abs suite_abs public_value
+  [ -n "$WT" ] || edie "e2e-playwright exige WT=<worktree-pm>"
+  wt_abs="$(pm_resolve_worktree_dir "$WT")" || edie "WT invalido: '$WT'"
+  [ -n "$LEGACY_SRC" ] || edie "e2e-playwright exige LEGACYSRC=<ruta-absoluta-worktree-legacy>"
+  case "$LEGACY_SRC" in /*) : ;; *) edie "LEGACYSRC debe ser ruta absoluta: '$LEGACY_SRC'" ;; esac
+  [ -f "$LEGACY_SRC/ProgramaMaestroPT.sln" ] || edie "LEGACYSRC '$LEGACY_SRC' no contiene ProgramaMaestroPT.sln"
+  [ -f "$LEGACY_SRC/tests/e2e/package-lock.json" ] || edie "LEGACYSRC no contiene tests/e2e/package-lock.json"
+  [ -f "$LEGACY_SRC/tests/e2e/playwright.config.ts" ] || edie "LEGACYSRC no contiene tests/e2e/playwright.config.ts"
+  [ -f "$LEGACY_SRC/tests/e2e/$PW_SEED_PROJECT" ] || edie "LEGACYSRC no contiene el seeder $PW_SEED_PROJECT"
+
+  # I13 publica un runner focal: cualquier override divergente falla antes de lease/red y no ensancha I14.
+  [ "$PW_SCENARIO" = tnuc02 ] || edie "PWSCENARIO debe ser tnuc02"
+  [ "$PW_GREP" = @nucleos-full ] || edie "PWGREP debe ser @nucleos-full"
+  [ "$PW_PROJECT" = plant-res ] || edie "PWPROJECT debe ser plant-res"
+  [ "$PW_FLAG_KEY" = subordinate-nucleos-backend ] || edie "PWFLAGKEY debe ser subordinate-nucleos-backend"
+  [ "$PW_STATE_ENV" = PM_E2E_NUCLEOS_FLAG_STATE ] || edie "PWSTATEENV debe ser PM_E2E_NUCLEOS_FLAG_STATE"
+  case "$PLANTA" in RES) : ;; *) edie "PLANTA invalida: '$PLANTA' (I13 exige RES)" ;; esac
+  expected_project="plant-$(printf '%s' "$PLANTA" | tr '[:upper:]' '[:lower:]')"
+  [ "$PW_PROJECT" = "$expected_project" ] || edie "PWPROJECT '$PW_PROJECT' diverge de PLANTA=$PLANTA"
+  case "$PW_FLAG_FINAL" in off|on) : ;; *) edie "PWFLAGFINAL debe ser off|on" ;; esac
+  case "$PW_INSTALL" in 0|1) : ;; *) edie "PWINSTALL debe ser 0|1" ;; esac
+  case "$PW_WARM" in 0|1) : ;; *) edie "WARM debe ser 0|1 para e2e-playwright" ;; esac
+  case "$PW_TIMEOUT" in ''|*[!0-9]*) edie "PWTIMEOUT debe ser entero positivo" ;; esac
+  [ "$PW_TIMEOUT" -gt 0 ] || edie "PWTIMEOUT debe ser entero positivo mayor que cero"
+  case "$PW_RETRIES" in ''|*[!0-9]*) edie "PWRETRIES debe ser entero >=0" ;; esac
+  for public_value in "$PW_NODE_BIN" "$PM_REMOTE_DOCKER_CONTEXT" "$PW_DOTNET_IMAGE"; do
+    case "$public_value" in
+      *"'"*|*$'\n'*|*$'\r'*) edie "PWNODEBIN/contexto/imagen no admiten comilla simple ni saltos de linea" ;;
+    esac
+  done
+
+  [ -f "$LEGACY_SRC/tests/e2e/seed-data/data/tnuc02.json" ] || edie "no existe seed-data/data/tnuc02.json (I12 pendiente)"
+  [ -f "$LEGACY_SRC/tests/e2e/seed-data/scenarios.manifest.json" ] || edie "falta scenarios.manifest.json"
+  grep -Fq '"tnuc02"' "$LEGACY_SRC/tests/e2e/seed-data/scenarios.manifest.json" \
+    || edie "tnuc02 no esta activo en scenarios.manifest.json"
+  specs="$(find "$LEGACY_SRC/tests/e2e/features" -path '*/specs/tnuc02.spec.ts' -type f -print 2>/dev/null)"
+  spec_count="$(printf '%s\n' "$specs" | grep -c .)"
+  [ "$spec_count" -eq 1 ] || edie "se esperaba un unico tnuc02.spec.ts y se encontraron $spec_count"
+  PW_SPEC_REL="${specs#$LEGACY_SRC/tests/e2e/}"
+
+  if [ -n "$PW_CREDENTIALS_FILE" ]; then
+    [ -f "$PW_CREDENTIALS_FILE" ] || edie "PWCREDENTIALS no existe: '$PW_CREDENTIALS_FILE'"
+    credentials_abs="$(cd "$(dirname "$PW_CREDENTIALS_FILE")" && pwd -P)/$(basename "$PW_CREDENTIALS_FILE")"
+    suite_abs="$(cd "$LEGACY_SRC/tests/e2e" && pwd -P)"
+    case "$credentials_abs" in "$suite_abs"/*) edie "PWCREDENTIALS no puede vivir dentro del arbol stageado" ;; esac
+  fi
+}
+
+e2e_playwright_unquote(){
+  local value="$1"
+  case "$value" in
+    \"*\") value="${value#\"}"; value="${value%\"}" ;;
+    \'*\') value="${value#\'}"; value="${value%\'}" ;;
+  esac
+  printf '%s' "$value"
+}
+
+e2e_playwright_credentials(){
+  local user_set=0 pass_set=0 file line key value perms perm_value
+  PW_TEST_USER=''; PW_TEST_PASSWORD=''
+  if [ "${PM_E2E_TEST_USER+x}" = x ]; then PW_TEST_USER="$PM_E2E_TEST_USER"; user_set=1; fi
+  if [ "${PM_E2E_TEST_PASSWORD+x}" = x ]; then PW_TEST_PASSWORD="$PM_E2E_TEST_PASSWORD"; pass_set=1; fi
+  file="$PW_CREDENTIALS_FILE"
+  [ -n "$file" ] || file="$WRAPPER_DIR/pl-pm-legacy/tests/e2e/.env"
+  if { [ "$user_set" -eq 0 ] || [ "$pass_set" -eq 0 ]; } && [ -f "$file" ]; then
+    perms="$(stat -f '%Lp' "$file" 2>/dev/null || true)"
+    case "$perms" in
+      ''|*[!0-7]*) ewarn "no se verificaron permisos de '$file'" ;;
+      *)
+        perm_value=$((8#$perms))
+        [ $((perm_value & 022)) -eq 0 ] || edie "PWCREDENTIALS permite escritura de grupo/otros (modo $perms)"
+        [ $((perm_value & 077)) -eq 0 ] || ewarn "PWCREDENTIALS es legible por grupo/otros (modo $perms; recomendado 600)"
+        ;;
+    esac
+    while IFS= read -r line || [ -n "$line" ]; do
+      line="${line%$'\r'}"
+      case "$line" in ''|'#'*) continue ;; esac
+      key="${line%%=*}"; value="${line#*=}"; key="${key#export }"
+      case "$key" in
+        PM_E2E_TEST_USER) [ "$user_set" -eq 1 ] || { PW_TEST_USER="$(e2e_playwright_unquote "$value")"; user_set=1; } ;;
+        PM_E2E_TEST_PASSWORD) [ "$pass_set" -eq 1 ] || { PW_TEST_PASSWORD="$(e2e_playwright_unquote "$value")"; pass_set=1; } ;;
+      esac
+    done < "$file"
+  fi
+  [ "$user_set" -eq 1 ] && [ -n "$PW_TEST_USER" ] || edie "falta PM_E2E_TEST_USER"
+  [ "$pass_set" -eq 1 ] || edie "falta PM_E2E_TEST_PASSWORD (puede definirse vacio para el slot local)"
+}
+
+e2e_playwright_set_flag(){
+  make -C "$BASE_DIR" wt-flag WT="$WT" KEY="$PW_FLAG_KEY" STATE="$1" PLANT="$PLANTA"
+}
+
+e2e_playwright_quote(){ printf "'%s'" "$(wt_esc "$1")"; }
+
+e2e_playwright_remote(){
+  local mode="$1" phase="$2" cmd arg runner; shift 2
+  runner="$PW_REMOTE_ROOT/.runner/e2e-playwright-remote.sh"
+  for arg in "$runner" "$mode" "$PW_REMOTE_ROOT" "$PW_REMOTE_RESULT" "$PW_NODE_BIN" "$phase" \
+    "$PM_REMOTE_DOCKER_CONTEXT" "$PW_DOTNET_IMAGE" "$@"; do
+    case "$arg" in
+      *"'"*|*$'\n'*|*$'\r'*) ewarn "argumento remoto contiene comilla simple o salto de linea; se rechaza antes de SSH"; return 2 ;;
+    esac
+  done
+  cmd="bash $(e2e_playwright_quote "$runner") $(e2e_playwright_quote "$mode") $(e2e_playwright_quote "$PW_REMOTE_ROOT") $(e2e_playwright_quote "$PW_REMOTE_RESULT") $(e2e_playwright_quote "$PW_NODE_BIN") $(e2e_playwright_quote "$phase") $(e2e_playwright_quote "$PM_REMOTE_DOCKER_CONTEXT") $(e2e_playwright_quote "$PW_DOTNET_IMAGE")"
+  for arg in "$@"; do cmd="$cmd $(e2e_playwright_quote "$arg")"; done
+  case "$mode" in
+    preflight|prepare) ssh -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$PM_REMOTE_SSH" "$cmd" </dev/null ;;
+    seed|teardown)
+      printf '%s\0%s\0' "$PW_PLANNING_CS" "$PW_CTRLPISO_CS" | ssh -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$PM_REMOTE_SSH" "$cmd"
+      ;;
+    test)
+      printf '%s\0%s\0' "$PW_TEST_USER" "$PW_TEST_PASSWORD" | ssh -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$PM_REMOTE_SSH" "$cmd"
+      ;;
+    *) ewarn "modo remoto desconocido: '$mode'"; return 2 ;;
+  esac
+}
+
+e2e_playwright_stage(){
+  elog "stage per-slot sin .env: $LEGACY_SRC/tests/e2e -> $PM_REMOTE_SSH:$PW_REMOTE_ROOT"
+  on_intel "mkdir -p '$PW_REMOTE_ROOT/.runner' '$PW_REMOTE_RESULT'" || return 1
+  rsync -az --delete --include '.env.example' --exclude '.env*' --exclude '.npmrc' --exclude 'credentials*' \
+    --exclude '*.pem' --exclude '*.key' \
+    --exclude 'node_modules/' --exclude 'bin/' --exclude 'obj/' --exclude '.git/' \
+    --exclude 'test-results/' --exclude 'playwright-report/' --exclude '.runner/' --exclude '.results/' \
+    "$LEGACY_SRC/tests/e2e/" "$PM_REMOTE_SSH:$PW_REMOTE_ROOT/" || return 1
+  rsync -az "$BASE_DIR/scripts/e2e-playwright-remote.sh" "$PM_REMOTE_SSH:$PW_REMOTE_ROOT/.runner/" || return 1
+  e2e_playwright_remote preflight preflight || return 1
+  e2e_playwright_remote prepare prepare "$PW_TIMEOUT" "$PW_INSTALL" "$PW_SEED_PROJECT"
+}
+
+e2e_playwright_collect(){
+  mkdir -p "$PW_LOCAL_RESULT_DIR"; chmod 700 "$PW_LOCAL_RESULT_DIR"
+  rsync -az "$PM_REMOTE_SSH:$PW_REMOTE_RESULT/" "$PW_LOCAL_RESULT_DIR/"
+}
+
+e2e_playwright_cleanup(){
+  [ "$PW_CLEANUP_ARMED" = 1 ] || return 0
+  [ "$PW_CLEANUP_RUNNING" = 0 ] || return 1
+  PW_CLEANUP_RUNNING=1
+  local rc=0
+  if [ "$PW_SEED_ATTEMPTED" = 1 ]; then
+    e2e_playwright_remote teardown teardown "$PW_TIMEOUT" "$PW_SCENARIO" "$PW_SEED_PROJECT" \
+      || { ewarn "fallo el teardown del seed"; rc=1; }
+  fi
+  if [ "$PW_FLAG_TOUCHED" = 1 ]; then
+    e2e_playwright_set_flag "$PW_FLAG_FINAL" || { ewarn "fallo la restauracion del flag"; rc=1; }
+  fi
+  wt_registry_lock wt_slot_touch "$WT" || rc=1
+  e2e_playwright_collect || { ewarn "fallo la descarga de evidencia"; rc=1; }
+  PW_CLEANUP_ARMED=0; PW_CLEANUP_RUNNING=0
+  return "$rc"
+}
+
+e2e_playwright_exit_cleanup(){
+  [ "$PW_CLEANUP_ARMED" = 1 ] || return 0
+  ewarn "salida inesperada: cleanup best-effort"
+  e2e_playwright_cleanup || true
+}
+
+e2e_playwright_signal(){
+  ewarn "senal recibida: teardown/restauracion best-effort"
+  e2e_playwright_cleanup || true
+  wt_lock_release_all
+  exit 130
+}
+
+e2e_playwright_bind_slot(){
+  local requested_site="$SITEPORT" requested_tunnel="$TUNNEL" expected_sql db_exists api_port
+  e2e_slot
+  [ -z "$requested_site" ] || [ "$requested_site" = "$WT_SITE_PORT" ] || { ewarn "SITEPORT no pertenece al slot"; return 1; }
+  [ -z "$requested_tunnel" ] || [ "$requested_tunnel" = "$WT_TUNNEL_PORT" ] || { ewarn "TUNNEL no pertenece al slot"; return 1; }
+  SITEPORT="$WT_SITE_PORT"; TUNNEL="$WT_TUNNEL_PORT"
+  wt_registry_lock wt_slot_touch "$WT" || return 1
+  E2E_ORACLE_PORT="$(e2e_oracle_port)"; api_port="$(e2e_api_port)"
+  BACKEND_URL="http://${PM_GUEST_GATEWAY}:${api_port}"
+  expected_sql="${PM_GUEST_GATEWAY},${BRIDGE_PORT}"
+  [ -z "$SQL_PM_HOST_OVERRIDE" ] || [ "$SQL_PM_HOST_OVERRIDE" = "$expected_sql" ] || { ewarn "SQLPMHOST diverge del puente canonico"; return 1; }
+  e2e_bridge_up; SQL_PM_HOST="$expected_sql"
+  E2E_SQL_PW="$(wt_shared_sql_password)" || return 1
+  wt_shared_sql_check || return 1
+  db_exists="$(wt_shared_scalar "$E2E_SQL_PW" "SET NOCOUNT ON; SELECT CASE WHEN DB_ID(N'$PM_PLANNING_DB') IS NULL THEN 0 ELSE 1 END;")"
+  [ "$db_exists" = 1 ] || { ewarn "no existe la BD exacta $PM_PLANNING_DB"; return 1; }
+  wt_oracle_running && wt_oracle_ready || return 1
+  on_intel "curl -fsS -o /dev/null --max-time 8 'http://127.0.0.1:$api_port/health/live'" || return 1
+  PW_PLANNING_CS="$(PM_TEST_SQL_HOST=127.0.0.1 PM_SQL_HOST_PORT="$PM_SHARED_SQL_PUBLISHED" PM_SQL_SA_PASSWORD="$E2E_SQL_PW" pm_planning_connstr)"
+  PW_CTRLPISO_CS="$(pm_ctrlpiso_connstr 127.0.0.1 "$E2E_ORACLE_PORT")"
+  PW_BASE_URL="http://${PM_GUEST_WINHOST}:${SITEPORT}/$VDIR/"
+  PW_API_URL="http://127.0.0.1:${api_port}/"
+  PW_REMOTE_ROOT="pm-e2e-suite/wt${E2E_SLOT}"
+  PW_REMOTE_RESULT="$PW_REMOTE_ROOT/.results/$PW_RUN_ID"
+}
+
+e2e_playwright_prepare_front(){
+  local wiring
+  e2e_ensure_flag_schema || return 1
+  e2e_ensure_jobs_reader || return 1
+  if [ "$PW_WARM" = 1 ]; then
+    ewarn "WARM=1: recompila/despliega LEGACYSRC al IIS local del slot bajo guest-lock; no es deploy Prolec dev"
+    e2e_legacy_launch 1 || return 1
+  fi
+  wiring="$(e2e_deployed_wiring)"
+  e2e_wiring_matches "$wiring" || { ewarn "wiring divergente"; return 1; }
+  e2e_check_guest_sql
+  e2e_check_guest_tcp "$PM_GUEST_GATEWAY" "$E2E_ORACLE_PORT" "Oracle del slot"
+}
+
+_cmd_playwright_locked(){
+  local rc=0 state_rc=0 cleanup_rc=0 state
+  e2e_playwright_bind_slot || return 1
+  e2e_playwright_stage || return 1
+  e2e_playwright_prepare_front || return 1
+  PW_CLEANUP_ARMED=1
+  trap 'e2e_playwright_exit_cleanup' EXIT
+  trap 'e2e_playwright_signal' INT TERM
+
+  # Orden contractual: OFF -> seed -> test OFF -> ON -> test ON -> teardown -> flag final.
+  PW_FLAG_TOUCHED=1
+  e2e_playwright_set_flag off || return 1
+  PW_SEED_ATTEMPTED=1
+  if ! e2e_playwright_remote seed seed "$PW_TIMEOUT" "$PW_SCENARIO" "$PW_SEED_PROJECT"; then
+    ewarn "fallo el seed; no se ejecuta navegador y se entra a cleanup"
+    rc=1
+  else
+    for state in off on; do
+      if [ "$state" = on ] && ! e2e_playwright_set_flag on; then ewarn "no se fijo on"; rc=1; continue; fi
+      state_rc=0
+      e2e_playwright_remote test "$state" "$state" "$PW_STATE_ENV" "$PW_PROJECT" "$PW_GREP" "$PW_SPEC_REL" \
+        "$PW_BASE_URL" "$PW_API_URL" "$PLANTA" "$PW_TIMEOUT" "$PW_RETRIES" || state_rc=$?
+      if [ "$state_rc" -ne 0 ]; then ewarn "sub-run $state fallo (exit=$state_rc); se continua"; rc=1; fi
+    done
+  fi
+  e2e_playwright_cleanup || cleanup_rc=$?
+  [ "$cleanup_rc" -eq 0 ] || rc=1
+  trap - EXIT
+  trap 'wt_lock_release_all' INT TERM
+  return "$rc"
+}
+
+cmd_playwright(){
+  umask 077
+  e2e_playwright_validate_inputs
+  e2e_playwright_credentials
+  e2e_slot
+  PW_RUN_ID="playwright-$(date -u +%Y%m%dT%H%M%SZ)-wt${E2E_SLOT}-$$"
+  PW_LOCAL_RESULT_DIR="$BASE_DIR/artifacts/playwright/$PW_RUN_ID"
+  mkdir -p "$PW_LOCAL_RESULT_DIR"
+  local logf="$PW_LOCAL_RESULT_DIR/orchestrator.log" rcf="$PW_LOCAL_RESULT_DIR/result.rc" rc=0
+  printf 'running\n' > "$rcf"
+  wt_lock "playwright-wt${E2E_SLOT}" _cmd_playwright_locked 2>&1 | tee "$logf"
+  rc="${PIPESTATUS[0]}"
+  printf '%s\n' "$rc" > "$rcf"
+  printf 'scenario=%s\nspec=%s\nproject=%s\ngrep=%s\nflag=%s/%s\nexit=%s\n' \
+    "$PW_SCENARIO" "$PW_SPEC_REL" "$PW_PROJECT" "$PW_GREP" "$PW_FLAG_KEY" "$PLANTA" "$rc" > "$PW_LOCAL_RESULT_DIR/summary.txt"
+  elog "e2e-playwright EXIT=$rc evidencia=$PW_LOCAL_RESULT_DIR"
+  return "$rc"
+}
+
 # Orden canonico: e2e-down ANTES de wt-down. El slot se resuelve al INICIO (antes de que wt-down lo libere)
 # y de forma TOLERANTE: si ya no hay slot (orden invertido), se degrada con warn y se ejecuta la limpieza
 # posible en vez de abortar. Rescate manual: make legacy-site-down SLOT=<N>.
 cmd_down(){
   elog "bajando E2E ..."
-  local have_slot=0
+  local have_slot=0 rc=0 step_rc=0
   if e2e_slot_try; then have_slot=1; fi
 
   if [ "$have_slot" = "1" ]; then
     e2e_derive_front_ports
     # 1) tunel + site del legado del slot (simetria con wt-down, que borra API y BD).
-    make -C "$BASE_DIR" legacy-down SLOT="$E2E_SLOT" SITEPORT="$SITEPORT" TUNNEL="$TUNNEL" >/dev/null 2>&1 \
-      && elog "tunel del slot cerrado (localhost:$TUNNEL)" || ewarn "no se cerro el tunel del slot"
+    make -C "$BASE_DIR" legacy-down SLOT="$E2E_SLOT" SITEPORT="$SITEPORT" TUNNEL="$TUNNEL" >/dev/null 2>&1
+    step_rc=$?
+    if [ "$step_rc" -eq 0 ]; then elog "tunel del slot cerrado (localhost:$TUNNEL)"; else ewarn "no se cerro el tunel del slot"; rc="$step_rc"; fi
     if [ "$KEEP_FRONT" = "1" ]; then
       elog "site $WT_SITE_NAME conservado (PM_E2E_KEEP_FRONT=1); re-usarlo exige FORCE=1 en el proximo e2e-up"
     else
-      make -C "$BASE_DIR" legacy-site-down SLOT="$E2E_SLOT" || ewarn "no se desmonto el site del slot $E2E_SLOT"
+      make -C "$BASE_DIR" legacy-site-down SLOT="$E2E_SLOT"
+      step_rc=$?
+      if [ "$step_rc" -ne 0 ]; then ewarn "no se desmonto el site del slot $E2E_SLOT"; [ "$rc" -ne 0 ] || rc="$step_rc"; fi
     fi
   else
     # Sin slot (orden invertido: wt-down corrio antes) NO se derivan puertos: los defaults del singleton
@@ -522,12 +836,18 @@ cmd_down(){
   fi
 
   # 2) API + Oracle + BD del slot; libera el slot.
-  if [ -n "$WT" ]; then make -C "$BASE_DIR" wt-down WT="$WT" || ewarn "wt-down con aviso"
+  if [ -n "$WT" ]; then
+    PM_ALLOW_MISSING_WT_LEASE=1 make -C "$BASE_DIR" wt-down WT="$WT"
+    step_rc=$?
+    if [ "$step_rc" -ne 0 ]; then ewarn "wt-down con aviso"; [ "$rc" -ne 0 ] || rc="$step_rc"; fi
   else ewarn "sin WT=<folder>: no se baja la API ni el Oracle del slot (pasa WT para bajarlos)"; fi
 
   # 3) el puente queda arriba salvo peticion explicita (lo comparten los demas slots).
   e2e_bridge_down
+  step_rc=$?
+  if [ "$step_rc" -ne 0 ]; then ewarn "no se completo el cleanup solicitado del puente"; [ "$rc" -ne 0 ] || rc="$step_rc"; fi
   elog "E2E abajo (data tier, SQL compartido, bus y puente singletons intactos)"
+  return "$rc"
 }
 
 # Reimprime el recuadro de acceso de un ambiente E2E YA arriba, sin re-orquestar nada (gotcha del tunel
@@ -595,11 +915,14 @@ e2e_summary(){  # uso: e2e_summary <api_port>
   printf '\n'
 }
 
+if [ "$E2E_CONTRACT_SOURCE_ONLY" = 1 ]; then return 0; fi
+
 case "$VERB" in
   up)            cmd_up ;;
   smoke)         cmd_smoke ;;
+  playwright)    cmd_playwright ;;
   url)           cmd_url ;;
   down)          cmd_down ;;
   oracle-counts) cmd_oracle_counts ;;
-  *) echo "uso: $0 {up|smoke|url|down|oracle-counts}  (WT=<folder> LEGACYSRC=<path>)"; exit 2 ;;
+  *) echo "uso: $0 {up|smoke|playwright|url|down|oracle-counts}  (WT=<folder> LEGACYSRC=<path>)"; exit 2 ;;
 esac

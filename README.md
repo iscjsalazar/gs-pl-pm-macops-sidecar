@@ -290,6 +290,7 @@ discrimina ON por `MensajeTecnico` y OFF por la ausencia de órdenes nuevas (rob
 | `make e2e-up ... LINEA=<cod> ANOF=<aaaa> SEMF=<sem>` | Params reales del disparo (el caso OFF/Oracle los exige; el ON los ignora). |
 | `make e2e-up ... FORCE=1` | Re-deploya el legado (re-inyecta el wiring; necesario si el slot se reutiliza o se conservó el sitio). |
 | `make e2e-smoke WT=<wt-pm>` | Solo el smoke funcional; dispara contra el **sitio del slot** (`8100+N`). Asume `e2e-up` ya dejó todo arriba. |
+| `make e2e-playwright WT=<wt-pm> LEGACYSRC=<legacy-develop>` | Runner focal de Núcleos: escenario `tnuc02`, tag `@nucleos-full`, proyecto `plant-res`, flag `subordinate-nucleos-backend` y estado `PM_E2E_NUCLEOS_FLAG_STATE`; ejecuta la matriz OFF/ON y deja evidencia por slot. |
 | `make e2e-url WT=<wt-pm>` | Reimprime el **recuadro de acceso del slot** (URL del site y del túnel) y **re-levanta el túnel si murió**. Asume el ambiente ya arriba. |
 | `make e2e-down WT=<wt-pm>` | Baja el túnel y el **sitio del slot**, y luego API + Oracle + BD del slot (`wt-down`). El puente y los demás singletons quedan intactos. |
 | `make e2e-down ... PM_E2E_KEEP_FRONT=1` | Conserva el sitio del legado (reusarlo exige `FORCE=1` en el siguiente `e2e-up`). |
@@ -300,6 +301,39 @@ discrimina ON por `MensajeTecnico` y OFF por la ausencia de órdenes nuevas (rob
 make e2e-up WT=<wt-pm-develop> LEGACYSRC=<ruta-legacy-develop> LINEA=<cod> ANOF=<aaaa> SEMF=<sem>
 make e2e-smoke WT=<wt-pm-develop>     # re-corre solo el smoke
 make e2e-down  WT=<wt-pm-develop>     # cierra túnel + sitio + API + Oracle del slot
+```
+
+### Runner focal Playwright de Núcleos
+
+`e2e-playwright` falla cerrado antes de consultar un lease o tocar red si `WT`, `SOLUTION`, `LEGACYSRC`,
+escenario, manifest, spec, planta, proyecto, flag, timeout o retries no satisfacen el contrato focal. `WT` puede
+ser el nombre bajo `worktrees/` o su ruta absoluta; si se proporciona también `SOLUTION`, ambos deben resolver
+al mismo árbol físico con `PL.PM.sln`. Un valor inexistente, exterior o divergente nunca cae al checkout central.
+Los componentes `..` y cualquier symlink del `WT` se rechazan aunque terminen resolviendo dentro de
+`worktrees/`. Sin `WT`, los comandos standalone existentes conservan el checkout central. Para recuperación,
+`e2e-down` consulta primero la clave literal del lease: puede cerrar el site y túnel residuales aunque el árbol
+del worktree ya haya sido retirado.
+
+El orden protegido es OFF → seed `tnuc02` → spec exacto `tnuc02.spec.ts` OFF → ON → el mismo spec ON →
+teardown → restauración del flag. Un fallo OFF no omite ON y cualquier fallo de seed parcial, sub-run,
+teardown, restauración o descarga conserva el resultado rojo. Los comandos remotos tienen watchdog y
+`PWRETRIES=0` por defecto. `INT`/`TERM` intentan teardown y restauración best-effort; `SIGKILL` no puede
+atraparse, por lo que la recuperación consiste en repetir el seed idempotente y el runner bajo el mismo slot.
+
+El stage excluye `.env`, repositorios, dependencias y resultados previos. Las credenciales viajan delimitadas
+por stdin y no se persisten. `PWINSTALL=1` sólo autoriza instalar Chromium; no instala toolchains ni hace
+pull de imágenes. Si el seeder necesita la imagen .NET ya cacheada, cada contenedor fallback recibe identidad
+única y se detiene/retira explícitamente en éxito, fallo, timeout, `INT` o `TERM`. `WARM=1` puede invocar
+`legacy-launch` para recompilar y desplegar exclusivamente al IIS
+local del slot en `macdata`: esto no es un despliegue a Prolec dev y no toca servicios ni configuración remotos.
+Los assets `tnuc02` se integran por separado; la ejecución física OFF/ON ocurre
+únicamente cuando el ambiente focal completo esté listo.
+
+```bash
+make e2e-playwright \
+  WT=<wt-pm> SOLUTION=<misma-ruta-wt-pm> LEGACYSRC=<ruta-absoluta-wt-legacy> \
+  PWSCENARIO=tnuc02 PWGREP=@nucleos-full PWPROJECT=plant-res \
+  PWFLAGKEY=subordinate-nucleos-backend PWSTATEENV=PM_E2E_NUCLEOS_FLAG_STATE
 ```
 
 **Aislamiento del camino OFF.** `e2e-up` siempre enciende el Oracle del slot y le apunta el `conStringOracle` del

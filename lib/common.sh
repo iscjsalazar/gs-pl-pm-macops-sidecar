@@ -30,22 +30,116 @@ WRAPPER_DIR="${PM_WRAPPER_DIR:-$(find_wrapper_dir "$BASE_DIR" || true)}"
 SIDECAR_CENTRAL_DIR="$WRAPPER_DIR/gs-pl-pm-macops-sidecar"
 COMPOSE_FILE="docker-compose.yml"
 
+# Normaliza un WT relativo o absoluto a una ruta fisica bajo worktrees/. Un WT explicito invalido siempre
+# falla: nunca se degrada silenciosamente al checkout central.
+pm_path_contains_symlink() { # 0 si algun componente existente es symlink
+  local input="$1" current="" part old_ifs
+  local -a parts
+  case "$input" in /*) current="" ;; *) current="$(pwd -P)" ;; esac
+  old_ifs="$IFS"; IFS='/'; read -r -a parts <<< "$input"; IFS="$old_ifs"
+  for part in "${parts[@]}"; do
+    [ -n "$part" ] || continue
+    current="$current/$part"
+    [ -L "$current" ] && return 0
+  done
+  return 1
+}
+
+pm_validate_missing_worktree_literal() { # escape exclusivo para cleanup por lease residual
+  local input="$1" worktrees_abs candidate
+  worktrees_abs="$(cd "$WRAPPER_DIR/worktrees" 2>/dev/null && pwd -P)" || return 1
+  case "$input" in
+    /*)
+      case "/$input/" in *'/../'*) return 1 ;; esac
+      case "$input" in "$worktrees_abs"/*) candidate="$input" ;; *) return 1 ;; esac
+      ;;
+    *[!A-Za-z0-9._-]*|'') return 1 ;;
+    *) candidate="$worktrees_abs/$input" ;;
+  esac
+  [ ! -e "$candidate" ] && [ ! -L "$candidate" ] || return 1
+  pm_path_contains_symlink "$candidate" && return 1
+  return 0
+}
+
+pm_resolve_worktree_dir() { # uso: pm_resolve_worktree_dir <WT>
+  local input="$1" candidate worktrees_abs resolved
+  [ -n "$input" ] || { echo "[pm] ERROR: WT vacio" >&2; return 2; }
+  worktrees_abs="$(cd "$WRAPPER_DIR/worktrees" 2>/dev/null && pwd -P)" || {
+    echo "[pm] ERROR: no se resolvio $WRAPPER_DIR/worktrees" >&2; return 2;
+  }
+  case "$input" in
+    /*)
+      case "/$input/" in *'/../'*) echo "[pm] ERROR: WT absoluto contiene componente '..': '$input'" >&2; return 2 ;; esac
+      candidate="$input"
+      ;;
+    *[!A-Za-z0-9._-]*) echo "[pm] ERROR: WT relativo contiene caracteres invalidos: '$input'" >&2; return 2 ;;
+    *) candidate="$worktrees_abs/$input" ;;
+  esac
+  pm_path_contains_symlink "$candidate" && {
+    echo "[pm] ERROR: WT no admite symlinks en ningun componente: '$input'" >&2; return 2;
+  }
+  resolved="$(cd "$candidate" 2>/dev/null && pwd -P)" || {
+    echo "[pm] ERROR: WT no existe o no es directorio: '$input'" >&2; return 2;
+  }
+  case "$resolved" in
+    "$worktrees_abs"/*) : ;;
+    *) echo "[pm] ERROR: WT debe vivir bajo '$worktrees_abs': '$input'" >&2; return 2 ;;
+  esac
+  [ -f "$resolved/PL.PM.sln" ] || {
+    echo "[pm] ERROR: WT '$input' no contiene PL.PM.sln" >&2; return 2;
+  }
+  printf '%s' "$resolved"
+}
+
+pm_resolve_solution_input() { # uso: pm_resolve_solution_input <SOLUTION>
+  local input="$1" resolved central worktrees_abs
+  case "/$input/" in *'/../'*) echo "[pm] ERROR: SOLUTION contiene componente '..': '$input'" >&2; return 2 ;; esac
+  pm_path_contains_symlink "$input" && {
+    echo "[pm] ERROR: SOLUTION no admite symlinks en ningun componente: '$input'" >&2; return 2;
+  }
+  resolved="$(cd "$input" 2>/dev/null && pwd -P)" || {
+    echo "[pm] ERROR: SOLUTION no existe o no es directorio: '$input'" >&2; return 2;
+  }
+  [ -f "$resolved/PL.PM.sln" ] || {
+    echo "[pm] ERROR: SOLUTION '$input' no contiene PL.PM.sln" >&2; return 2;
+  }
+  central="$(cd "$WRAPPER_DIR/pl-programa-maestro" 2>/dev/null && pwd -P)" || return 2
+  worktrees_abs="$(cd "$WRAPPER_DIR/worktrees" 2>/dev/null && pwd -P)" || return 2
+  case "$resolved" in
+    "$central"|"$worktrees_abs"/*) : ;;
+    *) echo "[pm] ERROR: SOLUTION queda fuera del checkout central y worktrees/: '$input'" >&2; return 2 ;;
+  esac
+  printf '%s' "$resolved"
+}
+
 # Resuelve la solucion (pl-programa-maestro) a construir/probar y deriva containers/compose. Prioridad:
-# PM_SOLUTION_DIR explicito > WT=<folder> (worktree de codigo, validado por PL.PM.sln) > CWD dentro de un
-# worktree de codigo > central. Cubre: solicitud sidecar standalone -> central; vinculada a un worktree -> ese.
+# WT/SOLUTION explicitos y coherentes > CWD dentro de un worktree de codigo > central. Cubre sidecar standalone,
+# pero falla cerrado ante cualquier WT/SOLUTION explicito inexistente, exterior o divergente (DL-149).
 resolve_solution_dir() {
-  if [ -z "${PM_SOLUTION_DIR:-}" ]; then
-    local cand="" top
-    if [ -n "${WT:-}" ] && [ -f "$WRAPPER_DIR/worktrees/$WT/PL.PM.sln" ]; then
-      cand="$WRAPPER_DIR/worktrees/$WT"
+  local explicit="${PM_SOLUTION_DIR:-}" wt_dir="" solution_dir="" top
+  if [ -n "${WT:-}" ]; then
+    if [ "${PM_ALLOW_MISSING_WT_LEASE:-0}" = 1 ] && pm_validate_missing_worktree_literal "$WT"; then
+      wt_dir=""
     else
-      top="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-      case "$top" in
-        "$WRAPPER_DIR/worktrees/"*) [ -f "$top/PL.PM.sln" ] && cand="$top" ;;
-      esac
+      wt_dir="$(pm_resolve_worktree_dir "$WT")" || return $?
     fi
-    if [ -n "$cand" ]; then PM_SOLUTION_DIR="$cand"; else PM_SOLUTION_DIR="$WRAPPER_DIR/pl-programa-maestro"; fi
   fi
+  if [ -n "$explicit" ]; then
+    solution_dir="$(pm_resolve_solution_input "$explicit")" || return $?
+    if [ -n "$wt_dir" ] && [ "$solution_dir" != "$wt_dir" ]; then
+      echo "[pm] ERROR: WT y SOLUTION divergen: WT='$wt_dir', SOLUTION='$solution_dir'" >&2
+      return 2
+    fi
+  elif [ -n "$wt_dir" ]; then
+    solution_dir="$wt_dir"
+  else
+    top="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+    case "$top" in
+      "$WRAPPER_DIR/worktrees/"*) [ -f "$top/PL.PM.sln" ] && solution_dir="$(cd "$top" && pwd -P)" ;;
+    esac
+    [ -n "$solution_dir" ] || solution_dir="$(cd "$WRAPPER_DIR/pl-programa-maestro" && pwd -P)"
+  fi
+  PM_SOLUTION_DIR="$solution_dir"
   PM_CONTAINERS_DIR="${PM_CONTAINERS_DIR:-$PM_SOLUTION_DIR/containers}"
   COMPOSE_DIR="$PM_CONTAINERS_DIR/compose"
 }
