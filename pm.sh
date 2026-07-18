@@ -175,20 +175,24 @@ cmd_test_clean() {     # gate "limpio" POR SLOT: aprovisiona el data tier del sl
   . "$(dirname "${BASH_SOURCE[0]}")/lib/worktrees.sh"
   # Guard slot-mandatorio: corta ANTES de cualquier aprovisionamiento, compose, SSH o build. La consulta del
   # registro es READ-ONLY (wt_slot_lookup: sin wt_registry_lock de escritura ni asignacion de slot nuevo).
-  local gate_folder gate_slot
+  local gate_folder gate_abs gate_short gate_slot
   if ! gate_folder="$(wt_resolve_folder 2>/dev/null)"; then
     echo "[pm] test-clean: falta WT: el gate corre SIEMPRE sobre el slot del worktree (process-e2e-local-slots.md). Usa: make pm-test-clean WT=<worktree> (aprovisiona antes con make wt-up WT=<worktree>)" >&2
     return 2
   fi
-  gate_slot="$(wt_slot_lookup "$gate_folder")"
-  if [ -z "$gate_slot" ]; then
-    if [ ! -f "$WRAPPER_DIR/worktrees/$gate_folder/PL.PM.sln" ]; then
-      echo "[pm] test-clean: el worktree '$gate_folder' no resuelve (no existe $WRAPPER_DIR/worktrees/$gate_folder con marcador PL.PM.sln); revisa WT=<worktree de pl-programa-maestro>" >&2
-    else
-      echo "[pm] test-clean: el worktree $gate_folder no tiene slot asignado: corre primero make wt-up WT=$gate_folder (el gate no aprovisiona slots por si mismo)" >&2
-    fi
+  if ! gate_abs="$(pm_resolve_worktree_dir "$gate_folder")"; then
+    echo "[pm] test-clean: WT '$gate_folder' no es un worktree PM valido; se rechazo antes de consultar/provisionar slots" >&2
     return 2
   fi
+  gate_short="$(basename "$gate_abs")"
+  gate_slot="$(wt_slot_lookup "$gate_folder")"
+  if [ -z "$gate_slot" ]; then gate_slot="$(wt_slot_lookup "$gate_abs")"; [ -n "$gate_slot" ] && gate_folder="$gate_abs"; fi
+  if [ -z "$gate_slot" ]; then gate_slot="$(wt_slot_lookup "$gate_short")"; [ -n "$gate_slot" ] && gate_folder="$gate_short"; fi
+  if [ -z "$gate_slot" ]; then
+    echo "[pm] test-clean: el worktree valido '$gate_abs' no tiene slot asignado (se probaron las claves '$gate_folder', '$gate_abs' y '$gate_short'); corre primero make wt-up WT=$gate_short. No se uso el checkout central." >&2
+    return 2
+  fi
+  WT="$gate_folder"
   wt_require_intel || return 1
   # 1) Aprovisiona el slot: reusa el slot ya asignado (el guard de arriba garantiza que existe en el registro),
   #    recrea la API del slot (frescura = el analogo de APIFORCE) y siembra la BD. Deja en scope los globals del

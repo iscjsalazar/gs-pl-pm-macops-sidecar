@@ -39,6 +39,8 @@
 #   [WT obligatorio] make e2e-up    ... LINEA=<cod> ANOF=<aaaa> SEMF=<sem>       # params reales del disparo (el caso OFF/Oracle los exige)
 #   [WT obligatorio] make e2e-up    ... FORCE=1                                  # re-deploya el legado (re-inyecta wiring; necesario si cambia el slot)
 #   [WT obligatorio] make e2e-smoke WT=<wt-pm>                                   # solo el smoke funcional (ON->backend, OFF->Oracle)
+#   [WT obligatorio] make e2e-playwright WT=<wt-pm> LEGACYSRC=<wt-legacy>         # focal tnuc02: seed + matriz OFF/ON local en macdata
+#   [WT obligatorio] make e2e-playwright ... WARM=1                               # reusa API sana, recompila/despliega legacy en el IIS local del slot
 #   [WT obligatorio] make e2e-url   WT=<wt-pm>                                   # reimprime la URL de acceso del slot (re-levanta el tunel si murio)
 #   [WT obligatorio] make e2e-down  WT=<wt-pm>                                   # baja tunel + site + API + Oracle del slot (singletons intactos)
 #   [WT obligatorio] make e2e-oracle-counts WT=<wt-pm>                           # conteos de PGE950RT en el Oracle del slot Y en el singleton
@@ -176,6 +178,20 @@ FLAGFINAL ?= on
 BRIDGEPORT?= 60211
 SQLPMHOST ?=
 
+# Contrato focal de Nucleos. Los overrides siguen expuestos para diagnostico, pero el runner los valida contra
+# este conjunto exacto antes de consultar leases o red (I13); I12 aporta los assets y I14 la corrida fisica.
+PWSCENARIO  ?= tnuc02
+PWGREP      ?= @nucleos-full
+PWPROJECT   ?= plant-res
+PWFLAGKEY   ?= subordinate-nucleos-backend
+PWSTATEENV  ?= PM_E2E_NUCLEOS_FLAG_STATE
+PWFLAGFINAL ?= off
+PWCREDENTIALS ?=
+PWNODEBIN   ?=
+PWINSTALL   ?= 0
+PWTIMEOUT   ?= 900
+PWRETRIES   ?= 0
+
 # PM_E2E_SITE_PORT: e2e.sh ya lo leia pero nadie lo exportaba (el smoke disparaba siempre contra :8080).
 E2E_ORCH_ENV = $(E2E_ENV) WT=$(WT) PM_E2E_LEGACY_SRC='$(LEGACYSRC)' PM_E2E_PLANTA=$(PLANTA) \
                PM_E2E_LINEA='$(LINEA)' PM_E2E_ANOF=$(ANOF) PM_E2E_SEMF=$(SEMF) PM_E2E_FLAG_FINAL=$(FLAGFINAL) \
@@ -219,7 +235,7 @@ WT_ENV = $(PM_ENV) WT=$(WT) PM_WT_SLOTS=$(SLOTS) PM_WT_ORACLE=$(ORACLE) PM_WT_GC
 
 .PHONY: pm-run pm-watch pm-migrate pm-seed pm-api pm-api-down pm-test pm-test-clean pm-gate pm-unit pm-format pm-format-check pm-down pm-nuke pm-ps pm-logs pm-port pm-bootstrap-intel \
         wt-up wt-down wt-ls wt-info wt-status wt-gc wt-prune-cache vm-restart-coordinated wt-seed-ln wt-sql wt-oracle wt-flag wt-heartbeat wt-reclaim \
-        e2e-backend e2e-backend-down e2e-net-check e2e-up e2e-smoke e2e-url e2e-down e2e-oracle-counts \
+        e2e-backend e2e-backend-down e2e-net-check e2e-up e2e-smoke e2e-playwright e2e-url e2e-down e2e-oracle-counts \
         legacy-launch legacy-data-up legacy-vm-up legacy-build legacy-deploy legacy-diag legacy-diag-logs \
         legacy-tunnel legacy-status legacy-url legacy-down legacy-site-down legacy-sites-status \
         legacy-turn-status legacy-turn-heartbeat legacy-turn-release help
@@ -274,6 +290,38 @@ e2e-up:    ; $(E2E_ORCH_ENV) ./scripts/e2e.sh up
 e2e-smoke: override TARGET  := intel
 e2e-smoke: override REMOTE  := macdata
 e2e-smoke: ; $(E2E_ORCH_ENV) ./scripts/e2e.sh smoke
+e2e-playwright: override TARGET := intel
+e2e-playwright: override REMOTE := macdata
+e2e-playwright: export PM_TARGET := intel
+e2e-playwright: export PM_REMOTE_SSH := macdata
+e2e-playwright: export PM_REMOTE_DOCKER_CONTEXT := $(CONTEXT)
+e2e-playwright: export PM_TEST_SQL_HOST := $(SQLHOST)
+e2e-playwright: export PM_API_PORT := $(APIPORT)
+e2e-playwright: export PM_WRAPPER_DIR := $(WRAPPER)
+e2e-playwright: export PM_SOLUTION_DIR := $(SOLUTION)
+e2e-playwright: export WT := $(WT)
+e2e-playwright: export PM_GUEST_GATEWAY := $(GATEWAY)
+e2e-playwright: export PM_GUEST_WINHOST := $(WINHOST)
+e2e-playwright: export PM_GUEST_KEY := $(GUESTKEY)
+e2e-playwright: export PM_E2E_LEGACY_SRC := $(LEGACYSRC)
+e2e-playwright: export PM_E2E_PLANTA := $(PLANTA)
+e2e-playwright: export PM_E2E_TUNNEL := $(TUNNEL)
+e2e-playwright: export PM_E2E_SITE_PORT := $(SITEPORT)
+e2e-playwright: export PM_E2E_BRIDGE_PORT := $(BRIDGEPORT)
+e2e-playwright: export PM_E2E_SQL_PM_HOST := $(SQLPMHOST)
+e2e-playwright: export PM_E2E_PW_SCENARIO := $(PWSCENARIO)
+e2e-playwright: export PM_E2E_PW_GREP := $(PWGREP)
+e2e-playwright: export PM_E2E_PW_PROJECT := $(PWPROJECT)
+e2e-playwright: export PM_E2E_PW_FLAG_KEY := $(PWFLAGKEY)
+e2e-playwright: export PM_E2E_PW_STATE_ENV := $(PWSTATEENV)
+e2e-playwright: export PM_E2E_PW_FLAG_FINAL := $(PWFLAGFINAL)
+e2e-playwright: export PM_E2E_PW_CREDENTIALS_FILE := $(PWCREDENTIALS)
+e2e-playwright: export PM_E2E_PW_NODE_BIN := $(PWNODEBIN)
+e2e-playwright: export PM_E2E_PW_INSTALL := $(PWINSTALL)
+e2e-playwright: export PM_E2E_PW_TIMEOUT := $(PWTIMEOUT)
+e2e-playwright: export PM_E2E_PW_RETRIES := $(PWRETRIES)
+e2e-playwright: export PM_E2E_PW_WARM := $(WARM)
+e2e-playwright: ; $(if $(filter tnuc02,$(PWSCENARIO)),,$(error PWSCENARIO debe ser tnuc02))$(if $(filter @nucleos-full,$(PWGREP)),,$(error PWGREP debe ser @nucleos-full))$(if $(filter plant-res,$(PWPROJECT)),,$(error PWPROJECT debe ser plant-res))$(if $(filter subordinate-nucleos-backend,$(PWFLAGKEY)),,$(error PWFLAGKEY debe ser subordinate-nucleos-backend))$(if $(filter PM_E2E_NUCLEOS_FLAG_STATE,$(PWSTATEENV)),,$(error PWSTATEENV debe ser PM_E2E_NUCLEOS_FLAG_STATE))$(if $(filter RES,$(PLANTA)),,$(error PLANTA debe ser RES)) ./scripts/e2e.sh playwright
 e2e-url:   override TARGET  := intel
 e2e-url:   override REMOTE  := macdata
 e2e-url:   ; $(E2E_ORCH_ENV) ./scripts/e2e.sh url
