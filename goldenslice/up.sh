@@ -35,6 +35,24 @@ WORKTREES="$WRAPPER_DIR/worktrees"
 gs_log(){ printf '== [goldenslice-up] %s\n' "$*"; }
 gs_die(){ printf 'ERROR [goldenslice-up]: %s\n' "$*" >&2; exit 1; }
 
+# --- instrumentacion de tiempos por fase (aditiva; no altera la logica ni los codigos de salida) ---
+# El artefacto es maquina-legible: una linea 'fase|segundos' por fase + 'TOTAL|<wall-clock>' al final. Usa
+# date +%s (segundos epoch, wall-clock); NO usa gdate ni date +%s.%N (pueden faltar en macdata/macOS).
+# PM_TIMING_LOG se EXPORTA antes de la fase 3 para que seed-slot.sh escriba sus sub-fases al MISMO archivo.
+: "${PM_TIMING_LOG:=$WRAPPER_DIR/gs-pl-pm-macops-sidecar/artifacts/goldenslice-timing/goldenslice-up-$(date -u +%Y%m%dT%H%M%SZ).log}"
+mkdir -p "$(dirname "$PM_TIMING_LOG")"
+export PM_TIMING_LOG
+GS_START_EPOCH="$(date +%s)"
+
+# _gs_timing registra el wall-clock de una fase: escribe 'fase|segundos' al artefacto y a stdout con prefijo [timing].
+_gs_timing(){  # <fase> <t0-epoch>
+  local fase="$1"
+  local t0="$2"
+  local dur=$(( $(date +%s) - t0 ))
+  printf '%s|%s\n' "$fase" "$dur" >> "$PM_TIMING_LOG"
+  printf '[timing] %s|%s\n' "$fase" "$dur"
+}
+
 # El SQL del slot arranca VACIO (esquema EF, sin el seed handcrafted): fiel a un deploy limpio. Los catalogos se
 # pueblan DESPUES desde el golden Oracle (catalog-load + intake-load). Exportado => fluye a wt-up y al wt-up
 # interno de e2e-up. Inerte para cualquier otro slot (solo make golden lo fija).
@@ -57,14 +75,18 @@ gs_ensure_worktree(){  # <repo> <wt_name>
     git -C "$repo" worktree add --detach "$path" "origin/$GS_BASE" >/dev/null 2>&1 || gs_die "git worktree add fallo ($name en $path)"
   fi
 }
+t0=$(date +%s)
 gs_ensure_worktree "$PM_REPO" "$GS_PM_WT"
 gs_ensure_worktree "$LEGACY_REPO" "$GS_LEGACY_WT"
+_gs_timing "worktrees" "$t0"
 LEGACY_SRC="$WORKTREES/$GS_LEGACY_WT"
 [ -f "$LEGACY_SRC/ProgramaMaestroPT.sln" ] || gs_die "el worktree legacy '$LEGACY_SRC' no trae ProgramaMaestroPT.sln"
 
 # 2) provisiona el slot (backend + Oracle propio). El slot se auto-asigna; se deriva del registro.
 gs_log "wt-up (slot + Oracle) para $GS_PM_WT ..."
+t0=$(date +%s)
 make -C "$SIDECAR_DIR" wt-up WT="$GS_PM_WT" ORACLE=1 || gs_die "wt-up fallo"
+_gs_timing "wt-up" "$t0"
 SLOT="$(wt_slot_lookup "$GS_PM_WT")"
 [ -n "$SLOT" ] || gs_die "no se resolvio el slot de $GS_PM_WT tras wt-up"
 LN_GS_DB="pm_gs_ln_wt${SLOT}"
@@ -78,18 +100,24 @@ GS_SRC="${GS_SRC:-$WRAPPER_DIR/gs-pl-pm-macops-sidecar/artifacts/prod-extract-26
 command -v python3 >/dev/null 2>&1 || gs_die "python3 no disponible (requerido por generate.py)"
 [ -d "$GS_SRC/oracle" ] || gs_die "extract no encontrado: $GS_SRC (falta oracle/)"
 gs_log "regenerando goldenslice/build desde el extract ($GS_SRC) ..."
+t0=$(date +%s)
 python3 "$SELF_DIR/generate.py" --src "$GS_SRC" --out "$SELF_DIR/build" >/dev/null || gs_die "generate.py fallo"
+_gs_timing "build-regen" "$t0"
 
 # 3) siembra la golden slice (Oracle multi-owner + recompila + LN aislada). Idempotente.
 gs_log "goldenslice-seed SLOT=$SLOT (Oracle golden + LN aislada) ..."
+t0=$(date +%s)   # PM_TIMING_LOG ya exportado: seed-slot.sh anexa sus sub-fases al MISMO archivo
 make -C "$SIDECAR_DIR" goldenslice-seed SLOT="$SLOT" || gs_die "goldenslice-seed fallo"
+_gs_timing "goldenslice-seed" "$t0"
 
 # 4) e2e-up apuntando el pm-api a la LN GOLDEN (PM_WT_LN_DB exportado; WT_ENV no lo pisa). e2e-up recrea el API
 #    con la connstring golden, levanta el frontend, activa el flag e imprime las URLs. El smoke puede fallar sin
 #    abortar goldenslice-up: el objetivo es dejar el ambiente ARRIBA con URLs para validar en vivo.
 gs_log "e2e-up con LN golden ($LN_GS_DB) y SQL VACIO: recrea API + frontend + flag ..."
+t0=$(date +%s)
 PM_WT_LN_DB="$LN_GS_DB" make -C "$SIDECAR_DIR" e2e-up WT="$GS_PM_WT" LEGACYSRC="$LEGACY_SRC" \
   || gs_log "AVISO: e2e-up salio con codigo != 0 (revisa el smoke arriba); el ambiente puede estar arriba: usa 'make e2e-url WT=$GS_PM_WT'"
+_gs_timing "e2e-up" "$t0"
 
 # --- 5) poblar los CATALOGOS/insumos del golden en el SQL VACIO (sin pantalla), como un deploy limpio. El intake
 #        REAL (produce el plan) queda MANUAL desde la app (OrdenesNuevasCargar_LN.aspx). ---
@@ -100,9 +128,11 @@ API_PORT="$(on_intel "docker $ctx port '$API_C' 8080/tcp 2>/dev/null" 2>/dev/nul
 
 # 5a) habilitar los tools dev de carga (recrea el API preservando env/redes + Tools:CatalogLoad/IntakeLoad ON).
 gs_log "habilitando tools de carga en el API del slot (catalog-load + intake-load) ..."
+t0=$(date +%s)
 ssh "$PM_REMOTE_SSH" "mkdir -p ~/goldenslice-bin" >/dev/null
 rsync -az "$SELF_DIR/enable-tools.sh" "$PM_REMOTE_SSH:~/goldenslice-bin/enable-tools.sh" >/dev/null
 ssh "$PM_REMOTE_SSH" "zsh -lc 'bash ~/goldenslice-bin/enable-tools.sh $API_C $PLANNING_DB'" || gs_die "fallo habilitar los tools de carga"
+_gs_timing "enable-tools" "$t0"
 
 # helper: POST a un tool-job y poll a Completed (async 202 + jobId; GET /api/v1/jobs/{id})
 gs_run_job(){  # <path> <json-body-o-vacio> <label>
@@ -128,20 +158,30 @@ gs_run_job(){  # <path> <json-body-o-vacio> <label>
 # 5b) catalog-load Clean (11 catalogos Catalogs.* desde el golden Oracle) + intake-load Clean (insumo: 3 de
 #     convergencia + 6 de estrategia). SQL vacio => es carga inicial limpia, no reemplaza handcrafted.
 gs_log "catalog-load (clean) desde el golden Oracle ..."
+t0=$(date +%s)
 gs_run_job "/api/v1/tools/catalog-load" '{"clean":true}' "catalog-load" || gs_log "AVISO: catalog-load no completo limpio"
+_gs_timing "catalog-load" "$t0"
 gs_log "intake-load (clean) desde el golden Oracle ..."
+t0=$(date +%s)
 gs_run_job "/api/v1/tools/intake-load" "" "intake-load" || gs_log "AVISO: intake-load no completo limpio"
+_gs_timing "intake-load" "$t0"
 
 # 6) registrar el menu UBO (Administracion -> Operaciones Masivas + 7 paginas) en el golden Oracle. El .sql es
 #    idempotente (NOT EXISTS) y NO commitea: se agrega COMMIT. El menu (Site.Master -> WCF -> pge_ctrlpiso.MENU)
 #    lo sirve Oracle, no el SQL.
 gs_log "registrando el menu UBO (Operaciones Masivas) en el golden Oracle ..."
+t0=$(date +%s)
 ssh "$PM_REMOTE_SSH" "mkdir -p ~/goldenslice-bin" >/dev/null
 rsync -az "$SELF_DIR/insert-menu-operaciones-masivas.sql" "$PM_REMOTE_SSH:~/goldenslice-bin/menu-ubo.sql" >/dev/null
 on_intel "docker $ctx cp \$HOME/goldenslice-bin/menu-ubo.sql '$ORA_C:/tmp/menu-ubo.sql'"
 printf '@/tmp/menu-ubo.sql\nCOMMIT;\n' | on_intel "docker $ctx exec -i -e ORACLE_HOME='$OH' '$ORA_C' bash -c 'export PATH=\$ORACLE_HOME/bin:\$PATH; sqlplus -S system/oracle@localhost:1521/XE'" 2>/dev/null | tr -d '\r' | tail -12
+_gs_timing "menu-ubo" "$t0"
 
 # 7) reimprime el recuadro de acceso (URLs desde M1). El intake es MANUAL desde la app.
+t0=$(date +%s)
 make -C "$SIDECAR_DIR" e2e-url WT="$GS_PM_WT" 2>/dev/null || true
+_gs_timing "e2e-url" "$t0"
+_gs_timing "TOTAL" "$GS_START_EPOCH"
+gs_log "timing por fase persistido en $PM_TIMING_LOG"
 gs_log "goldenslice-up LISTO (slot $SLOT). SQL golden VACIO + catalogos/insumos cargados desde el golden Oracle; menu UBO registrado."
 gs_log "El intake RES se dispara MANUAL desde la app: http://localhost:$(( 18100 + SLOT ))/ProgramaMaestroLN/ (OrdenesNuevasCargar_LN). Reimprime URL: make e2e-url WT=$GS_PM_WT"
