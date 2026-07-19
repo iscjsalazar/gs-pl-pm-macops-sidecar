@@ -595,13 +595,16 @@ wt_up_api() {  # uso: wt_up_api <password>
   # FeatureManagement__FlagCacheTtlSeconds=0 desactiva el caché en-proceso del lector de flags (default prod
   # 45 s): en el slot un flag fijado por UPDATE SQL directo se ve en la lectura siguiente, dando determinismo
   # a los tests de API física con flag (I3/I4/I8). Se inyecta en TODO slot, no solo con Oracle activo.
+  # PM_WT_API_EXTRA_ENV (I6-2): env extra opcional (cadena de flags -e ... ya escapada) inyectado en la unica
+  # recreacion del API. Vacio por default (${PM_WT_API_EXTRA_ENV:-} expande a nada) => el docker create es
+  # funcionalmente identico al baseline para toda otra sesion. goldenslice-up lo usa para nacer con Tools ON.
   on_intel "docker $ctx rm -f '$cname' >/dev/null 2>&1; \
     docker $ctx create --name '$cname' --network '$PM_SHARED_SQL_NETWORK' -p '$PM_API_PORT:8080' \
       -e ASPNETCORE_ENVIRONMENT=IntegrationTest \
       -e ConnectionStrings__Planning='$cs' -e ConnectionStrings__Ln='$ln' \
       -e ServiceBus__ConnectionString='$sbcs' -e ServiceBus__SubscriptionPrefix='$WT_SB_PREFIX' \
       -e FeatureManagement__FlagCacheTtlSeconds=0 \
-      -e Parity__LegacySource='$psrc'$oracle_env $(pm_parity_env_flags) '$img' >/dev/null \
+      -e Parity__LegacySource='$psrc'$oracle_env $(pm_parity_env_flags) ${PM_WT_API_EXTRA_ENV:-} '$img' >/dev/null \
     && docker $ctx network connect '${PM_WT_BUS_PROJECT}_default' '$cname'$oracle_net \
     && docker $ctx start '$cname' >/dev/null" \
     || { wt_die "fallo el create/run del contenedor de la API"; return 1; }

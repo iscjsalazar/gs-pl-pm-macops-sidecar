@@ -82,6 +82,25 @@ _gs_timing "worktrees" "$t0"
 LEGACY_SRC="$WORKTREES/$GS_LEGACY_WT"
 [ -f "$LEGACY_SRC/ProgramaMaestroPT.sln" ] || gs_die "el worktree legacy '$LEGACY_SRC' no trae ProgramaMaestroPT.sln"
 
+# I6 (colapso 3x->1x del API): en corrida TIBIA el slot ya vive en el registro, asi que la LN golden y las Tools
+# son computables ANTES de la fase 2. Pre-resolverlo permite que la UNICA recreacion (fase 2) nazca con el env
+# FINAL (LN golden + Tools ON), volviendo redundantes la recreacion interna de e2e-up y la de enable-tools.
+# FALLBACK FRIO: si el slot aun no existe (SLOT_PRE vacio), GS_COLLAPSE=0 y la ruta actual queda intacta (3x).
+SLOT_PRE="$(wt_slot_lookup "$GS_PM_WT")"
+if [ -n "$SLOT_PRE" ]; then
+  export PM_WT_LN_DB="pm_gs_ln_wt${SLOT_PRE}"          # (a) nace apuntando a la LN golden => la recreacion (b) sobra
+  PLANNING_DB_PRE="pm_planning_wt${SLOT_PRE}"
+  # Las 9 Tools__* que enable-tools.sh (fase 5a) inyectaba en una 3a recreacion; ahora viajan en la recreacion (a)
+  # via el passthrough PM_WT_API_EXTRA_ENV de wt_up_api. Valores entre comillas simples: el shell remoto de on_intel
+  # los separa como los -e hermanos (oracle_env/pm_parity_env_flags). Espeja enable-tools.sh:22-32.
+  export PM_WT_API_EXTRA_ENV="-e Tools__CatalogLoad__Enabled='true' -e Tools__CatalogLoad__AllowedServers__0='sqlserver,1433' -e Tools__CatalogLoad__AllowedServers__1='sqlserver' -e Tools__CatalogLoad__AllowedDatabases__0='${PLANNING_DB_PRE}' -e Tools__IntakeLoad__Enabled='true' -e Tools__IntakeLoad__CleanLoad='true' -e Tools__IntakeLoad__AllowedServers__0='sqlserver,1433' -e Tools__IntakeLoad__AllowedServers__1='sqlserver' -e Tools__IntakeLoad__AllowedDatabases__0='${PLANNING_DB_PRE}'"
+  GS_COLLAPSE=1
+  gs_log "colapso TIBIO activo: slot $SLOT_PRE pre-resuelto => LN golden ($PM_WT_LN_DB) + Tools ON en la unica recreacion (fase 2)"
+else
+  GS_COLLAPSE=0
+  gs_log "corrida FRIA: slot aun no asignado; ruta actual (3 recreaciones del API)"
+fi
+
 # 2) provisiona el slot (backend + Oracle propio). El slot se auto-asigna; se deriva del registro.
 gs_log "wt-up (slot + Oracle) para $GS_PM_WT ..."
 t0=$(date +%s)
@@ -115,7 +134,11 @@ _gs_timing "goldenslice-seed" "$t0"
 #    abortar goldenslice-up: el objetivo es dejar el ambiente ARRIBA con URLs para validar en vivo.
 gs_log "e2e-up con LN golden ($LN_GS_DB) y SQL VACIO: recrea API + frontend + flag ..."
 t0=$(date +%s)
-PM_WT_LN_DB="$LN_GS_DB" make -C "$SIDECAR_DIR" e2e-up WT="$GS_PM_WT" LEGACYSRC="$LEGACY_SRC" \
+# En el colapso (GS_COLLAPSE=1): PM_E2E_SKIP_WTUP=1 evita la recreacion (b) redundante del API (el backend+Oracle
+# ya viven desde la fase 2) y PM_E2E_SKIP_SMOKE=1 salta el smoke de paridad (el ambiente queda arriba; el smoke se
+# corre aparte con 'make e2e-smoke'). Ambos default 0 en frio => e2e-up sin cambio.
+PM_WT_LN_DB="$LN_GS_DB" PM_E2E_SKIP_WTUP="${GS_COLLAPSE:-0}" PM_E2E_SKIP_SMOKE="${GS_COLLAPSE:-0}" \
+  make -C "$SIDECAR_DIR" e2e-up WT="$GS_PM_WT" LEGACYSRC="$LEGACY_SRC" \
   || gs_log "AVISO: e2e-up salio con codigo != 0 (revisa el smoke arriba); el ambiente puede estar arriba: usa 'make e2e-url WT=$GS_PM_WT'"
 _gs_timing "e2e-up" "$t0"
 
@@ -127,12 +150,19 @@ API_PORT="$(on_intel "docker $ctx port '$API_C' 8080/tcp 2>/dev/null" 2>/dev/nul
 [ -n "$API_PORT" ] || gs_die "no se resolvio el puerto publicado del API $API_C"
 
 # 5a) habilitar los tools dev de carga (recrea el API preservando env/redes + Tools:CatalogLoad/IntakeLoad ON).
-gs_log "habilitando tools de carga en el API del slot (catalog-load + intake-load) ..."
-t0=$(date +%s)
-ssh "$PM_REMOTE_SSH" "mkdir -p ~/goldenslice-bin" >/dev/null
-rsync -az "$SELF_DIR/enable-tools.sh" "$PM_REMOTE_SSH:~/goldenslice-bin/enable-tools.sh" >/dev/null
-ssh "$PM_REMOTE_SSH" "zsh -lc 'bash ~/goldenslice-bin/enable-tools.sh $API_C $PLANNING_DB'" || gs_die "fallo habilitar los tools de carga"
-_gs_timing "enable-tools" "$t0"
+# I6-4: en el colapso las Tools ya viajaron en la unica recreacion (fase 2) via PM_WT_API_EXTRA_ENV, asi que esta
+# 3a recreacion es redundante y se OMITE (registra enable-tools|0 para que la tabla de tiempos siga completa).
+if [ "${GS_COLLAPSE:-0}" = 1 ]; then
+  gs_log "enable-tools OMITIDO (colapso): las Tools ya viajaron en la unica recreacion (fase 2)"
+  _gs_timing "enable-tools" "$(date +%s)"
+else
+  gs_log "habilitando tools de carga en el API del slot (catalog-load + intake-load) ..."
+  t0=$(date +%s)
+  ssh "$PM_REMOTE_SSH" "mkdir -p ~/goldenslice-bin" >/dev/null
+  rsync -az "$SELF_DIR/enable-tools.sh" "$PM_REMOTE_SSH:~/goldenslice-bin/enable-tools.sh" >/dev/null
+  ssh "$PM_REMOTE_SSH" "zsh -lc 'bash ~/goldenslice-bin/enable-tools.sh $API_C $PLANNING_DB'" || gs_die "fallo habilitar los tools de carga"
+  _gs_timing "enable-tools" "$t0"
+fi
 
 # helper: POST a un tool-job y poll a Completed (async 202 + jobId; GET /api/v1/jobs/{id})
 gs_run_job(){  # <path> <json-body-o-vacio> <label>
