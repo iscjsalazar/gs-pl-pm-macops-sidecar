@@ -482,8 +482,17 @@ cmd_up(){
 
   # La via E2E SIEMPRE enciende el Oracle del slot: el camino con flag OFF (PGE950RT) escribe en ControlPiso y
   # un Oracle compartido contaminaria a las demas sesiones.
-  elog "[1/7] backend + Oracle por slot (wt-up WT=$WT ORACLE=1) ..."
-  make -C "$BASE_DIR" wt-up WT="$WT" ORACLE=1 || edie "fallo wt-up"
+  # I6-3/I7-A: PM_E2E_SKIP_WTUP=1 omite este wt-up interno cuando el backend+Oracle del slot ya los levanto una
+  # fase previa (colapso goldenslice: la fase 2 ya corrio 'make wt-up ORACLE=1'). Re-invocarlo aqui recrea el API
+  # una 2a vez de forma redundante. Es seguro omitirlo: e2e_slot lee el registro (wt_slot_lookup) y e2e_api_port
+  # lee el puerto publicado del contenedor YA VIVO; ninguno exige que wt-up acabe de correr. Inerte por default
+  # (PM_E2E_SKIP_WTUP ausente => 0 => rama else => wt-up identico al baseline).
+  if [ "${PM_E2E_SKIP_WTUP:-0}" = 1 ]; then
+    elog "[1/7] wt-up OMITIDO (PM_E2E_SKIP_WTUP=1): reusa el backend+Oracle ya vivos del slot"
+  else
+    elog "[1/7] backend + Oracle por slot (wt-up WT=$WT ORACLE=1) ..."
+    make -C "$BASE_DIR" wt-up WT="$WT" ORACLE=1 || edie "fallo wt-up"
+  fi
   e2e_slot
   e2e_derive_front_ports
   E2E_ORACLE_PORT="$(e2e_oracle_port)"
@@ -531,8 +540,18 @@ cmd_up(){
   elog "[6/7] precondicion de red (e2e-net-check) ..."
   PM_API_PORT="$api_port" "$BASE_DIR/scripts/e2e-net-check.sh" || ewarn "net-check con FAIL (continuo; revisa arriba)"
 
-  elog "[7/7] smoke E2E funcional (legacy-driven) ..."
-  cmd_smoke; local smoke_rc=$?
+  # I7-B: PM_E2E_SKIP_SMOKE=1 omite el smoke de paridad, que puede colgarse hasta 180 s (poll con timeout en
+  # cmd_smoke). En el colapso goldenslice el objetivo es dejar el ambiente ARRIBA con URLs; el smoke sigue
+  # disponible aparte como 'make e2e-smoke'. Omitido => smoke_rc=0 (e2e-up no aborta por el). Inerte por default
+  # (PM_E2E_SKIP_SMOKE ausente => 0 => corre el smoke como en el baseline).
+  local smoke_rc
+  if [ "${PM_E2E_SKIP_SMOKE:-0}" = 1 ]; then
+    elog "[7/7] smoke E2E OMITIDO (PM_E2E_SKIP_SMOKE=1): el ambiente queda arriba; corre 'make e2e-smoke' aparte"
+    smoke_rc=0
+  else
+    elog "[7/7] smoke E2E funcional (legacy-driven) ..."
+    cmd_smoke; smoke_rc=$?
+  fi
 
   case "$FLAG_FINAL" in on|1|ON) e2e_set_flag 1 ;; off|0|OFF) e2e_set_flag 0 ;; esac
   e2e_summary "$api_port"
