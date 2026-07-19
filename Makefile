@@ -345,6 +345,12 @@ goldenslice-verify: ; SLOT="$(SLOT)" $(WT_ENV) bash ./goldenslice/verify-slot.sh
 goldenslice-up: override TARGET := intel
 goldenslice-up: REMOTE := macdata
 goldenslice-up: ; $(PM_ENV) bash ./goldenslice/up.sh
+# goldenslice-relaunch (ac6): relanza AMBAS apps (pm-api + legado) con la ultima origin/develop SIN re-sembrar.
+# Reusa el Oracle/LN golden y la BD planning ya cargada por un goldenslice-up previo; exige slot pre-existente.
+# Ver goldenslice/relaunch.sh.
+goldenslice-relaunch: override TARGET := intel
+goldenslice-relaunch: REMOTE := macdata
+goldenslice-relaunch: ; $(PM_ENV) bash ./goldenslice/relaunch.sh
 
 # --- aprovisionamiento por worktree (wt-*): intel-only (SQL compartido + bus en macdata) ---
 # 'override TARGET' fuerza intel (el SQL compartido vive en el docker de macdata); REMOTE default macdata
