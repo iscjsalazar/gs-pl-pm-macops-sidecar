@@ -70,6 +70,16 @@ SLOT="$(wt_slot_lookup "$GS_PM_WT")"
 LN_GS_DB="pm_gs_ln_wt${SLOT}"
 gs_log "slot asignado: $SLOT -> LN golden aislada = $LN_GS_DB"
 
+# 2.5) regenera goldenslice/build (CREATE + loaders + CSV concatenados) desde el extract de PROD. El build es
+#      gitignored (datos reales) y se regenera SIEMPRE, de modo que cualquier cambio del extract (p. ej. un
+#      catalogo re-extraido) fluye al golden sin paso manual. Corre en la M1 (solo lee CSV/DDL y escribe SQL/CSV;
+#      sin Docker). seed-slot.sh consume $SELF_DIR/build; el default de su SRC coincide con GS_SRC.
+GS_SRC="${GS_SRC:-$WRAPPER_DIR/gs-pl-pm-macops-sidecar/artifacts/prod-extract-260718}"
+command -v python3 >/dev/null 2>&1 || gs_die "python3 no disponible (requerido por generate.py)"
+[ -d "$GS_SRC/oracle" ] || gs_die "extract no encontrado: $GS_SRC (falta oracle/)"
+gs_log "regenerando goldenslice/build desde el extract ($GS_SRC) ..."
+python3 "$SELF_DIR/generate.py" --src "$GS_SRC" --out "$SELF_DIR/build" >/dev/null || gs_die "generate.py fallo"
+
 # 3) siembra la golden slice (Oracle multi-owner + recompila + LN aislada). Idempotente.
 gs_log "goldenslice-seed SLOT=$SLOT (Oracle golden + LN aislada) ..."
 make -C "$SIDECAR_DIR" goldenslice-seed SLOT="$SLOT" || gs_die "goldenslice-seed fallo"
