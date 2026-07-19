@@ -83,10 +83,15 @@ if do_ora; then t0=$(date +%s); for owner in $ORA_OWNERS; do
   on_intel "docker $ctx cp \$HOME/$STAGE/oracle/$owner/. '$ORA_C:/goldenslice/$owner/'"
   printf '@/goldenslice/%s/00-create-user.sql\n' "$owner" | ora_sql | tr -d '\r' | tail -2
   printf '@/goldenslice/%s/01-create-tables.sql\n' "$owner" | ora_sql >/dev/null 2>&1 || true
+  # direct=true (direct-path): las tablas de la slice son heap sin PK/indices/constraints/triggers (ver
+  # 01-create-tables.sql), por lo que el direct-path carga por encima del high-water mark sin rebuild de indices
+  # ni validaciones diferidas. La expresion SQL de conversion de fechas ("TO_DATE(SUBSTR(:col,1,19),...)") que
+  # emite generate.py referencia solo el bind de su propio campo, caso que el direct-path de Oracle XE 11.2 SI
+  # acepta (verificado en slot 2: log "Path used: Direct" con las columnas DATE cargadas y 0 data errors).
   on_intel "docker $ctx exec -i -e ORACLE_HOME='$OH' -e NLS_DATE_FORMAT='YYYY-MM-DD HH24:MI:SS' '$ORA_C' bash -c '
     export PATH=\$ORACLE_HOME/bin:\$PATH; cd /goldenslice/$owner; ok=0; err=0
     for ctl in *.ctl; do
-      sqlldr userid=system/oracle@localhost:1521/XE control=\"\$ctl\" log=\"\${ctl%.ctl}.log\" bad=\"\${ctl%.ctl}.bad\" errors=100000 direct=false silent=header,feedback >/dev/null 2>&1 || true
+      sqlldr userid=system/oracle@localhost:1521/XE control=\"\$ctl\" log=\"\${ctl%.ctl}.log\" bad=\"\${ctl%.ctl}.bad\" errors=100000 direct=true silent=header,feedback >/dev/null 2>&1 || true
       n=\$(grep -oE \"[0-9]+ Rows successfully loaded\" \"\${ctl%.ctl}.log\" | grep -oE \"^[0-9]+\") ; ok=\$((ok + \${n:-0}))
     done
     echo \"[goldenslice] $owner: \$ok filas cargadas (sqlldr)\"'"
