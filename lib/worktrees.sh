@@ -929,7 +929,15 @@ _cmd_wt_up_locked() {
   # IntegrationTest => !Production): crea la BD por-slot y el DDL de todos los schemas. Recien entonces
   # corre el seed data-only de la BD de producto (los loaders requieren las tablas ya creadas por EF).
   wt_up_api "$pw" || return 1
-  wt_seed_planning "$pw" || return 1
+  # PM_WT_SKIP_PLANNING_SEED=1 OMITE el seed data-only handcrafted: la BD queda con el esquema EF pero VACIA.
+  # Inerte por default (=sembrar como hoy); SOLO 'make goldenslice-up' lo enciende para arrancar el SQL vacio y
+  # poblar los catalogos desde el golden Oracle (catalog-load/intake-load), fiel a un deploy limpio. No afecta a
+  # ningun otro slot/sesion (que no fija la variable).
+  if [ "${PM_WT_SKIP_PLANNING_SEED:-0}" = "1" ]; then
+    wt_log "PM_WT_SKIP_PLANNING_SEED=1: se OMITE el seed data-only de '$PM_PLANNING_DB' (arranca VACIA; el llamador la puebla por catalog-load/intake-load)."
+  else
+    wt_seed_planning "$pw" || return 1
+  fi
 
   echo ""
   echo "[wt] worktree '$folder' (slot $slot) ARRIBA:"

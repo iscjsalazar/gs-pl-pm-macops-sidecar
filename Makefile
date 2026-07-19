@@ -332,6 +332,20 @@ e2e-oracle-counts: override TARGET := intel
 e2e-oracle-counts: override REMOTE := macdata
 e2e-oracle-counts: ; $(E2E_ORCH_ENV) ./scripts/e2e.sh oracle-counts
 
+# --- golden slice: siembra datos reales de PROD (ventana FY2026 sem 18-25) en un slot aprovisionado ---
+# goldenslice-seed SLOT=<N>: carga bulk Oracle (owners como esquemas) + LN per-slot aislada desde build/ (D20).
+goldenslice-seed: override TARGET := intel
+goldenslice-seed: REMOTE := macdata
+goldenslice-seed: ; SLOT="$(SLOT)" $(WT_ENV) bash ./goldenslice/seed-slot.sh
+goldenslice-verify: override TARGET := intel
+goldenslice-verify: REMOTE := macdata
+goldenslice-verify: ; SLOT="$(SLOT)" $(WT_ENV) bash ./goldenslice/verify-slot.sh
+# goldenslice-up (D18): ambiente E2E completo sembrado con la golden slice, sin params. up.sh se auto-configura
+# (sourcea load_env) y orquesta wt-up + goldenslice-seed + e2e-up (LN golden). Ver goldenslice/up.sh.
+goldenslice-up: override TARGET := intel
+goldenslice-up: REMOTE := macdata
+goldenslice-up: ; $(PM_ENV) bash ./goldenslice/up.sh
+
 # --- aprovisionamiento por worktree (wt-*): intel-only (SQL compartido + bus en macdata) ---
 # 'override TARGET' fuerza intel (el SQL compartido vive en el docker de macdata); REMOTE default macdata
 # (override por linea de comando permitido si el alias SSH difiere).
