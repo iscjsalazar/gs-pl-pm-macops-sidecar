@@ -16,3 +16,7 @@
 
 # Autounattend generado a partir del template (contiene credenciales del guest)
 /packer/Autounattend.xml
+
+# Salida generada del generador de la golden slice: CREATE/loaders + CSV concatenados con DATOS DE PROD
+# (se regenera con 'python3 goldenslice/generate.py'); NUNCA se versiona (leak de datos reales).
+/goldenslice/build/
