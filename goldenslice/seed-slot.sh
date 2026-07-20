@@ -84,7 +84,9 @@ _prev_fp(){ printf '%s\n' "$prev_marker" | awk -F'\t' -v u="$1" '$1==u{print $2;
 # (y un destino vacio es una ALARMA, no un estado fiel). Si el sentinela no ve datos, se re-siembra pese al fp.
 oracle_has_data=0
 if do_ora; then
-  ora_rows="$(printf 'SET HEADING OFF FEEDBACK OFF PAGESIZE 0 VERIFY OFF;\nSELECT COUNT(*) FROM PGE_CTRLPISO.TIPGE950;\nEXIT;\n' | ora_sql 2>/dev/null | tr -d '\r' | grep -oE '^[0-9]+' | head -1 || true)"
+  # sqlplus justifica el COUNT(*) a la derecha (espacios a la izquierda): se toleran con '^[[:space:]]*' y luego se
+  # limpian. El ancla '^' rechaza lineas de error (ORA-#####) para no confundir sus digitos con un conteo real.
+  ora_rows="$(printf 'SET HEADING OFF FEEDBACK OFF PAGESIZE 0 VERIFY OFF;\nSELECT COUNT(*) FROM PGE_CTRLPISO.TIPGE950;\nEXIT;\n' | ora_sql 2>/dev/null | tr -d '\r' | grep -oE '^[[:space:]]*[0-9]+' | tr -d '[:space:]' | head -1 || true)"
   if [ -n "$ora_rows" ] && [ "$ora_rows" -gt 0 ] 2>/dev/null; then oracle_has_data=1; fi
 fi
 ln_has_db=0
