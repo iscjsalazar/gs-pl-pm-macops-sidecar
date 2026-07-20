@@ -13,8 +13,9 @@
 #      PM_WT_SKIP_PLANNING_SEED=1 (no re-siembra planning) y el env FINAL del golden exportado (LN golden +
 #      Tools ON), como el colapso de I6. NO llama goldenslice-seed: el Oracle/LN golden y la BD planning
 #      persisten intactos en el motor compartido.
-#   4) recompila y redespliega el legado con la ultima develop via 'make e2e-up' con PM_E2E_FORCE=1 (fuerza
-#      legacy-build+deploy: toma el codigo nuevo) + PM_E2E_SKIP_WTUP=1 (el API ya lo recreo el paso 3) +
+#   4) recompila y redespliega el legado con la ultima develop via 'make e2e-up' con PM_E2E_FORCE condicionado al
+#      SHA del worktree legacy (I4: fuerza legacy-build+deploy solo si el legado cambio, o FORCE=1 manual; sin cambio
+#      delega el skip por health==200 a legacy.sh) + PM_E2E_SKIP_WTUP=1 (el API ya lo recreo el paso 3) +
 #      PM_E2E_SKIP_SMOKE=1 (ambiente arriba; smoke aparte con 'make e2e-smoke'). e2e-up reactiva el flag
 #      carga-backend/RES e imprime las URLs.
 #   5) reimprime el recuadro de acceso (URLs desde M1). NO seed, NO catalog/intake-load, NO menu (ya registrado).
@@ -110,13 +111,18 @@ gs_warn_catalog_migrations(){  # <pm_path> <head_before> <head_after>
 
 t0=$(date +%s)
 PM_PATH="$WORKTREES/$GS_PM_WT"
+LEGACY_PATH="$WORKTREES/$GS_LEGACY_WT"
 PM_HEAD_BEFORE="$(git -C "$PM_PATH" rev-parse HEAD 2>/dev/null || echo '')"
+# I4: SHA del worktree legacy ANTES del checkout (espeja PM_HEAD_BEFORE), para forzar el rebuild/redeploy del legado
+# SOLO si su codigo cambia (ver la fase 4).
+LEGACY_HEAD_BEFORE="$(git -C "$LEGACY_PATH" rev-parse HEAD 2>/dev/null || echo '')"
 gs_ensure_worktree "$PM_REPO" "$GS_PM_WT"
 gs_ensure_worktree "$LEGACY_REPO" "$GS_LEGACY_WT"
 _gs_timing "worktrees" "$t0"
 LEGACY_SRC="$WORKTREES/$GS_LEGACY_WT"
 [ -f "$LEGACY_SRC/ProgramaMaestroPT.sln" ] || gs_die "el worktree legacy '$LEGACY_SRC' no trae ProgramaMaestroPT.sln"
 PM_HEAD_AFTER="$(git -C "$PM_PATH" rev-parse HEAD 2>/dev/null || echo '')"
+LEGACY_HEAD_AFTER="$(git -C "$LEGACY_PATH" rev-parse HEAD 2>/dev/null || echo '')"
 gs_warn_catalog_migrations "$PM_PATH" "$PM_HEAD_BEFORE" "$PM_HEAD_AFTER"
 gs_log "R4: el relaunch reusa los catalogos ya cargados; NO los recarga. Si cambiaste el schema de catalogos, re-corre 'make goldenslice-up'."
 
@@ -191,14 +197,28 @@ gs_ensure_login_catalogs
 _gs_timing "ensure-login-catalogs" "$t0"
 
 # 4) recompila y redespliega el legado con la ultima develop, reactiva el flag e imprime URLs. e2e-up con:
-#    PM_E2E_FORCE=1      => fuerza legacy-build+deploy (toma el codigo nuevo; no confia en el health-200-skip);
+#    PM_E2E_FORCE        => I4: 1 SOLO si el SHA del worktree legacy cambio (before!=after) o el usuario paso FORCE=1;
+#                          0 => se DELEGA el skip por health==200 a legacy.sh (stage_build/deploy): guest sano (health
+#                          200) omite el build, guest que no responde 200 compila igual. Asi un relaunch sin cambio de
+#                          legado no repaga build+deploy, pero un legado nuevo o un guest caido SI se recompila. El
+#                          skip por wiring divergente lo cubre e2e.sh (cmd_up [3b/7] re-deploya forzado) => D7 cubierto;
 #    PM_E2E_SKIP_WTUP=1  => el API ya lo recreo el paso 3 (evita una 2a recreacion redundante, colapso I6-3);
 #    PM_E2E_SKIP_SMOKE=1 => salta el smoke de paridad (el ambiente queda arriba; smoke aparte 'make e2e-smoke').
 #    PM_WT_LN_DB se reexporta por simetria con up.sh (inerte aqui: con SKIP_WTUP e2e-up no recrea el API).
 #    El smoke saltado y un rc != 0 no abortan: el objetivo es dejar ambos apps ARRIBA con URLs.
-gs_log "e2e-up (legacy rebuild+redeploy FORCE, sin re-recrear API, sin smoke): toma la develop nueva del legado + reactiva flag + URLs ..."
+GS_LEGACY_FORCE=0
+if [ "${FORCE:-0}" = "1" ]; then
+  GS_LEGACY_FORCE=1
+  gs_log "FORCE=1 (manual): se fuerza rebuild/redeploy del legado"
+elif [ -n "$LEGACY_HEAD_BEFORE" ] && [ -n "$LEGACY_HEAD_AFTER" ] && [ "$LEGACY_HEAD_BEFORE" != "$LEGACY_HEAD_AFTER" ]; then
+  GS_LEGACY_FORCE=1
+  gs_log "SHA legacy cambio ($LEGACY_HEAD_BEFORE -> $LEGACY_HEAD_AFTER): se fuerza rebuild/redeploy del legado"
+else
+  gs_log "SHA legacy sin cambio (${LEGACY_HEAD_AFTER:-<n/d>}): NO se fuerza; legacy.sh omite el build si el guest da health 200, compila si no"
+fi
+gs_log "e2e-up (legacy rebuild+redeploy FORCE=$GS_LEGACY_FORCE, sin re-recrear API, sin smoke): reactiva flag + URLs ..."
 t0=$(date +%s)
-PM_WT_LN_DB="$LN_GS_DB" PM_E2E_FORCE=1 PM_E2E_SKIP_WTUP=1 PM_E2E_SKIP_SMOKE=1 \
+PM_WT_LN_DB="$LN_GS_DB" PM_E2E_FORCE=$GS_LEGACY_FORCE PM_E2E_SKIP_WTUP=1 PM_E2E_SKIP_SMOKE=1 \
   make -C "$SIDECAR_DIR" e2e-up WT="$GS_PM_WT" LEGACYSRC="$LEGACY_SRC" \
   || gs_log "AVISO: e2e-up salio con codigo != 0 (revisa arriba); el ambiente puede estar arriba: usa 'make e2e-url WT=$GS_PM_WT'"
 _gs_timing "e2e-up" "$t0"
