@@ -31,6 +31,8 @@ WRAPPER_DIR="$(cd "$SELF_DIR/../../.." && pwd)"
 . "$SIDECAR_DIR/lib/common.sh"
 # shellcheck source=/dev/null
 . "$SIDECAR_DIR/lib/worktrees.sh"
+# shellcheck source=/dev/null
+. "$SELF_DIR/lib.sh"     # gs_run_job (helper compartido con up.sh)
 load_env
 
 # El slot del worktree pm es parametrizable por WT= (Make lo propaga via PM_ENV); GS_PM_WT gana si se fija
@@ -132,6 +134,61 @@ gs_log "recrea pm-api (wt-up ORACLE=1) contra LN golden $LN_GS_DB + planning $PL
 t0=$(date +%s)
 make -C "$SIDECAR_DIR" wt-up WT="$GS_PM_WT" ORACLE=1 || gs_die "wt-up (recreate API) fallo"
 _gs_timing "wt-up" "$t0"
+
+# 3.5) asegura las tablas de estrategia del login pobladas (ac2). relaunch REUSA la BD planning sin recargar
+#      catalogos (por diseno: es goldenslice-up MENOS los loaders); si esa BD reusada trae VACIAS las tablas de
+#      estrategia del login (BD casi fresca, reseteo por migracion de schema de Catalogs, estado parcial previo),
+#      el login del legado rompe ("Acceso denegado"/imagen null). Se PRUEBAN los conteos de Catalogs.Parameters y
+#      Catalogs.FiscalCalendar en la BD planning reusada: si ambas > 0 se continua (fast-path, preserva el "sin
+#      reseed"); si alguna == 0 se RE-WARM con intake-load (WarmAllAsync repuebla las 6 strategy tables del login,
+#      incluye Parameters/FiscalCalendar) SIN re-sembrar LN/orders ni el resto de la BD planning; si tras el
+#      re-warm siguen vacias, FALLA ruidoso. Un relaunch NUNCA termina "OK" dejando el login roto. Backstop de R4:
+#      un cambio de schema de Catalogs que dejo las tablas vacias se auto-cura aqui, no solo se avisa.
+
+# Conteo escalar de una tabla de la BD planning reusada, por el motor SQL compartido (mismo puente que wt-sql). La
+# BD se fija por el flag -d de sqlcmd (no 'USE'): evita el mensaje "Changed database context" que ensuciaria el
+# escalar. La tabla la controla el llamador (literales cualificados), sin riesgo de inyeccion.
+_gs_planning_count(){  # <pw> <tabla-cualificada>
+  wt_shared_query "$1" "SET NOCOUNT ON; SELECT COUNT(*) FROM $2" "-h -1 -W -d $PLANNING_DB" 2>/dev/null | tr -d ' \r\n'
+}
+
+# gs_ensure_login_catalogs: probe -> fast-path / re-warm / fail-loud sobre la BD planning reusada ($PLANNING_DB).
+gs_ensure_login_catalogs(){
+  local pw params cal ctx API_C API_PORT
+  pw="$(wt_shared_sql_password)" || gs_die "no se resolvio el SA del SQL compartido para probar los catalogos del login"
+  wt_shared_sql_check || gs_die "el SQL compartido no esta disponible: no se pueden probar los catalogos del login"
+  params="$(_gs_planning_count "$pw" "Catalogs.Parameters" || true)"
+  cal="$(_gs_planning_count "$pw" "Catalogs.FiscalCalendar" || true)"
+  case "$params" in ''|*[!0-9]*) params=0 ;; esac
+  case "$cal" in ''|*[!0-9]*) cal=0 ;; esac
+  if [ "$params" -gt 0 ] && [ "$cal" -gt 0 ]; then
+    gs_log "catalogos del login ya poblados (Parameters=$params, FiscalCalendar=$cal); relanzando sin recargar"
+    return 0
+  fi
+  gs_log "AVISO: catalogos del login VACIOS o incompletos (Parameters=$params, FiscalCalendar=$cal); re-warm con intake-load (sin re-sembrar LN/orders) ..."
+  # Tools de carga: el API recreado en el paso 3 nace con Tools:CatalogLoad/IntakeLoad ON (PM_WT_API_EXTRA_ENV),
+  # asi que NO hace falta re-habilitarlas; se corre intake-load directo. intake-load (clean) -> WarmAllAsync
+  # repuebla las 6 strategy tables del login (incluye Parameters/FiscalCalendar) desde el golden Oracle del slot.
+  ctx="$(remote_docker_ctx)"
+  API_C="pm-wt${SLOT}-api"
+  API_PORT="$(on_intel "docker $ctx port '$API_C' 8080/tcp 2>/dev/null" 2>/dev/null | head -1 | sed 's/.*://' | tr -d '\r')"
+  [ -n "$API_PORT" ] || gs_die "re-warm: no se resolvio el puerto publicado del API $API_C (revisa que wt-up recreo el pm-api)"
+  gs_run_job "/api/v1/tools/intake-load" "" "intake-load (re-warm)" || gs_log "AVISO: intake-load (re-warm) no completo limpio (revisa el golden Oracle / Tools)"
+  params="$(_gs_planning_count "$pw" "Catalogs.Parameters" || true)"
+  cal="$(_gs_planning_count "$pw" "Catalogs.FiscalCalendar" || true)"
+  case "$params" in ''|*[!0-9]*) params=0 ;; esac
+  case "$cal" in ''|*[!0-9]*) cal=0 ;; esac
+  if [ "$params" -gt 0 ] && [ "$cal" -gt 0 ]; then
+    gs_log "re-warm OK: catalogos del login poblados (Parameters=$params, FiscalCalendar=$cal)"
+    return 0
+  fi
+  gs_die "las tablas de catalogos del login quedaron VACIAS tras el re-warm (Parameters=$params, FiscalCalendar=$cal): revisa el Oracle golden del slot $SLOT ($API_C / pm-wt${SLOT}-oracle-1) o corre 'make goldenslice-up' para re-sembrar desde cero. Un relaunch no debe terminar OK con el login roto."
+}
+
+gs_log "asegura catalogos del login (Catalogs.Parameters/FiscalCalendar) en la BD planning reusada $PLANNING_DB ..."
+t0=$(date +%s)
+gs_ensure_login_catalogs
+_gs_timing "ensure-login-catalogs" "$t0"
 
 # 4) recompila y redespliega el legado con la ultima develop, reactiva el flag e imprime URLs. e2e-up con:
 #    PM_E2E_FORCE=1      => fuerza legacy-build+deploy (toma el codigo nuevo; no confia en el health-200-skip);

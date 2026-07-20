@@ -23,6 +23,8 @@ WRAPPER_DIR="$(cd "$SELF_DIR/../../.." && pwd)"
 . "$SIDECAR_DIR/lib/common.sh"
 # shellcheck source=/dev/null
 . "$SIDECAR_DIR/lib/worktrees.sh"
+# shellcheck source=/dev/null
+. "$SELF_DIR/lib.sh"     # gs_run_job (helper compartido con relaunch.sh)
 load_env
 
 GS_PM_WT="${GS_PM_WT:-gs_pm_goldenslice}"
@@ -164,26 +166,8 @@ else
   _gs_timing "enable-tools" "$t0"
 fi
 
-# helper: POST a un tool-job y poll a Completed (async 202 + jobId; GET /api/v1/jobs/{id})
-gs_run_job(){  # <path> <json-body-o-vacio> <label>
-  local path="$1" body="$2" label="$3" resp jid st i
-  if [ -n "$body" ]; then
-    resp="$(ssh "$PM_REMOTE_SSH" "curl -fsS -X POST http://127.0.0.1:$API_PORT$path -H 'Content-Type: application/json' -d '$body'" 2>/dev/null)"
-  else
-    resp="$(ssh "$PM_REMOTE_SSH" "curl -fsS -X POST http://127.0.0.1:$API_PORT$path" 2>/dev/null)"
-  fi
-  jid="$(printf '%s' "$resp" | sed -nE 's/.*"jobId"[": ]*"?([0-9a-fA-F-]{16,})"?.*/\1/p')"
-  [ -n "$jid" ] || { gs_log "AVISO: $label no devolvio jobId (resp: ${resp:-<vacio>})"; return 1; }
-  for i in $(seq 1 90); do
-    st="$(ssh "$PM_REMOTE_SSH" "curl -fsS http://127.0.0.1:$API_PORT/api/v1/jobs/$jid" 2>/dev/null | sed -nE 's/.*"currentStatus"[": ]*"([A-Za-z]+)".*/\1/p')"
-    case "$st" in
-      Completed) gs_log "$label -> Completed"; return 0 ;;
-      Failed|TimedOut) gs_log "AVISO: $label -> $st (revisa el job $jid)"; return 1 ;;
-    esac
-    sleep 2
-  done
-  gs_log "AVISO: $label no llego a Completed (job $jid)"; return 1
-}
+# helper gs_run_job (POST a un tool-job + poll a Completed): extraido a goldenslice/lib.sh y compartido con
+# relaunch.sh (sourceado arriba). Depende de API_PORT + PM_REMOTE_SSH, ya resueltos en este punto.
 
 # 5b) catalog-load Clean (11 catalogos Catalogs.* desde el golden Oracle) + intake-load Clean (insumo: 3 de
 #     convergencia + 6 de estrategia). SQL vacio => es carga inicial limpia, no reemplaza handcrafted.
