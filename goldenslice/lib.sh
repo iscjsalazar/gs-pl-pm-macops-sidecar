@@ -26,3 +26,59 @@ gs_run_job(){  # <path> <json-body-o-vacio> <label>
   done
   gs_log "AVISO: $label no llego a Completed (job $jid)"; return 1
 }
+
+# ---------------------------------------------------------------------------
+# Primitivas compartidas del hilo 260720-0719 (I7 gate de loaders / I9 timeout portable). Como gs_run_job, las
+# funciones dependen de variables que el script consumidor resuelve en tiempo de EJECUCION (API_PORT, PLANNING_DB,
+# PM_REMOTE_SSH, SLOT). No se ejecuta nada al sourcear: solo definiciones.
+# ---------------------------------------------------------------------------
+
+# Las 6 tablas del schema Catalogs gobernadas por la estrategia de lectura del login (CatalogTableMap.All del
+# pm-api): intake-load (WarmAllAsync) las repuebla desde el golden Oracle. Nombres verbatim del write model EF.
+# Fuente: src/Modules/Catalogs/03.Infrastructure/Strategy/CatalogTableMap.cs.
+GS_STRATEGY_TABLES="Catalogs.Filters Catalogs.Parameters Catalogs.PlantFamilies Catalogs.FiscalCalendar Catalogs.EquivalentUnits Catalogs.ProductionLineRules"
+
+# Las 11 tablas de convergencia del schema Catalogs (CatalogsConvergenceDescriptors.All del pm-api): catalog-load
+# (clean) repuebla las 11; intake-load solo cubre 3, por lo que las 8 restantes EXIGEN catalog-load. Fuente:
+# src/Modules/Catalogs/03.Infrastructure/Convergence/CatalogsConvergenceDescriptors.cs.
+GS_CONVERGENCE_TABLES="Catalogs.WorkCenters Catalogs.OperationCalendars Catalogs.Operations Catalogs.MachineCalendars Catalogs.ManufacturingLines Catalogs.ManufacturingRoutes Catalogs.ManufacturingRouteOperations Catalogs.RelCpisoJscRules Catalogs.Machines Catalogs.CriticalFamilies Catalogs.WeeklyProgrammableDays"
+
+# gs_planning_count <pw> <planning_db> <tabla-cualificada>: conteo escalar de una tabla de la BD planning por el
+# motor SQL compartido (mismo puente que wt-sql). La BD se fija por -d (no 'USE') para no ensuciar el escalar con
+# el mensaje "Changed database context". La tabla la controla el llamador (literal cualificado); sin inyeccion.
+gs_planning_count(){  # <pw> <planning_db> <tabla>
+  wt_shared_query "$1" "SET NOCOUNT ON; SELECT COUNT(*) FROM $3" "-h -1 -W -d $2" 2>/dev/null | tr -d ' \r\n'
+}
+
+# gs_list_empty <pw> <planning_db> <tabla...>: imprime (una por linea) las tablas cuyo COUNT(*) es 0 o no se pudo
+# leer (tabla ausente por migracion, o error transitorio). Un conteo no numerico se trata como 0.
+gs_list_empty(){  # <pw> <planning_db> <tabla...>
+  local pw="$1" db="$2" t n; shift 2
+  for t in "$@"; do
+    n="$(gs_planning_count "$pw" "$db" "$t" || true)"
+    case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    if [ "$n" -le 0 ]; then printf '%s\n' "$t"; fi
+  done
+  return 0
+}
+
+# gs_run_bounded <segundos> <etiqueta> -- <cmd...>: corre <cmd> con un watchdog que lo mata si excede <segundos>
+# (macOS/zsh NO tiene 'timeout': patron background + watchdog + kill). Devuelve el rc del comando, o 124 si el
+# watchdog lo mato (convencion de timeout(1)). Un cuelgue produce fallo en <segundos>, nunca una fase de horas.
+# Invocar SIEMPRE en un condicional (if gs_run_bounded ...) para que set -e no aborte por el rc.
+gs_run_bounded(){  # <segundos> <etiqueta> -- <cmd...>
+  local secs="$1"; shift 2                 # descarta segundos + etiqueta
+  [ "${1:-}" = "--" ] && shift
+  "$@" &
+  local cmd_pid=$!
+  # watchdog: espera <secs> y, si el comando sigue vivo, lo termina (TERM y luego KILL de gracia).
+  ( sleep "$secs"; if kill -0 "$cmd_pid" 2>/dev/null; then kill -TERM "$cmd_pid" 2>/dev/null; sleep 2; kill -KILL "$cmd_pid" 2>/dev/null; fi ) &
+  local wd_pid=$!
+  local rc=0
+  wait "$cmd_pid" 2>/dev/null || rc=$?
+  kill "$wd_pid" 2>/dev/null || true       # el comando ya termino: retira el watchdog si sigue durmiendo
+  wait "$wd_pid" 2>/dev/null || true
+  # 143=128+SIGTERM, 137=128+SIGKILL: lo mato el watchdog -> normaliza a 124 (timeout)
+  if [ "$rc" = 143 ] || [ "$rc" = 137 ]; then return 124; fi
+  return "$rc"
+}
