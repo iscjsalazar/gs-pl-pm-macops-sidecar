@@ -166,16 +166,50 @@ API_PORT="$(on_intel "docker $ctx port '$API_C' 8080/tcp 2>/dev/null" 2>/dev/nul
 # helper gs_run_job (POST a un tool-job + poll a Completed): extraido a goldenslice/lib.sh y compartido con
 # relaunch.sh (sourceado arriba). Depende de API_PORT + PM_REMOTE_SSH, ya resueltos en este punto.
 
-# 5b) catalog-load Clean (11 catalogos Catalogs.* desde el golden Oracle) + intake-load Clean (insumo: 3 de
-#     convergencia + 6 de estrategia). SQL vacio => es carga inicial limpia, no reemplaza handcrafted.
-gs_log "catalog-load (clean) desde el golden Oracle ..."
-t0=$(date +%s)
-gs_run_job "/api/v1/tools/catalog-load" '{"clean":true}' "catalog-load" || gs_log "AVISO: catalog-load no completo limpio"
-_gs_timing "catalog-load" "$t0"
-gs_log "intake-load (clean) desde el golden Oracle ..."
-t0=$(date +%s)
-gs_run_job "/api/v1/tools/intake-load" "" "intake-load" || gs_log "AVISO: intake-load no completo limpio"
-_gs_timing "intake-load" "$t0"
+# 5b) I7: gate de loaders (resuelve RISK 7). Sondea (a) el marcador de seed de I6 (¿cambio el extract?) y (b) los
+#     conteos de planning (6 estrategia CatalogTableMap + 11 convergencia CatalogsConvergenceDescriptors). Si el
+#     seed NO cambio y planning esta poblada => SKIP de los loaders (re-run tibio, ac5). Si el extract cambio o
+#     falta poblar => corre los loaders DIRIGIDO por grupo vacio (en frio ambos vacios => ambos, como el flujo
+#     original: catalog-load Clean = 11 convergencia; intake-load Clean = 6 estrategia + 3 convergencia).
+seed_status="$(ssh "$PM_REMOTE_SSH" "cat ~/goldenslice-bin/seed-status-wt${SLOT} 2>/dev/null" || true)"
+seed_reseeded="$(printf '%s\n' "$seed_status" | sed -nE 's/^SEED_RESEEDED_COUNT=([0-9]+).*/\1/p' | head -1)"
+[ -n "$seed_reseeded" ] || seed_reseeded=1     # sin status legible => conservador: trata el extract como cambiado
+sql_pw="$(wt_shared_sql_password)" || gs_die "no se resolvio el SA del SQL compartido para el gate de loaders"
+wt_shared_sql_check || gs_die "el SQL compartido no esta disponible para el gate de loaders"
+empty_strategy="$(gs_list_empty "$sql_pw" "$PLANNING_DB" $GS_STRATEGY_TABLES)"
+empty_converg="$(gs_list_empty "$sql_pw" "$PLANNING_DB" $GS_CONVERGENCE_TABLES)"
+need_catalog=0; need_intake=0
+if [ "$seed_reseeded" != 0 ]; then
+  need_catalog=1; need_intake=1
+  gs_log "loaders: el extract cambio (SEED_RESEEDED_COUNT=$seed_reseeded) => recarga completa (catalog-load + intake-load)"
+else
+  if [ -n "$empty_converg" ]; then need_catalog=1; fi
+  if [ -n "$empty_strategy" ]; then need_intake=1; fi
+fi
+if [ "$need_catalog" = 0 ] && [ "$need_intake" = 0 ]; then
+  gs_log "[skip] loaders: planning poblada y seed sin cambio (estrategia 6/6, convergencia 11/11); 0 recargas"
+  _gs_timing "catalog-load" "$(date +%s)"
+  _gs_timing "intake-load" "$(date +%s)"
+else
+  if [ "$need_catalog" = 1 ]; then
+    gs_log "catalog-load (clean) desde el golden Oracle ..."
+    t0=$(date +%s)
+    gs_run_job "/api/v1/tools/catalog-load" '{"clean":true}' "catalog-load" || gs_log "AVISO: catalog-load no completo limpio"
+    _gs_timing "catalog-load" "$t0"
+  else
+    gs_log "[skip] catalog-load: convergencia ya poblada (11/11)"
+    _gs_timing "catalog-load" "$(date +%s)"
+  fi
+  if [ "$need_intake" = 1 ]; then
+    gs_log "intake-load (clean) desde el golden Oracle ..."
+    t0=$(date +%s)
+    gs_run_job "/api/v1/tools/intake-load" "" "intake-load" || gs_log "AVISO: intake-load no completo limpio"
+    _gs_timing "intake-load" "$t0"
+  else
+    gs_log "[skip] intake-load: estrategia ya poblada (6/6)"
+    _gs_timing "intake-load" "$(date +%s)"
+  fi
+fi
 
 # 6) registrar el menu UBO (Administracion -> Operaciones Masivas + 7 paginas) en el golden Oracle. El .sql es
 #    idempotente (NOT EXISTS) y NO commitea: se agrega COMMIT. El menu (Site.Master -> WCF -> pge_ctrlpiso.MENU)
@@ -188,9 +222,19 @@ on_intel "docker $ctx cp \$HOME/goldenslice-bin/menu-ubo.sql '$ORA_C:/tmp/menu-u
 printf '@/tmp/menu-ubo.sql\nCOMMIT;\n' | on_intel "docker $ctx exec -i -e ORACLE_HOME='$OH' '$ORA_C' bash -c 'export PATH=\$ORACLE_HOME/bin:\$PATH; sqlplus -S system/oracle@localhost:1521/XE'" 2>/dev/null | tr -d '\r' | tail -12
 _gs_timing "menu-ubo" "$t0"
 
-# 7) reimprime el recuadro de acceso (URLs desde M1). El intake es MANUAL desde la app.
+# 7) reimprime el recuadro de acceso (URLs desde M1). I9 (resuelve RISK 10): e2e-url puede COLGARSE (re-levanta el
+#    tunel SSH; el outlier de 22993 s fue un HANG que '2>/dev/null || true' NO atrapa). Se acota con gs_run_bounded
+#    (timeout portable background+watchdog; macOS NO tiene 'timeout'). Un cuelgue produce aviso accionable en <= N s
+#    y NO cuelga la corrida; el ambiente ya quedo arriba en las fases previas.
 t0=$(date +%s)
-make -C "$SIDECAR_DIR" e2e-url WT="$GS_PM_WT" 2>/dev/null || true
+if gs_run_bounded "${GS_E2E_URL_TIMEOUT:-90}" "e2e-url" -- make -C "$SIDECAR_DIR" e2e-url WT="$GS_PM_WT"; then :; else
+  rc=$?
+  if [ "$rc" = 124 ]; then
+    gs_log "[TIMEOUT] e2e-url colgo > ${GS_E2E_URL_TIMEOUT:-90}s; el ambiente puede estar arriba: reintenta 'make e2e-url WT=$GS_PM_WT' o revisa el tunel $(( 18100 + SLOT ))"
+  else
+    gs_log "AVISO: e2e-url salio con rc=$rc; reintenta 'make e2e-url WT=$GS_PM_WT'"
+  fi
+fi
 _gs_timing "e2e-url" "$t0"
 _gs_timing "TOTAL" "$GS_START_EPOCH"
 gs_log "timing por fase persistido en $PM_TIMING_LOG"
