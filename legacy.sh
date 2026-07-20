@@ -52,6 +52,11 @@ DBHOST="${PM_LEGACY_DBHOST:-172.16.128.1}"                   # host del data tie
 PROFILE="${PM_LEGACY_PROFILE:-full}"                         # sql | full (el legado necesita Oracle ControlPiso)
 DATATIER="${PM_LEGACY_DATATIER:-1}"                          # 0 = no gestionar el data tier
 FORCE="${PM_LEGACY_FORCE:-0}"                                # 1 = rebuild/redeploy aunque ya este arriba
+# I5: staging incremental del legado. CLEAN=1 = comportamiento previo (wipe total del arbol del guest + nuget
+# restore incondicional); por default (0) el stage PRESERVA bin/obj/packages (MSBuild incremental) y el restore
+# se salta si packages.config no cambio. Viaja por env a stage-app.sh/build-app.sh (no via PM_LEGACY_*: el Makefile
+# no lo traduce, y make exporta CLEAN=1 a la receta cuando se pasa en linea de comando o entorno).
+CLEAN="${CLEAN:-0}"
 # E2E (solicitud e2e-launch-orchestration): wiring opcional al backend .NET 10 que el deploy inyecta en el
 # Web.config/connections.config DESPLEGADO (la frontera: el repo legado no los conoce). Vacio = no inyecta.
 BACKEND_URL="${PM_LEGACY_BACKEND_URL:-}"                     # appSetting backendBaseUrl (URL del backend vista por el guest)
@@ -289,10 +294,10 @@ stage_build(){
     --exclude='.git/' \
     "$SRC_LOCAL/" "$MACDATA:$STAGE_REMOTE/CargaPlantaPT_LN/" || die "fallo el rsync de la fuente"
   guest_lock_touch
-  log "staging fuente macdata -> guest + build (VS Build Tools)"
-  ssh_md "WINHOST=$WINHOST SLOT='$SLOT' STAGE=$STAGE_REMOTE bash $HW_REMOTE/scripts/stage-app.sh" || die "fallo el staging al guest"
+  log "staging fuente macdata -> guest + build (VS Build Tools)${CLEAN:+ (CLEAN=$CLEAN)}"
+  ssh_md "WINHOST=$WINHOST SLOT='$SLOT' STAGE=$STAGE_REMOTE CLEAN='$CLEAN' bash $HW_REMOTE/scripts/stage-app.sh" || die "fallo el staging al guest"
   guest_lock_touch
-  ssh_md "WINHOST=$WINHOST SLOT='$SLOT' bash $HW_REMOTE/scripts/build-app.sh" || die "fallo el build en el guest"
+  ssh_md "WINHOST=$WINHOST SLOT='$SLOT' CLEAN='$CLEAN' bash $HW_REMOTE/scripts/build-app.sh" || die "fallo el build en el guest"
   guest_lock_touch
 }
 
