@@ -41,3 +41,16 @@ Un comando levanta el ambiente E2E completo sembrado con la golden slice, accesi
 4. `PM_WT_LN_DB=pm_gs_ln_wt<N> make e2e-up`: recrea el pm-api apuntando a la **LN golden** (no el `pm_erpln106` compartido; el guard ve la golden completa y no siembra handcrafted), levanta el frontend IIS con su wiring, activa el flag `carga-backend/RES` e imprime las URLs (backend + legado).
 
 Reimprime la URL de un ambiente ya arriba: `make e2e-url WT=gs_pm_goldenslice`.
+
+## `make goldenslice-relaunch WT=<worktree>` — `relaunch.sh`
+
+Actualiza, recompila y relanza AMBAS apps (pm-api .NET + legado ASP.NET) con la última `origin/develop` **SIN rehacer el seed**. Reusa el Oracle/LN golden y la BD planning `pm_planning_wt<N>` ya sembradas/cargadas por un `goldenslice-up` previo: recrea el pm-api contra las MISMAS BD, redespliega el legado, reactiva el flag e imprime las URLs. Es `goldenslice-up` MENOS el `goldenslice-seed`, los loaders (`catalog-load`/`intake-load`) y el registro del menú UBO. `WT=` es opcional (default `gs_pm_goldenslice`).
+
+**Precondición**: el slot del worktree ya existe (Oracle golden + LN golden + BD planning cargada). Si no, corta con error sugiriendo `make goldenslice-up`. El slot se deriva del registro (`wt_slot_lookup`).
+
+1. Worktrees canónicos pm (`gs_pm_goldenslice`) + legado (`gs_legacy_goldenslice`) a `origin/develop` (`git stash` + `checkout`, preserva cambios locales, D18).
+2. Recrea el pm-api contra las MISMAS BD (LN golden + planning ya cargada) vía `make wt-up ORACLE=1` con `PM_WT_SKIP_PLANNING_SEED=1` (no re-siembra planning) y el env final del golden (LN golden + Tools ON). NO llama `goldenslice-seed`: el Oracle/LN golden y la BD planning persisten intactos en el motor compartido.
+3. Recompila y redespliega el legado con la última `develop` vía `make e2e-up` con `PM_E2E_FORCE=1` (fuerza `legacy-build`+`deploy`) + `PM_E2E_SKIP_WTUP=1` (el pm-api ya lo recreó el paso 2) + `PM_E2E_SKIP_SMOKE=1` (ambiente arriba; smoke aparte con `make e2e-smoke`). Reactiva el flag `carga-backend/RES` e imprime las URLs.
+4. Reimprime el recuadro de acceso (URLs desde M1). NO seed, NO `catalog-load`/`intake-load`, NO menú (ya registrado). Si el pull trae migraciones EF que tocan el schema de catálogos, AVISA (no recarga en silencio, R4).
+
+Los tiempos por fase se persisten en `artifacts/goldenslice-timing/goldenslice-relaunch-<UTC>.log`.
