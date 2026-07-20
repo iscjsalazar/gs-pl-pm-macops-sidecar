@@ -541,8 +541,9 @@ _wt_build_api_image() {  # uso: _wt_build_api_image <ctx> <img> <src-sha>
   # agresiva es manual (make wt-prune-cache HARD=1).
   for attempt in 1 2; do
     wt_log "build imagen $img (intento $attempt/2; contexto $PM_REMOTE_SSH:$PM_REMOTE_SOLUTION_DIR; SHA ${sha:-<n/d>}; ~varios min) ..."
-    # I1: DOCKER_BUILDKIT=1 habilita '--mount=type=cache' (cache de paquetes NuGet) y 'COPY --parents' del Dockerfile.
-    if on_intel "cd '$PM_REMOTE_SOLUTION_DIR' && DOCKER_BUILDKIT=1 docker $ctx build$label_arg -t '$img' -f- ." < "$BASE_DIR/e2e/Dockerfile"; then
+    # Build con el builder legacy de docker (macdata NO tiene el componente buildx/BuildKit): I2 estampa el
+    # git-SHA por $label_arg. La capa de restore cacheable (I1) queda diferida: requiere buildx o staging de csproj.
+    if on_intel "cd '$PM_REMOTE_SOLUTION_DIR' && docker $ctx build$label_arg -t '$img' -f- ." < "$BASE_DIR/e2e/Dockerfile"; then
       on_intel "docker $ctx image prune -f" || true
       return 0
     fi
