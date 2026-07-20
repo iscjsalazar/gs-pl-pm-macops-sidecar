@@ -380,7 +380,18 @@ tunnel_up(){
     return 0
   fi
   log "abriendo tunel SSH: localhost:$TUNNEL_PORT -> $WINHOST:$SITE_PORT (via $MACDATA)"
-  ssh -f -N -L "$TUNNEL_PORT:$WINHOST:$SITE_PORT" "$MACDATA" || die "no se pudo abrir el tunel"
+  # I9: acota el ssh del tunel. Un macdata inalcanzable colgaba 'ssh -f' de forma indefinida (es justo el cuelgue
+  # que dispara el timeout de e2e-url en up.sh/relaunch.sh). ConnectTimeout bota la conexion muerta en ~10 s;
+  # BatchMode evita que un prompt interactivo (host key/password) cuelgue; un reintento corto absorbe un fallo
+  # transitorio antes de abortar. Todos los ssh del flujo ya corren no-interactivos (auth por llave), asi que
+  # BatchMode no cambia el camino sano.
+  local i
+  for i in 1 2; do
+    ssh -o ConnectTimeout=10 -o BatchMode=yes -f -N -L "$TUNNEL_PORT:$WINHOST:$SITE_PORT" "$MACDATA" && return 0
+    log "tunel: intento $i fallo (ssh); reintentando ..."
+    sleep 2
+  done
+  die "no se pudo abrir el tunel (localhost:$TUNNEL_PORT -> $WINHOST:$SITE_PORT via $MACDATA) tras 2 intentos"
 }
 
 tunnel_down(){
