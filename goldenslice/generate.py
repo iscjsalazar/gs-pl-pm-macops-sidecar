@@ -164,11 +164,15 @@ def ln_data_csvs(root, table):
 
 # Tablas LN que el intake CONSULTA pero cuyo scope RES es 0 filas en PROD (verificado por COUNT contra la
 # ventana): deben EXISTIR (si no, la query truena con "invalid object name") pero van VACIAS (fiel a PROD).
-#   ttcibd001115: LEFT JOIN de ProductionOrderLnGateway por t_item=tisfc001.t_mitm; cia FISICA 115 no tiene los
-#     items RIO*/RKE* de la ventana (namespace disjunto) -> familia null en PROD.
 #   ttxpcf925116: antimagnetico (ItemLnGateway); 0 filas para los items de la ventana en PROD.
-# Ambas satisfacen ademas el guard de completitud WT_LN_TABLES del sidecar (presencia por nombre).
-LN_SCHEMA_ONLY = {'ttcibd001115', 'ttxpcf925116'}
+# Satisface ademas el guard de completitud WT_LN_TABLES del sidecar (presencia por nombre).
+#
+# ttcibd001115 ya NO pertenece a este conjunto: es el maestro de articulos en la compania FISICA 115
+# (t_item = CIAF), que BacklogLnGateway INNER-joina; materializarla vacia colapsaba el backlog a 0 lineas.
+# PROD confirma que la cia 115 cubre el 100% de los items de la ventana (6485/6485); se siembra desde
+# ln/ttcibd001/c115*.csv (extraccion item-scoped). Sin ese CSV la tabla no se emite y WT_LN_TABLES falla
+# ruidoso (un LN vacio es una ALARMA, no un estado fiel), en vez de re-crear el defecto de 0 lineas.
+LN_SCHEMA_ONLY = {'ttxpcf925116'}
 
 
 def gen_ln(tables, root, out):
