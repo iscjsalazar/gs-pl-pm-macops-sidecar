@@ -1,4 +1,4 @@
--- Alta de menu: Administracion -> Operaciones Masivas -> 7 paginas UserBulkOperations.  Planta RES.
+-- Alta de menu: Administracion -> Operaciones Masivas -> 8 paginas UserBulkOperations.  Planta RES.
 -- NO hace COMMIT. Revisar el SELECT del final y luego COMMIT; (o ROLLBACK;).
 --
 -- Por que no es mas corto de lo que se ve:
@@ -60,7 +60,27 @@ WHERE  NOT EXISTS (SELECT 1 FROM pge_ctrlpiso.menu_contenido y
                    WHERE  y.id_contenido = om.id_contenido
                    AND    y.pagina = p.pagina);
 
--- Verificar: 1 contenedor (grp = POSICION de Administracion) + 7 paginas (grp = POSICION del contenedor).
+-- 3) Pagina "Maquinas del programa de Bobinas", colgando del contenedor "Operaciones Masivas".
+INSERT INTO pge_ctrlpiso.menu_contenido
+  (id_contenido, posicion, descripcion, pagina, path_imagen, estilo,
+   usuario, fecha_creacion, activo, pag_dinamica, grupo_posicion, colsort)
+SELECT om.id_contenido,
+       (SELECT MAX(posicion) + 1 FROM pge_ctrlpiso.menu_contenido WHERE id_contenido = om.id_contenido),
+       'Maquinas del programa de Bobinas', 'UserBulkOperations/MaquinasProgBobinas.aspx', NULL, 'Utils().imagenCargaPlanta',
+       'MIGRACION_UBO', SYSDATE, 1, 0,
+       TO_CHAR(om.posicion),
+       (SELECT MAX(colsort) + 1 FROM pge_ctrlpiso.menu_contenido WHERE id_contenido = om.id_contenido)
+FROM   (SELECT c.id_contenido, c.posicion
+        FROM   pge_ctrlpiso.menu m
+        JOIN   pge_ctrlpiso.menu_contenido c ON c.id_contenido = m.id_contenido
+        WHERE  m.id_menu = 'PROGMAESTRO'
+        AND    m.planta  = 'RES'
+        AND    TRIM(c.descripcion) = 'Operaciones Masivas') om
+WHERE  NOT EXISTS (SELECT 1 FROM pge_ctrlpiso.menu_contenido y
+                   WHERE  y.id_contenido = om.id_contenido
+                   AND    y.pagina = 'UserBulkOperations/MaquinasProgBobinas.aspx');
+
+-- Verificar: 1 contenedor (grp = POSICION de Administracion) + 8 paginas (grp = POSICION del contenedor).
 SELECT posicion, grupo_posicion, descripcion, pagina, activo, pag_dinamica
 FROM   pge_ctrlpiso.menu_contenido
 WHERE  id_contenido = (SELECT id_contenido FROM pge_ctrlpiso.menu
