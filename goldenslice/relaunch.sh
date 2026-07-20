@@ -97,22 +97,30 @@ gs_ensure_worktree(){  # <repo> <wt_name>
   fi
 }
 
-# R4: avisa (no recarga en silencio) si el pull trae migraciones EF del modulo Catalogs. El relaunch NO recarga
-# catalogos; si el schema de catalogos cambio, la BD planning reusada quedaria desalineada y hay que re-sembrar.
-gs_warn_catalog_migrations(){  # <pm_path> <head_before> <head_after>
+# I8 (resuelve RISK 8): detecta (y ACTUA sobre) migraciones EF del modulo Catalogs traidas por el pull
+# (HEAD_BEFORE->HEAD_AFTER del worktree pm). Antes solo AVISABA; ahora fija GS_CATALOG_MIGRATION=1 para forzar el
+# re-warm COMPLETO del bloque 3.5 generalizado, AUNQUE los conteos sondeados sigan > 0: una migracion puede alterar
+# el schema/semantica de Catalogs sin vaciar las tablas, y el probe de emptiness (I7) no lo veria (ese es el valor
+# unico de I8 frente a I7). El filtro es ESTRECHO a Modules/Catalogs/.../Migrations/*.cs, que excluye a proposito
+# los Seed*CatalogFlags de FeatureManagement (siembran flags, no tocan el schema de Catalogs).
+gs_detect_catalog_migrations(){  # <pm_path> <head_before> <head_after>
   local path="$1" before="$2" after="$3" changed
+  GS_CATALOG_MIGRATION=0
   { [ -n "$before" ] && [ -n "$after" ] && [ "$before" != "$after" ]; } || return 0
   changed="$(git -C "$path" diff --name-only "$before" "$after" 2>/dev/null | grep -Ei 'Modules/Catalogs/.*/Migrations/.*\.cs$' || true)"
   [ -n "$changed" ] || return 0
-  gs_log "AVISO (R4): el pull a origin/$GS_BASE trae migraciones EF del modulo Catalogs:"
+  GS_CATALOG_MIGRATION=1
+  gs_log "I8: el pull a origin/$GS_BASE trae migraciones EF del schema Catalogs -> se FUERZA el re-warm de catalogos (aunque los conteos sigan > 0):"
   printf '  - %s\n' $changed
-  gs_log "AVISO (R4): goldenslice-relaunch NO recarga catalogos; si el schema de catalogos cambio, re-corre 'make goldenslice-up' para re-sembrar."
 }
 
 t0=$(date +%s)
 PM_PATH="$WORKTREES/$GS_PM_WT"
 LEGACY_PATH="$WORKTREES/$GS_LEGACY_WT"
-PM_HEAD_BEFORE="$(git -C "$PM_PATH" rev-parse HEAD 2>/dev/null || echo '')"
+# I8 (reproducibilidad del escenario ac6): honra un PM_HEAD_BEFORE pre-exportado por el operador para simular la
+# llegada de una migracion de Catalogs (apuntar a un commit ANTERIOR a una migracion Catalogs de develop, con la
+# BD planning ya sembrada y poblada); si no se exporta, se computa el HEAD real previo al checkout.
+PM_HEAD_BEFORE="${PM_HEAD_BEFORE:-$(git -C "$PM_PATH" rev-parse HEAD 2>/dev/null || echo '')}"
 # I4: SHA del worktree legacy ANTES del checkout (espeja PM_HEAD_BEFORE), para forzar el rebuild/redeploy del legado
 # SOLO si su codigo cambia (ver la fase 4).
 LEGACY_HEAD_BEFORE="$(git -C "$LEGACY_PATH" rev-parse HEAD 2>/dev/null || echo '')"
@@ -123,8 +131,8 @@ LEGACY_SRC="$WORKTREES/$GS_LEGACY_WT"
 [ -f "$LEGACY_SRC/ProgramaMaestroPT.sln" ] || gs_die "el worktree legacy '$LEGACY_SRC' no trae ProgramaMaestroPT.sln"
 PM_HEAD_AFTER="$(git -C "$PM_PATH" rev-parse HEAD 2>/dev/null || echo '')"
 LEGACY_HEAD_AFTER="$(git -C "$LEGACY_PATH" rev-parse HEAD 2>/dev/null || echo '')"
-gs_warn_catalog_migrations "$PM_PATH" "$PM_HEAD_BEFORE" "$PM_HEAD_AFTER"
-gs_log "R4: el relaunch reusa los catalogos ya cargados; NO los recarga. Si cambiaste el schema de catalogos, re-corre 'make goldenslice-up'."
+GS_CATALOG_MIGRATION=0
+gs_detect_catalog_migrations "$PM_PATH" "$PM_HEAD_BEFORE" "$PM_HEAD_AFTER"
 
 # 3) recrea el pm-api contra las MISMAS BD (LN golden + planning ya cargada). Espeja el env FINAL del golden que
 #    goldenslice-up deja (colapso I6): la UNICA recreacion (wt_up_api hace 'docker rm -f' + create) nace con la LN
@@ -141,60 +149,57 @@ t0=$(date +%s)
 make -C "$SIDECAR_DIR" wt-up WT="$GS_PM_WT" ORACLE=1 || gs_die "wt-up (recreate API) fallo"
 _gs_timing "wt-up" "$t0"
 
-# 3.5) asegura las tablas de estrategia del login pobladas (ac2). relaunch REUSA la BD planning sin recargar
-#      catalogos (por diseno: es goldenslice-up MENOS los loaders); si esa BD reusada trae VACIAS las tablas de
-#      estrategia del login (BD casi fresca, reseteo por migracion de schema de Catalogs, estado parcial previo),
-#      el login del legado rompe ("Acceso denegado"/imagen null). Se PRUEBAN los conteos de Catalogs.Parameters y
-#      Catalogs.FiscalCalendar en la BD planning reusada: si ambas > 0 se continua (fast-path, preserva el "sin
-#      reseed"); si alguna == 0 se RE-WARM con intake-load (WarmAllAsync repuebla las 6 strategy tables del login,
-#      incluye Parameters/FiscalCalendar) SIN re-sembrar LN/orders ni el resto de la BD planning; si tras el
-#      re-warm siguen vacias, FALLA ruidoso. Un relaunch NUNCA termina "OK" dejando el login roto. Backstop de R4:
-#      un cambio de schema de Catalogs que dejo las tablas vacias se auto-cura aqui, no solo se avisa.
+# 3.5) I7 (resuelve RISK 7): asegura pobladas las tablas de catalogos del login/negocio en la BD planning REUSADA.
+#      relaunch reusa esa BD sin recargar (es goldenslice-up MENOS los loaders); si trae VACIAS tablas de catalogos
+#      (BD casi fresca, reseteo por migracion, estado parcial), el login del legado rompe ("Acceso denegado"/imagen
+#      null) o el negocio queda incompleto. Se GENERALIZA el probe/re-warm de las 2 tablas del login a las 6 de
+#      ESTRATEGIA (CatalogTableMap) Y las 11 de CONVERGENCIA (CatalogsConvergenceDescriptors): estrategia vacia =>
+#      intake-load; convergencia vacia => catalog-load {"clean":true} (intake-load NO puebla las 8 de convergencia
+#      no-estrategia — ese es el punto de la generalizacion). Fast-path: todo poblado => continuar sin recargar. Si
+#      tras el re-warm algo sigue vacio, FALLA ruidoso (gs_die): un relaunch NUNCA termina "OK" con catalogos rotos.
+#      Backstop de I8: force=1 (migracion de Catalogs detectada) corre AMBOS loaders aunque el probe no este vacio.
 
-# Conteo escalar de una tabla de la BD planning reusada, por el motor SQL compartido (mismo puente que wt-sql). La
-# BD se fija por el flag -d de sqlcmd (no 'USE'): evita el mensaje "Changed database context" que ensuciaria el
-# escalar. La tabla la controla el llamador (literales cualificados), sin riesgo de inyeccion.
-_gs_planning_count(){  # <pw> <tabla-cualificada>
-  wt_shared_query "$1" "SET NOCOUNT ON; SELECT COUNT(*) FROM $2" "-h -1 -W -d $PLANNING_DB" 2>/dev/null | tr -d ' \r\n'
-}
-
-# gs_ensure_login_catalogs: probe -> fast-path / re-warm / fail-loud sobre la BD planning reusada ($PLANNING_DB).
-gs_ensure_login_catalogs(){
-  local pw params cal ctx API_C API_PORT
-  pw="$(wt_shared_sql_password)" || gs_die "no se resolvio el SA del SQL compartido para probar los catalogos del login"
-  wt_shared_sql_check || gs_die "el SQL compartido no esta disponible: no se pueden probar los catalogos del login"
-  params="$(_gs_planning_count "$pw" "Catalogs.Parameters" || true)"
-  cal="$(_gs_planning_count "$pw" "Catalogs.FiscalCalendar" || true)"
-  case "$params" in ''|*[!0-9]*) params=0 ;; esac
-  case "$cal" in ''|*[!0-9]*) cal=0 ;; esac
-  if [ "$params" -gt 0 ] && [ "$cal" -gt 0 ]; then
-    gs_log "catalogos del login ya poblados (Parameters=$params, FiscalCalendar=$cal); relanzando sin recargar"
+# gs_ensure_catalogs <force>: probe estrategia(6)+convergencia(11) -> re-warm DIRIGIDO -> re-probe -> fail-loud.
+# <force>=1 corre AMBOS loaders aunque el probe no este vacio (I8). Usa las primitivas compartidas de lib.sh
+# (GS_STRATEGY_TABLES/GS_CONVERGENCE_TABLES/gs_list_empty). API_PORT es global (lo lee gs_run_job).
+gs_ensure_catalogs(){  # <force>
+  local force="${1:-0}" pw empty_s empty_c need_intake=0 need_catalog=0 ctx API_C
+  pw="$(wt_shared_sql_password)" || gs_die "no se resolvio el SA del SQL compartido para probar los catalogos"
+  wt_shared_sql_check || gs_die "el SQL compartido no esta disponible: no se pueden probar los catalogos"
+  empty_s="$(gs_list_empty "$pw" "$PLANNING_DB" $GS_STRATEGY_TABLES)"
+  empty_c="$(gs_list_empty "$pw" "$PLANNING_DB" $GS_CONVERGENCE_TABLES)"
+  if [ "$force" != 1 ] && [ -z "$empty_s" ] && [ -z "$empty_c" ]; then
+    gs_log "catalogos poblados (estrategia 6/6, convergencia 11/11); relanzando sin recargar (fast-path)"
     return 0
   fi
-  gs_log "AVISO: catalogos del login VACIOS o incompletos (Parameters=$params, FiscalCalendar=$cal); re-warm con intake-load (sin re-sembrar LN/orders) ..."
-  # Tools de carga: el API recreado en el paso 3 nace con Tools:CatalogLoad/IntakeLoad ON (PM_WT_API_EXTRA_ENV),
-  # asi que NO hace falta re-habilitarlas; se corre intake-load directo. intake-load (clean) -> WarmAllAsync
-  # repuebla las 6 strategy tables del login (incluye Parameters/FiscalCalendar) desde el golden Oracle del slot.
-  ctx="$(remote_docker_ctx)"
-  API_C="pm-wt${SLOT}-api"
+  if [ "$force" = 1 ]; then
+    need_catalog=1; need_intake=1
+    gs_log "re-warm FORZADO (I8: migracion de Catalogs): catalog-load + intake-load aunque el probe no este vacio ..."
+  else
+    if [ -n "$empty_c" ]; then need_catalog=1; gs_log "AVISO: convergencia VACIA [$(printf '%s ' $empty_c)]=> catalog-load (clean) ..."; fi
+    if [ -n "$empty_s" ]; then need_intake=1; gs_log "AVISO: estrategia VACIA [$(printf '%s ' $empty_s)]=> intake-load ..."; fi
+  fi
+  # El API recreado en el paso 3 nace con Tools:CatalogLoad/IntakeLoad ON (PM_WT_API_EXTRA_ENV); solo hace falta
+  # resolver el puerto para gs_run_job. Sin re-sembrar LN/orders: los loaders solo repueblan el schema Catalogs.
+  ctx="$(remote_docker_ctx)"; API_C="pm-wt${SLOT}-api"
   API_PORT="$(on_intel "docker $ctx port '$API_C' 8080/tcp 2>/dev/null" 2>/dev/null | head -1 | sed 's/.*://' | tr -d '\r')"
   [ -n "$API_PORT" ] || gs_die "re-warm: no se resolvio el puerto publicado del API $API_C (revisa que wt-up recreo el pm-api)"
-  gs_run_job "/api/v1/tools/intake-load" "" "intake-load (re-warm)" || gs_log "AVISO: intake-load (re-warm) no completo limpio (revisa el golden Oracle / Tools)"
-  params="$(_gs_planning_count "$pw" "Catalogs.Parameters" || true)"
-  cal="$(_gs_planning_count "$pw" "Catalogs.FiscalCalendar" || true)"
-  case "$params" in ''|*[!0-9]*) params=0 ;; esac
-  case "$cal" in ''|*[!0-9]*) cal=0 ;; esac
-  if [ "$params" -gt 0 ] && [ "$cal" -gt 0 ]; then
-    gs_log "re-warm OK: catalogos del login poblados (Parameters=$params, FiscalCalendar=$cal)"
+  # Orden espejo de up.sh (5b): convergencia (catalog-load) primero, luego estrategia (intake-load).
+  if [ "$need_catalog" = 1 ]; then gs_run_job "/api/v1/tools/catalog-load" '{"clean":true}' "catalog-load (re-warm)" || gs_log "AVISO: catalog-load (re-warm) no completo limpio"; fi
+  if [ "$need_intake" = 1 ]; then gs_run_job "/api/v1/tools/intake-load" "" "intake-load (re-warm)" || gs_log "AVISO: intake-load (re-warm) no completo limpio"; fi
+  empty_s="$(gs_list_empty "$pw" "$PLANNING_DB" $GS_STRATEGY_TABLES)"
+  empty_c="$(gs_list_empty "$pw" "$PLANNING_DB" $GS_CONVERGENCE_TABLES)"
+  if [ -z "$empty_s" ] && [ -z "$empty_c" ]; then
+    gs_log "re-warm OK: estrategia 6/6 + convergencia 11/11 pobladas"
     return 0
   fi
-  gs_die "las tablas de catalogos del login quedaron VACIAS tras el re-warm (Parameters=$params, FiscalCalendar=$cal): revisa el Oracle golden del slot $SLOT ($API_C / pm-wt${SLOT}-oracle-1) o corre 'make goldenslice-up' para re-sembrar desde cero. Un relaunch no debe terminar OK con el login roto."
+  gs_die "tras el re-warm siguen VACIAS -> estrategia:[$(printf '%s ' $empty_s)] convergencia:[$(printf '%s ' $empty_c)]. Revisa el Oracle golden del slot $SLOT (pm-wt${SLOT}-oracle-1 / $API_C) o corre 'make goldenslice-up' para re-sembrar. Un relaunch no debe terminar OK con catalogos rotos."
 }
 
-gs_log "asegura catalogos del login (Catalogs.Parameters/FiscalCalendar) en la BD planning reusada $PLANNING_DB ..."
+gs_log "asegura catalogos (estrategia 6 + convergencia 11) en la BD planning reusada $PLANNING_DB (force=$GS_CATALOG_MIGRATION) ..."
 t0=$(date +%s)
-gs_ensure_login_catalogs
-_gs_timing "ensure-login-catalogs" "$t0"
+gs_ensure_catalogs "$GS_CATALOG_MIGRATION"
+_gs_timing "ensure-catalogs" "$t0"
 
 # 4) recompila y redespliega el legado con la ultima develop, reactiva el flag e imprime URLs. e2e-up con:
 #    PM_E2E_FORCE        => I4: 1 SOLO si el SHA del worktree legacy cambio (before!=after) o el usuario paso FORCE=1;
@@ -224,9 +229,18 @@ PM_WT_LN_DB="$LN_GS_DB" PM_E2E_FORCE=$GS_LEGACY_FORCE PM_E2E_SKIP_WTUP=1 PM_E2E_
 _gs_timing "e2e-up" "$t0"
 
 # 5) reimprime el recuadro de acceso (URLs desde M1) y re-levanta el tunel si murio. NO seed, NO catalog/intake-load,
-#    NO menu (ya registrado por goldenslice-up).
+#    NO menu. I9 (resuelve RISK 10): e2e-url puede COLGARSE al re-levantar el tunel SSH (el outlier de 22993 s fue un
+#    HANG que '2>/dev/null || true' NO atrapa). Se acota con gs_run_bounded (timeout portable background+watchdog;
+#    macOS NO tiene 'timeout'); un cuelgue produce aviso accionable en <= N s y NO cuelga la corrida.
 t0=$(date +%s)
-make -C "$SIDECAR_DIR" e2e-url WT="$GS_PM_WT" 2>/dev/null || true
+if gs_run_bounded "${GS_E2E_URL_TIMEOUT:-90}" "e2e-url" -- make -C "$SIDECAR_DIR" e2e-url WT="$GS_PM_WT"; then :; else
+  rc=$?
+  if [ "$rc" = 124 ]; then
+    gs_log "[TIMEOUT] e2e-url colgo > ${GS_E2E_URL_TIMEOUT:-90}s; el ambiente puede estar arriba: reintenta 'make e2e-url WT=$GS_PM_WT' o revisa el tunel $(( 18100 + SLOT ))"
+  else
+    gs_log "AVISO: e2e-url salio con rc=$rc; reintenta 'make e2e-url WT=$GS_PM_WT'"
+  fi
+fi
 _gs_timing "e2e-url" "$t0"
 _gs_timing "TOTAL" "$GS_START_EPOCH"
 gs_log "timing por fase persistido en $PM_TIMING_LOG"
