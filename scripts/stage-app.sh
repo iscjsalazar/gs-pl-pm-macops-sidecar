@@ -57,9 +57,9 @@ else
 Remove-Item '$STG' -Recurse -Force -ErrorAction SilentlyContinue; \
 Expand-Archive -Path '$ZIP' -DestinationPath '$STG' -Force; \
 \$rc=0; \
-robocopy '$STG\\CargaPlantaPT_LN' '$DEST\\CargaPlantaPT_LN' /MIR /XD bin obj packages /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null; \
+robocopy '$STG\\CargaPlantaPT_LN' '$DEST\\CargaPlantaPT_LN' /MIR /XD bin obj packages /NFL /NDL /NJH /NJS /NP /R:1 /W:1 2>\$null | Out-Null; \
 if (\$LASTEXITCODE -ge 8) { \$rc=\$LASTEXITCODE }; \
-robocopy '$STG\\CargaPlantaPT_LN\\ProgramaMaestroPT\\bin' '$DEST\\CargaPlantaPT_LN\\ProgramaMaestroPT\\bin' Oracle.ManagedDataAccess.dll /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null; \
+robocopy '$STG\\CargaPlantaPT_LN\\ProgramaMaestroPT\\bin' '$DEST\\CargaPlantaPT_LN\\ProgramaMaestroPT\\bin' Oracle.ManagedDataAccess.dll /NFL /NDL /NJH /NJS /NP /R:1 /W:1 2>\$null | Out-Null; \
 if (\$LASTEXITCODE -ge 8) { \$rc=\$LASTEXITCODE }; \
 Remove-Item '$STG' -Recurse -Force -ErrorAction SilentlyContinue; \
 if (\$rc -ne 0) { Write-Error \"robocopy fallo (rc=\$rc)\"; exit 1 }; \
