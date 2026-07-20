@@ -529,15 +529,20 @@ wt_check_api_port_free() {
 # (lock GLOBAL entre slots): dos 'docker build' concurrentes sobre el mismo daemon containerd corrompen el
 # content-store (CreateDiff/rename ingest->blobs), fallo que la poda no cura de raiz. ctx/img llegan por args; el
 # resto son globals ya fijados por _cmd_wt_up_locked. wt_lock reclama el lock si el dueno muere (no deadlock).
-_wt_build_api_image() {  # uso: _wt_build_api_image <ctx> <img>
-  local ctx="$1" img="$2" attempt
+_wt_build_api_image() {  # uso: _wt_build_api_image <ctx> <img> <src-sha>
+  local ctx="$1" img="$2" sha="$3" attempt label_arg=""
+  # I2: estampa el git-SHA del worktree pm como label OCI 'org.pm.src-sha'. wt_up_api lo lee ANTES de reconstruir
+  # para saltar el build cuando el SHA no cambio. Vacio => sin label (gate degradado: la imagen no queda estampada
+  # y el proximo wt-up reconstruye). Valor entre comillas simples: el shell remoto de on_intel lo recibe intacto.
+  [ -n "$sha" ] && label_arg=" --label org.pm.src-sha='$sha'"
   # Corre bajo wt_lock build (global): el retry no compite con otro build. La corrupcion del store containerd
   # (CreateDiff/apply diff/Lchown/commit rename ingest->blobs) suele ser transitoria -> 1 reintento la sortea
   # (ledger I6/I8). Entre intentos SOLO poda dangling (segura, no toca contenedores/volumenes vivos); la poda
   # agresiva es manual (make wt-prune-cache HARD=1).
   for attempt in 1 2; do
-    wt_log "build imagen $img (intento $attempt/2; contexto $PM_REMOTE_SSH:$PM_REMOTE_SOLUTION_DIR; ~varios min) ..."
-    if on_intel "cd '$PM_REMOTE_SOLUTION_DIR' && docker $ctx build -t '$img' -f- ." < "$BASE_DIR/e2e/Dockerfile"; then
+    wt_log "build imagen $img (intento $attempt/2; contexto $PM_REMOTE_SSH:$PM_REMOTE_SOLUTION_DIR; SHA ${sha:-<n/d>}; ~varios min) ..."
+    # I1: DOCKER_BUILDKIT=1 habilita '--mount=type=cache' (cache de paquetes NuGet) y 'COPY --parents' del Dockerfile.
+    if on_intel "cd '$PM_REMOTE_SOLUTION_DIR' && DOCKER_BUILDKIT=1 docker $ctx build$label_arg -t '$img' -f- ." < "$BASE_DIR/e2e/Dockerfile"; then
       on_intel "docker $ctx image prune -f" || true
       return 0
     fi
@@ -552,11 +557,34 @@ wt_up_api() {  # uso: wt_up_api <password>
   local pw="$1" ctx; ctx="$(remote_docker_ctx)"
   local cname="pm-wt${WT_SLOT}-api" img="pm-wt-api:wt${WT_SLOT}"
   local hl="http://127.0.0.1:$PM_API_PORT/health/live"
-  # build desde el contexto del worktree (rsync de la solucion del worktree a su dir remoto).
-  sync_solution_to_intel
-  # Serializa el build entre TODOS los slots/sesiones (raiz de la corrupcion de containerd). WT_LOCK_WAIT_MAX=1800:
-  # un build cold toma varios min, la espera detras de otro build debe superar el default 180 s de wt_lock.
-  WT_LOCK_WAIT_MAX=1800 wt_lock build _wt_build_api_image "$ctx" "$img" || return 1
+  # I2: gate por git-SHA de la imagen. Se computa el SHA del worktree pm (PM_SOLUTION_DIR, el arbol LOCAL fuente de
+  # verdad, ya resuelto por _cmd_wt_up_locked) y, si la imagen del slot ya trae ESE mismo SHA estampado, se SALTA
+  # sync+build (solo se recrea el contenedor mas abajo). Un arbol con cambios sin commitear (dirty) NUNCA se saltea:
+  # el SHA no capturaria los .cs sin commitear, asi que se fuerza el build. Escape PM_WT_FORCE_BUILD=1 fuerza siempre.
+  local src_sha="" src_dirty=0
+  if [ -d "$PM_SOLUTION_DIR/.git" ] || [ -f "$PM_SOLUTION_DIR/.git" ]; then
+    src_sha="$(git -C "$PM_SOLUTION_DIR" rev-parse HEAD 2>/dev/null || echo '')"
+    [ -n "$(git -C "$PM_SOLUTION_DIR" status --porcelain 2>/dev/null)" ] && src_dirty=1
+  fi
+  local do_build=1
+  if [ "${PM_WT_FORCE_BUILD:-0}" = "1" ]; then
+    wt_log "PM_WT_FORCE_BUILD=1: se reconstruye la imagen $img (sin gate por SHA)"
+  elif [ -n "$src_sha" ] && [ "$src_dirty" = "0" ]; then
+    local img_sha
+    img_sha="$(on_intel "docker $ctx image inspect -f '{{index .Config.Labels \"org.pm.src-sha\"}}' '$img' 2>/dev/null" 2>/dev/null | tr -d '\r')"
+    if [ -n "$img_sha" ] && [ "$img_sha" = "$src_sha" ]; then
+      do_build=0
+      wt_log "[skip] API build: SHA $src_sha sin cambio (imagen $img ya estampada); solo se recrea el contenedor"
+    fi
+  fi
+  if [ "$do_build" = "1" ]; then
+    # build desde el contexto del worktree (rsync de la solucion del worktree a su dir remoto).
+    sync_solution_to_intel
+    # Serializa el build entre TODOS los slots/sesiones (raiz de la corrupcion de containerd). WT_LOCK_WAIT_MAX=1800:
+    # un build cold toma varios min, la espera detras de otro build debe superar el default 180 s de wt_lock. El SHA
+    # (3er arg) lo estampa el build como label OCI para el gate del siguiente wt-up.
+    WT_LOCK_WAIT_MAX=1800 wt_lock build _wt_build_api_image "$ctx" "$img" "$src_sha" || return 1
+  fi
   # connstrings vistas desde el contenedor: SQL por alias de la red compartida; bus por alias del singleton.
   local cs ln sbcs
   cs="Server=$PM_SHARED_SQL_HOST,$PM_SHARED_SQL_PORT;Database=$PM_PLANNING_DB;User Id=sa;Password=$pw;TrustServerCertificate=True"
