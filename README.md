@@ -199,7 +199,7 @@ La fórmula `1521+offset` de `compute_ports` (`lib/common.sh`) sirve a los stack
 | `make wt-info WT=<folder>` | Imprime la derivación completa del slot: API, BD, bus, Oracle, site IIS, túnel, rutas del guest, y la sección **Presupuesto** (topes reales: disco/RAM de la VM colima, `docker` reclamable, contadores del guest, slots vivos). |
 | `make wt-ls` | Lista el registro de slots (`folder → slot`) y una línea de resumen de presupuesto (disco libre de la VM colima + slots vivos/`SLOTS`). |
 | `make wt-status` | Estado de los contenedores PM por worktree (API y Oracle) y del bus. |
-| `make wt-gc` / `make wt-gc FORCE=1` | Cruza los cuatro planos (registro · contenedores API · contenedores Oracle · sites IIS y túneles) y lista los huérfanos; con `FORCE=1` los retira. Toma snapshot del registro bajo `wt_registry_lock` y acota el barrido de túneles por `PM_WT_SLOTS_MAX` (mantiene fuera el túnel singleton `18080` y el puente `60211`). Retorna exit≠0 si no pudo limpiar un huérfano (0 si nada). Guard crítico: si el registro es no legible o no adquiere el lock, con `FORCE=1` **aborta sin retirar** (evita `docker rm -f` en masa de sesiones vivas). |
+| `make wt-gc` / `make wt-gc FORCE=1` | Cruza los cuatro planos (registro · contenedores API · contenedores Oracle · sites IIS y túneles) y lista los huérfanos; con `FORCE=1` los retira. El plano de arrendamientos reclama filas con dueño muerto por TTL **y fantasmas** (dueño muerto + slot sin contenedores vivos, aunque el heartbeat sea fresco). Toma snapshot del registro bajo `wt_registry_lock` y acota el barrido de túneles por `PM_WT_SLOTS_MAX` (mantiene fuera el túnel singleton `18080` y el puente `60211`). Retorna exit≠0 si no pudo limpiar un huérfano (0 si nada). Guard crítico: si el registro es no legible o no adquiere el lock, con `FORCE=1` **aborta sin retirar** (evita `docker rm -f` en masa de sesiones vivas). |
 | `make wt-seed-ln` | Asegura la referencia LN compartida `pm_erpln106` (paso deliberado de una vez; idempotente). |
 
 ```bash
@@ -214,6 +214,24 @@ autodetección por `git rev-parse --show-toplevel`). La conexión al SQL compart
 (`SHAREDSQL_NET`/`HOST`/`PORT`/`PASSWORD`; default red `nvoslabsc3-sharedsql-dt`, `sqlserver:1433`, password
 autodescubierta del contenedor). La referencia LN propia de PM se siembra una sola vez con guard de completitud
 (no re-siembra si ya está poblada).
+
+**Consistencia registro↔realidad (cura de drift).** El registro (`.worktrees/slots.tsv`) y la realidad (contenedores
+`pm-wt<N>-*` en macdata) se reconcilian para que resolver-por-nombre sea confiable, en especial con varios ambientes
+en paralelo:
+
+- **Asignación sticky-to-reality.** `wt_slot_assign` recibe el set de slots con contenedores VIVOS (una `docker ps`)
+  y **no entrega un slot huérfano** (contenedores vivos sin fila): así el nuevo dueño no colisiona con un env vivo
+  que perdió su fila.
+- **Release↔teardown atómico.** `wt-down`/`wt-gc`/`wt-reclaim` liberan la fila **solo tras verificar** el retiro de
+  la API (`pm-wt<N>-api`) y del Oracle del slot. Una fila nunca desaparece dejando un contenedor vivo huérfano, ni
+  se queda apuntando a un slot sin aprovisionar (fantasma).
+- **Reclamo de fantasmas.** Una fila con `owner_pid` muerto cuyo slot **no** tiene contenedores vivos es reclamable
+  por `wt-reclaim`/`wt-gc FORCE=1` **aunque el heartbeat sea fresco** (un slot nunca aprovisionado no queda pegado
+  ~TTL). Se preserva intacta la protección de una dueña VIVA y de un slot vivo con heartbeat fresco (semántica
+  pid+heartbeat+TTL); si la sonda de realidad no responde, el reclamo cae a solo-TTL (fail-safe, no siega en masa).
+- **Guard de la frontera golden.** `goldenslice-up`/`goldenslice-relaunch`, al resolver un slot por una fila
+  pre-existente, fallan ruidoso si ese slot no tiene contenedores vivos mientras hay un env **huérfano** vivo
+  (discrepancia) — no deployan al slot fantasma; un tenant legítimo con su propia fila no bloquea.
 
 **Oracle ControlPiso por slot (perezoso).** Sólo lo aprovisiona `ORACLE=1`, porque sólo lo necesita un slot con
 frontend: el camino con el feature flag **OFF** ejecuta `PGE950RT` y **escribe** en ControlPiso, así que un Oracle

@@ -103,14 +103,19 @@ wt_slot_lookup() {  # uso: wt_slot_lookup <folder>
 # El registro tiene 7 columnas: folder, slot, project, offset, created, owner_pid, heartbeat. owner_pid+heartbeat
 # forman el arrendamiento del slot (ver wt_lease_reclaimable); las filas viejas de 5 columnas se leen como
 # arrendamiento sin pid (muerto) y sin heartbeat (cae a 'created' para la edad).
-wt_slot_assign() {  # uso: wt_slot_assign <folder>   (correr bajo wt_registry_lock)
-  local folder="$1" existing n used now
+wt_slot_assign() {  # uso: wt_slot_assign <folder> [live_slots]   (correr bajo wt_registry_lock)
+  local folder="$1" occupied="${2:-}" existing n used now
   existing="$(wt_slot_lookup "$folder")"
   if [ -n "$existing" ]; then printf '%s' "$existing"; return 0; fi
   [ -f "$PM_WT_REGISTRY" ] || : > "$PM_WT_REGISTRY"
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   for n in $(seq 0 $(( PM_WT_SLOTS - 1 ))); do
     used="$(awk -F'\t' -v s="$n" '$2==s{print 1; exit}' "$PM_WT_REGISTRY")"
+    # req6.1 (reconciliacion registro<->realidad): un slot SIN fila pero con contenedores VIVOS (huerfano que
+    # perdio su fila, raiz del drift b3) NO se entrega — asignarlo colisionaria el nuevo dueno con un env vivo. El
+    # set de slots vivos lo computa el llamador (una sola docker ps, via wt_probe_live_slots) y lo pasa como 2o
+    # arg; vacio (o llamador legacy) => comportamiento previo (solo la fila decide).
+    if [ -z "$used" ] && wt_slot_in_set "$n" "$occupied"; then used=1; fi
     if [ -z "$used" ]; then
       # owner_pid = pid de este proceso; heartbeat = ahora (la asignacion es el primer latido del arrendamiento).
       printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$folder" "$n" "pm-wt${n}" "$(( n * 10 ))" "$now" "$$" "$now" >> "$PM_WT_REGISTRY"
@@ -139,17 +144,62 @@ wt_slot_touch() {  # uso: wt_slot_touch <folder>   (correr bajo wt_registry_lock
   ' "$PM_WT_REGISTRY" > "$tmp" && mv "$tmp" "$PM_WT_REGISTRY"
 }
 
+# Verdadero si el proceso dueno del arrendamiento NO esta vivo: pid vacio/no-numerico, o kill -0 falla. El kill -0
+# solo es valido en esta M1 (el registro y los pids son locales; limitacion documentada). Extraido de
+# wt_lease_reclaimable para reusarlo en el phantom-reclaim (req6.4) sin duplicar el criterio de "dueno muerto".
+wt_pid_dead() {  # uso: wt_pid_dead <owner_pid>
+  local pid="${1:-}"
+  if wt_is_num "$pid" && kill -0 "$pid" 2>/dev/null; then return 1; fi
+  return 0
+}
+
 # Verdadero si un arrendamiento es reclamable: su proceso dueno murio (kill -0 falla, o no hay pid) Y su heartbeat
 # (o 'created' si la fila es vieja) es mas viejo que PM_WT_LEASE_TTL. Un pid VIVO o un heartbeat FRESCO => NUNCA
 # reclamable (espeja guest-turn: no se roba el turno a una duena viva aunque el heartbeat este rancio). El kill -0
 # solo es valido en esta M1 (el registro y los pids son locales; limitacion documentada).
 wt_lease_reclaimable() {  # uso: wt_lease_reclaimable <owner_pid> <heartbeat> <created>
-  local pid="$1" hb="$2" cr="$3" ref age
-  if wt_is_num "$pid" && kill -0 "$pid" 2>/dev/null; then return 1; fi   # pid vivo: protegido
+  local pid="${1:-}" hb="${2:-}" cr="${3:-}" ref age
+  wt_pid_dead "$pid" || return 1                                         # pid vivo: protegido
   ref="$hb"; [ -n "$ref" ] || ref="$cr"                                  # sin heartbeat (fila vieja) -> created
   age="$(wt_age_secs "$ref")"
   wt_is_num "$age" || return 1                                           # edad ilegible -> conservador: no reclamar
   [ "$age" -gt "$PM_WT_LEASE_TTL" ]
+}
+
+# --- Reconciliacion registro<->realidad (req6, cura del drift b3) ------------------------------------------------
+# La "realidad" es el conjunto de slots con al menos un contenedor VIVO (api u oracle) en el docker de macdata. Es
+# la fuente unica para: (req6.1) no entregar en la asignacion un slot huerfano (contenedores vivos sin fila);
+# (req6.4) reclamar un fantasma (dueno muerto + slot SIN contenedores vivos) aunque el heartbeat sea fresco; y
+# (req6.3) el guard de la frontera golden. Todas parten de UNA sola docker ps (wt_probe_live_slots).
+
+# Verdadero si <slot> aparece en <set> (numeros de slot separados por espacio).
+wt_slot_in_set() {  # uso: wt_slot_in_set <slot> <set>
+  case " ${2:-} " in *" ${1:-} "*) return 0 ;; *) return 1 ;; esac
+}
+
+# Puebla WT_LIVE_SLOTS (numeros de slot con contenedor VIVO api/oracle, separados por espacio) y WT_LIVE_SLOTS_OK
+# (1 si el docker ps se pudo consultar; 0 si no). Una consulta docker ps unica (sin -a => solo contenedores
+# corriendo). Un OK=0 (docker/ssh inalcanzable) significa "realidad DESCONOCIDA": los consumidores del
+# phantom-reclaim y del guard se ABSTIENEN (no reclamar/no bloquear por una ausencia no verificable, mismo
+# principio fail-safe que el reg_readable de wt-gc). Retorna 0 salvo fallo de la consulta (retorna 1).
+wt_probe_live_slots() {
+  local ctx names rc=0; ctx="$(remote_docker_ctx)"
+  names="$(on_intel "docker $ctx ps --filter 'name=pm-wt' --format '{{.Names}}' 2>/dev/null" 2>/dev/null)" || rc=$?
+  if [ "$rc" != 0 ]; then WT_LIVE_SLOTS=""; WT_LIVE_SLOTS_OK=0; return 1; fi
+  WT_LIVE_SLOTS="$(printf '%s\n' "$names" | tr -d '\r' | sed -nE 's/^pm-wt([0-9]+)-(api|oracle-1)$/\1/p' | sort -un | tr '\n' ' ')"
+  WT_LIVE_SLOTS_OK=1; return 0
+}
+
+# Imprime (separados por espacio) los slots VIVOS de WT_LIVE_SLOTS que NO tienen fila en el registro = HUERFANOS
+# (contenedores vivos sin dueno). Un huerfano vivo es la firma DURA del drift b3 (un env que perdio su fila),
+# distinta de un slot vivo LEGITIMO de otro tenant (que si tiene fila). Requiere WT_LIVE_SLOTS ya poblado
+# (wt_probe_live_slots). Lectura best-effort del registro (sin lock: solo lee la columna de slots).
+wt_live_orphan_slots() {
+  local s owned=""
+  [ -f "$PM_WT_REGISTRY" ] && owned="$(awk -F'\t' 'NF{print $2}' "$PM_WT_REGISTRY" 2>/dev/null | tr '\n' ' ')" || owned=""
+  for s in ${WT_LIVE_SLOTS:-}; do
+    wt_slot_in_set "$s" "$owned" || printf '%s ' "$s"
+  done
 }
 
 # Resuelve el folder del worktree de CODIGO: WT explicito, o autodeteccion por el toplevel git SOLO si el CWD
@@ -395,6 +445,14 @@ PM_WT_ORACLE_PASS="${PM_WT_ORACLE_PASS:-ctrlpiso}"
 wt_oracle_exists() {
   local ctx; ctx="$(remote_docker_ctx)"
   on_intel "docker $ctx inspect '$WT_ORACLE_CONTAINER' >/dev/null 2>&1" 2>/dev/null
+}
+
+# Verdadero si el contenedor de la API del slot existe (corriendo o detenido). Espeja wt_oracle_exists pero toma el
+# slot por ARG (no depende del global WT_ORACLE_CONTAINER de wt_derive): lo usan los teardown que VERIFICAN el
+# retiro de la API por slot antes de liberar la fila (req6.2).
+wt_api_exists() {  # uso: wt_api_exists <slot>
+  local ctx; ctx="$(remote_docker_ctx)"
+  on_intel "docker $ctx inspect 'pm-wt${1}-api' >/dev/null 2>&1" 2>/dev/null
 }
 wt_oracle_running() {
   local ctx; ctx="$(remote_docker_ctx)"
@@ -860,10 +918,13 @@ cmd_wt_up() {
   # FUERA del up-lock (no toca el slot); no confundir con el falla-cerrado de wt_check_port_free.
   wt_disk_gate || return 1
   wt_mem_gate || return 1
-  local folder slot reclaimed
+  local folder slot reclaimed live=""
   folder="$(wt_resolve_folder)" || return 1
+  # req6.1: sonda de realidad (slots con contenedor vivo) para que la asignacion NO entregue un slot huerfano (env
+  # vivo que perdio su fila). Fuera del registry-lock (una docker ps): OK=0 => live vacio => asignacion como antes.
+  wt_probe_live_slots || true; live="${WT_LIVE_SLOTS:-}"
   # La asignacion de slot se serializa por el registro (aparte del up-lock): folders distintos no compiten.
-  slot="$(wt_registry_lock wt_slot_assign "$folder")" || slot=""
+  slot="$(wt_registry_lock wt_slot_assign "$folder" "$live")" || slot=""
   if [ -z "$slot" ]; then
     # Pool lleno: en vez de abortar, recupera arrendamientos muertos (pid muerto + heartbeat > PM_WT_LEASE_TTL) y
     # reintenta. Un pool lleno de slots abandonados se auto-recupera; los slots de duenas vivas no se tocan.
@@ -872,7 +933,8 @@ cmd_wt_up() {
     reclaimed="$(wt_reclaim_dead_leases 0 1)"
     if [ "${reclaimed:-0}" -gt 0 ]; then
       wt_log "reclamados $reclaimed slot(s); reintentando la asignacion"
-      slot="$(wt_registry_lock wt_slot_assign "$folder")" || slot=""
+      wt_probe_live_slots || true; live="${WT_LIVE_SLOTS:-}"   # re-sonda tras el reclaim (los slots reclamados ya no viven)
+      slot="$(wt_registry_lock wt_slot_assign "$folder" "$live")" || slot=""
     fi
     [ -n "$slot" ] || { wt_die "sin slots libres (PM_WT_SLOTS=$PM_WT_SLOTS) y sin arrendamientos reclamables; baja un worktree (make wt-down) o sube PM_WT_SLOTS"; return 1; }
   fi
@@ -994,6 +1056,10 @@ cmd_wt_down() {
   wt_derive "$slot"
   wt_log "bajando worktree '$folder' (slot $slot) ..."
   on_intel "docker $ctx rm -f 'pm-wt${slot}-api' >/dev/null 2>&1; true"
+  # req6.2: la API se retira ANTES de liberar el slot y su ausencia se VERIFICA (espeja el guard del Oracle). Un
+  # contenedor que sobrevive al rm -f (ssh/docker transitorio) dejaria, si se liberara la fila, un HUERFANO vivo
+  # sin fila -> exactamente la mitad del drift b3. Sin verificar la fila NO se libera.
+  if wt_api_exists "$slot"; then wt_die "el slot $slot NO se libera: 'pm-wt${slot}-api' sobrevive al rm -f (revisa $PM_REMOTE_SSH)"; return 1; fi
   # El Oracle del slot se retira ANTES de liberar el slot y su ausencia se VERIFICA: si sobreviviera, el
   # siguiente dueno del slot heredaria los datos que el camino con flag OFF (PGE950RT) haya mutado.
   if wt_oracle_exists; then
@@ -1107,6 +1173,9 @@ _wt_reclaim_slot() {  # uso: _wt_reclaim_slot <slot> <folder>
   wt_derive "$slot"
   wt_log "reclamando slot $slot ('$folder'): arrendamiento muerto -> teardown de recursos"
   on_intel "docker $ctx rm -f 'pm-wt${slot}-api' >/dev/null 2>&1; true"
+  # req6.2: verifica el retiro de la API ANTES de liberar la fila (espeja el guard del Oracle). Si sobrevive al
+  # rm -f (ssh/docker transitorio), la fila NO se libera: liberarla dejaria un huerfano vivo sin fila (raiz b3).
+  if wt_api_exists "$slot"; then wt_die "reclaim del slot $slot: 'pm-wt${slot}-api' sobrevive al rm -f; la fila NO se libera (evita huerfano)"; return 1; fi
   if wt_oracle_exists; then
     wt_oracle_down || { wt_die "reclaim del slot $slot: el Oracle no se retiro por completo; la fila NO se libera"; return 1; }
   fi
@@ -1126,18 +1195,29 @@ _wt_reclaim_slot() {  # uso: _wt_reclaim_slot <slot> <folder>
 # _wt_reclaim_slot). Con 'max' > 0 detiene el barrido tras reclamar 'max' slots (early-stop, para liberar solo lo
 # necesario); sin max (o max<=0) reclama todas. Imprime cuantos reclamo (o cuantos son reclamables, en dry). Toma
 # un snapshot bajo lock y NO sostiene el lock durante el teardown remoto.
+# req6.4: ademas del criterio por TTL (wt_lease_reclaimable), reclama FANTASMAS: fila con dueno muerto cuyo slot NO
+# tiene contenedores vivos, aunque el heartbeat sea fresco (un slot nunca aprovisionado no queda pegado ~TTL). La
+# proteccion de una dueña VIVA (pid) y de un slot vivo con heartbeat fresco se mantiene intacta (R4/ac11). Si la
+# sonda de realidad no responde (WT_LIVE_SLOTS_OK=0) NO se aplica el phantom-reclaim (solo TTL): fail-safe.
 wt_reclaim_dead_leases() {  # uso: wt_reclaim_dead_leases <dry: 1|0> [max]
-  local dry="${1:-1}" max="${2:-0}" snap f s pr off cr pid hb n=0
+  local dry="${1:-1}" max="${2:-0}" snap f s pr off cr pid hb n=0 phantom
   [ -f "$PM_WT_REGISTRY" ] || { printf '0'; return 0; }
   snap="$(wt_registry_lock cat "$PM_WT_REGISTRY")" || { wt_log "reclaim: registro no legible; no se reclama"; printf '0'; return 0; }
+  wt_probe_live_slots || true   # realidad para el phantom-reclaim; OK=0 => solo TTL
   # Ordena el snapshot por 'created' (col 5, TAB) ascendente: la reclamacion procede del arrendamiento muerto mas
   # viejo al mas nuevo. Solo reordena las filas; el filtro por wt_lease_reclaimable no cambia.
   snap="$(printf '%s' "$snap" | sort -t"$(printf '\t')" -k5,5)"
   while IFS=$'\t' read -r f s pr off cr pid hb; do
     [ -n "$f" ] || continue
-    wt_lease_reclaimable "$pid" "$hb" "$cr" || continue
+    phantom=0
+    if [ "${WT_LIVE_SLOTS_OK:-0}" = 1 ] && wt_pid_dead "$pid" && ! wt_slot_in_set "$s" "${WT_LIVE_SLOTS:-}"; then phantom=1; fi
+    wt_lease_reclaimable "$pid" "$hb" "$cr" || [ "$phantom" = 1 ] || continue
     if [ "$dry" = "1" ]; then
-      wt_log "arrendamiento reclamable: slot $s ('$f'; pid ${pid:-<ninguno>}, heartbeat ${hb:-<created:$cr>})"
+      if [ "$phantom" = 1 ] && ! wt_lease_reclaimable "$pid" "$hb" "$cr"; then
+        wt_log "fantasma reclamable: slot $s ('$f'; pid ${pid:-<ninguno>} muerto, slot sin contenedores vivos, heartbeat ${hb:-<created:$cr>})"
+      else
+        wt_log "arrendamiento reclamable: slot $s ('$f'; pid ${pid:-<ninguno>}, heartbeat ${hb:-<created:$cr>})"
+      fi
       n=$((n+1))
     else
       if _wt_reclaim_slot "$s" "$f"; then
@@ -1187,16 +1267,24 @@ cmd_wt_gc() {
   echo "[wt-gc] registro de slots ($PM_WT_REGISTRY):"
   if [ -n "$reg_snap" ]; then printf '%s\n' "$reg_snap" | awk -F'\t' '{printf "  slot %-3s %s\n", $2, $1}'; else echo "  (vacio)"; fi
 
-  # Plano de arrendamientos: filas cuyo dueno murio (pid muerto) y con heartbeat/created > PM_WT_LEASE_TTL. Con
-  # FORCE=1 se reclaman de raiz (teardown de recursos + release de la fila via _wt_reclaim_slot, orden seguro); sin
-  # FORCE solo se informan. Corre ANTES de los planos de recursos: sus recursos ya no existen tras el reclaim.
-  echo "[wt-gc] plano de arrendamientos (pid muerto + heartbeat > ${PM_WT_LEASE_TTL}s):"
+  # Plano de arrendamientos: filas cuyo dueno murio (pid muerto) y con heartbeat/created > PM_WT_LEASE_TTL, MAS los
+  # FANTASMAS (req6.4: dueno muerto + slot sin contenedores vivos, aunque el heartbeat sea fresco). Con FORCE=1 se
+  # reclaman de raiz (teardown de recursos + release de la fila via _wt_reclaim_slot, orden seguro); sin FORCE solo
+  # se informan. Corre ANTES de los planos de recursos: sus recursos ya no existen tras el reclaim.
+  echo "[wt-gc] plano de arrendamientos (pid muerto + heartbeat > ${PM_WT_LEASE_TTL}s, o fantasma sin contenedores vivos):"
+  wt_probe_live_slots || true   # realidad para distinguir fantasma (OK=0 => solo TTL)
   if [ "$reg_readable" = "1" ] && [ -n "$reg_snap" ]; then
-    local lf ls lpr loff lcr lpid lhb
+    local lf ls lpr loff lcr lpid lhb lphantom
     while IFS=$'\t' read -r lf ls lpr loff lcr lpid lhb; do
       [ -n "$lf" ] || continue
-      wt_lease_reclaimable "$lpid" "$lhb" "$lcr" || continue
-      echo "  slot $ls ('$lf')  -> ARRENDAMIENTO MUERTO (pid ${lpid:-<ninguno>}, heartbeat ${lhb:-<created:$lcr>})"
+      lphantom=0
+      if [ "${WT_LIVE_SLOTS_OK:-0}" = 1 ] && wt_pid_dead "$lpid" && ! wt_slot_in_set "$ls" "${WT_LIVE_SLOTS:-}"; then lphantom=1; fi
+      wt_lease_reclaimable "$lpid" "$lhb" "$lcr" || [ "$lphantom" = 1 ] || continue
+      if [ "$lphantom" = 1 ] && ! wt_lease_reclaimable "$lpid" "$lhb" "$lcr"; then
+        echo "  slot $ls ('$lf')  -> FANTASMA (pid ${lpid:-<ninguno>} muerto, slot sin contenedores vivos, heartbeat ${lhb:-<created:$lcr>})"
+      else
+        echo "  slot $ls ('$lf')  -> ARRENDAMIENTO MUERTO (pid ${lpid:-<ninguno>}, heartbeat ${lhb:-<created:$lcr>})"
+      fi
       if [ "$force" = "1" ]; then
         if _wt_reclaim_slot "$ls" "$lf"; then echo "     reclamado"; lease_reclaimed=$((lease_reclaimed+1))
         else echo "     ERROR: no se pudo reclamar el slot $ls (Oracle no retirado); la fila se conserva"; clean_failures=$((clean_failures+1)); fi
@@ -1449,7 +1537,15 @@ cmd_wt_reclaim() {
   IFS=$'\t' read -r cr pid hb <<EOF
 $row
 EOF
-  wt_lease_reclaimable "$pid" "$hb" "$cr" || { wt_die "el arrendamiento del slot $slot ('$folder') NO es reclamable (pid vivo o heartbeat fresco): no se roba a una duena viva"; return 3; }
+  # req6.4: reclamable por TTL (wt_lease_reclaimable) O como FANTASMA (dueno muerto + slot sin contenedores vivos,
+  # aunque el heartbeat sea fresco). Un pid VIVO o un slot vivo con heartbeat fresco NUNCA se reclama (no se roba a
+  # una duena viva). Si la realidad no se pudo sondear (OK=0) solo aplica el criterio TTL (fail-safe).
+  local phantom=0
+  wt_probe_live_slots || true
+  if [ "${WT_LIVE_SLOTS_OK:-0}" = 1 ] && wt_pid_dead "$pid" && ! wt_slot_in_set "$slot" "${WT_LIVE_SLOTS:-}"; then phantom=1; fi
+  if wt_lease_reclaimable "$pid" "$hb" "$cr" || [ "$phantom" = 1 ]; then :; else
+    wt_die "el arrendamiento del slot $slot ('$folder') NO es reclamable (pid vivo, o heartbeat fresco con contenedores vivos): no se roba a una duena viva"; return 3
+  fi
   # _wt_reclaim_slot se invoca en contexto de condicion (como en wt_reclaim_dead_leases y cmd_wt_gc): sus guardas
   # internas ('; true', '|| true') asumen set -e SUPRIMIDO; llamarlo BARE abortaria el teardown a media via.
   if _wt_reclaim_slot "$slot" "$folder"; then return 0; fi

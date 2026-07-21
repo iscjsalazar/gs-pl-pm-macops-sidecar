@@ -18,5 +18,7 @@
 /packer/Autounattend.xml
 
 # Salida generada del generador de la golden slice: CREATE/loaders + CSV concatenados con DATOS DE PROD
-# (se regenera con 'python3 goldenslice/generate.py'); NUNCA se versiona (leak de datos reales).
+# (se regenera con 'python3 goldenslice/generate.py'); NUNCA se versiona (leak de datos reales). build-wt<N> son
+# los directorios de build POR SLOT (multi-golden en paralelo, req4).
 /goldenslice/build/
+/goldenslice/build-wt*/

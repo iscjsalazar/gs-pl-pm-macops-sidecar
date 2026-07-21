@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # goldenslice-up (D18): levanta un ambiente E2E completo sembrado con la golden slice (datos reales de PROD,
-# ventana FY2026 sem 18-25) y accesible desde la M1. SIN parametros: usa checkouts canonicos.
+# ventana FY2026 sem 18-25) y accesible desde la M1. SIN parametros: usa checkouts canonicos (origin/develop
+# desechables). CON WT=<pm-wt> LEGACYWT=<legacy-wt> (modo worktree, req2/req3): usa ESOS worktrees TAL CUAL, sin
+# tocar su git, y cada nombre distinto cae en su propio slot aislado (varios golden en paralelo).
 #
 # Flujo:
 #   1) worktrees canonicos pm + legacy en origin/develop (git stash + checkout: preserva cambios locales, D18).
@@ -12,7 +14,8 @@
 #      (8/8 tablas de WT_LN_TABLES) y NO siembra handcrafted; el contenedor Oracle ya corre y se reusa (golden
 #      intacto); wt_up_api hace 'docker rm -f' siempre, asi que el API se recrea con la connstring golden.
 #
-# Overrides (con default): GS_PM_WT, GS_LEGACY_WT (nombres de worktree), GS_BASE (rama base, default develop).
+# Perillas: WT=<pm-wt> LEGACYWT=<legacy-wt> (modo worktree; ambas obligatorias juntas). Overrides de bajo nivel
+# (con default, semantica canonica git): GS_PM_WT, GS_LEGACY_WT (nombres de worktree), GS_BASE (rama base develop).
 set -eo pipefail
 : "${PM_TARGET:=intel}" ; : "${PM_REMOTE_SSH:=macdata}" ; : "${PM_REMOTE_DOCKER_CONTEXT:=}"
 export PM_TARGET PM_REMOTE_SSH PM_REMOTE_DOCKER_CONTEXT
@@ -27,8 +30,8 @@ WRAPPER_DIR="$(cd "$SELF_DIR/../../.." && pwd)"
 . "$SELF_DIR/lib.sh"     # gs_run_job (helper compartido con relaunch.sh)
 load_env
 
-GS_PM_WT="${GS_PM_WT:-gs_pm_goldenslice}"
-GS_LEGACY_WT="${GS_LEGACY_WT:-gs_legacy_goldenslice}"
+GS_PM_WT="${GS_PM_WT:-${WT:-gs_pm_goldenslice}}"
+GS_LEGACY_WT="${GS_LEGACY_WT:-${LEGACYWT:-gs_legacy_goldenslice}}"
 GS_BASE="${GS_BASE:-develop}"
 PM_REPO="$WRAPPER_DIR/pl-programa-maestro"
 LEGACY_REPO="$WRAPPER_DIR/pl-pm-legacy"
@@ -36,6 +39,18 @@ WORKTREES="$WRAPPER_DIR/worktrees"
 
 gs_log(){ printf '== [goldenslice-up] %s\n' "$*"; }
 gs_die(){ printf 'ERROR [goldenslice-up]: %s\n' "$*" >&2; exit 1; }
+
+# MODO WORKTREE (req2/req3): WT=/LEGACYWT= (perillas del Makefile) activan "usa el worktree TAL CUAL, sin tocar
+# git". Se detecta por las perillas CRUDAS; sin ninguna de las dos => comportamiento canonico (worktrees
+# desechables en origin/<base>, req1.1). En modo worktree ambos son explicitos y obligatorios (D2): no se adivina
+# el par pm/legado. El override de bajo nivel GS_PM_WT/GS_LEGACY_WT por env conserva su semantica canonica (git).
+GS_WT_MODE=0
+if [ -n "${WT:-}" ] || [ -n "${LEGACYWT:-}" ]; then
+  GS_WT_MODE=1
+  [ -n "${WT:-}" ] || gs_die "modo worktree: falta WT=<pm-wt> (LEGACYWT='${LEGACYWT:-}' dado). Uso: make goldenslice-up WT=<pm-wt> LEGACYWT=<legacy-wt>"
+  [ -n "${LEGACYWT:-}" ] || gs_die "modo worktree: falta LEGACYWT=<legacy-wt> (WT='${WT:-}' dado). Uso: make goldenslice-up WT=<pm-wt> LEGACYWT=<legacy-wt>"
+  gs_log "modo worktree: pm='$GS_PM_WT' legado='$GS_LEGACY_WT' (codigo tal cual, sin fetch/stash/checkout)"
+fi
 
 # --- instrumentacion de tiempos por fase (aditiva; no altera la logica ni los codigos de salida) ---
 # El artefacto es maquina-legible: una linea 'fase|segundos' por fase + 'TOTAL|<wall-clock>' al final. Usa
@@ -67,6 +82,14 @@ gs_ensure_worktree(){  # <repo> <wt_name>
   local repo="$1" name="$2"          # decls separadas: los libs activan 'set -u' y 'local a=$1 b=$WORKTREES/$a'
   local path="$WORKTREES/$name"      # expande $a ANTES de asignarlo (gotcha de local multi-asignacion)
   [ -d "$repo/.git" ] || [ -f "$repo/.git" ] || gs_die "repo no encontrado: $repo"
+  if [ "$GS_WT_MODE" = 1 ]; then
+    # Modo worktree (req2/ac1): usa el worktree TAL CUAL, sin tocar git (ni fetch, ni stash, ni checkout). Debe
+    # PRE-EXISTIR (lo crea el usuario con 'new-worktree'); no se crea ni se mueve HEAD aqui (elegir un branch
+    # tocaria git). El usuario maneja git por su cuenta (incluido git pull --rebase origin develop).
+    [ -d "$path" ] || gs_die "el worktree '$name' no existe en $path (modo WT=/LEGACYWT=): crealo con 'new-worktree' (o 'git worktree add') y deja tu codigo antes de correr golden"
+    gs_log "worktree $name: modo WT= (codigo tal cual; branch $(git -C "$path" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?'), sin fetch/stash/checkout)"
+    return 0
+  fi
   git -C "$repo" fetch origin "$GS_BASE" >/dev/null 2>&1 || gs_die "git fetch origin $GS_BASE fallo en $repo"
   if [ -d "$path" ]; then
     gs_log "worktree $name: git stash (autostash) + checkout origin/$GS_BASE"
@@ -92,14 +115,20 @@ LEGACY_SRC="$WORKTREES/$GS_LEGACY_WT"
 # lazy en el intake-load, cuando goldenslice-seed ya la creo). Sin slot asignable => se aborta (goldenslice exige slot).
 SLOT_PRE="$(wt_slot_lookup "$GS_PM_WT")"
 if [ -z "$SLOT_PRE" ]; then
-  SLOT_PRE="$(wt_registry_lock wt_slot_assign "$GS_PM_WT" 2>/dev/null || true)"
+  # req6.1: sonda de realidad para que la pre-asignacion NO entregue un slot huerfano (env vivo que perdio su fila).
+  wt_probe_live_slots || true; GS_LIVE="${WT_LIVE_SLOTS:-}"
+  SLOT_PRE="$(wt_registry_lock wt_slot_assign "$GS_PM_WT" "$GS_LIVE" 2>/dev/null || true)"
   if [ -z "$SLOT_PRE" ]; then
     wt_reclaim_dead_leases 0 1 >/dev/null 2>&1 || true
-    SLOT_PRE="$(wt_registry_lock wt_slot_assign "$GS_PM_WT" 2>/dev/null || true)"
+    wt_probe_live_slots || true; GS_LIVE="${WT_LIVE_SLOTS:-}"   # re-sonda tras el reclaim
+    SLOT_PRE="$(wt_registry_lock wt_slot_assign "$GS_PM_WT" "$GS_LIVE" 2>/dev/null || true)"
   fi
   [ -n "$SLOT_PRE" ] || gs_die "sin slots libres para goldenslice-up (PM_WT_SLOTS=${PM_WT_SLOTS:-?}); baja un worktree (make wt-down) o sube PM_WT_SLOTS"
   gs_log "slot $SLOT_PRE pre-asignado en FRIO (colapso: env final del golden en la unica recreacion)"
 else
+  # req6.3 (red de seguridad, drift b3): el slot vino de una fila PRE-EXISTENTE del registro (TIBIO). Si apunta a
+  # un slot sin aprovisionar mientras hay un env vivo en otro slot => falla ruidoso (no deploya al fantasma).
+  gs_guard_slot_provisioned "$SLOT_PRE" "$GS_PM_WT"
   gs_log "slot $SLOT_PRE ya asignado (TIBIO): env final del golden en la unica recreacion"
 fi
 export PM_WT_LN_DB="pm_gs_ln_wt${SLOT_PRE}"             # nace apuntando a la LN golden => la recreacion de e2e-up sobra
@@ -120,22 +149,25 @@ SLOT="$(wt_slot_lookup "$GS_PM_WT")"
 LN_GS_DB="pm_gs_ln_wt${SLOT}"
 gs_log "slot asignado: $SLOT -> LN golden aislada = $LN_GS_DB"
 
-# 2.5) regenera goldenslice/build (CREATE + loaders + CSV concatenados) desde el extract de PROD. El build es
-#      gitignored (datos reales) y se regenera SIEMPRE, de modo que cualquier cambio del extract (p. ej. un
-#      catalogo re-extraido) fluye al golden sin paso manual. Corre en la M1 (solo lee CSV/DDL y escribe SQL/CSV;
-#      sin Docker). seed-slot.sh consume $SELF_DIR/build; el default de su SRC coincide con GS_SRC.
+# 2.5) regenera goldenslice/build-wt<N> (CREATE + loaders + CSV concatenados) desde el extract de PROD, en un
+#      directorio de build POR SLOT (req4/ac6): asi dos golden concurrentes NO comparten el mismo 'build' (quitaba
+#      la ventana de carrera del build compartido). Es gitignored (datos reales) y se regenera SIEMPRE, de modo que
+#      cualquier cambio del extract (p. ej. un catalogo re-extraido) fluye al golden sin paso manual. Corre en la M1
+#      (solo lee CSV/DDL y escribe SQL/CSV; sin Docker). Se pasa por BUILD= a goldenslice-seed (seed-slot.sh:26).
 GS_SRC="${GS_SRC:-$WRAPPER_DIR/gs-pl-pm-macops-sidecar/artifacts/prod-extract-260718}"
+GS_BUILD_DIR="$SELF_DIR/build-wt${SLOT}"
 command -v python3 >/dev/null 2>&1 || gs_die "python3 no disponible (requerido por generate.py)"
 [ -d "$GS_SRC/oracle" ] || gs_die "extract no encontrado: $GS_SRC (falta oracle/)"
-gs_log "regenerando goldenslice/build desde el extract ($GS_SRC) ..."
+gs_log "regenerando goldenslice/build-wt${SLOT} desde el extract ($GS_SRC) ..."
 t0=$(date +%s)
-python3 "$SELF_DIR/generate.py" --src "$GS_SRC" --out "$SELF_DIR/build" >/dev/null || gs_die "generate.py fallo"
+python3 "$SELF_DIR/generate.py" --src "$GS_SRC" --out "$GS_BUILD_DIR" >/dev/null || gs_die "generate.py fallo"
 _gs_timing "build-regen" "$t0"
 
-# 3) siembra la golden slice (Oracle multi-owner + recompila + LN aislada). Idempotente.
-gs_log "goldenslice-seed SLOT=$SLOT (Oracle golden + LN aislada) ..."
+# 3) siembra la golden slice (Oracle multi-owner + recompila + LN aislada). Idempotente. BUILD=<build-wt<N>> aisla
+#    la fuente de seed por slot (req4).
+gs_log "goldenslice-seed SLOT=$SLOT BUILD=build-wt${SLOT} (Oracle golden + LN aislada) ..."
 t0=$(date +%s)   # PM_TIMING_LOG ya exportado: seed-slot.sh anexa sus sub-fases al MISMO archivo
-make -C "$SIDECAR_DIR" goldenslice-seed SLOT="$SLOT" || gs_die "goldenslice-seed fallo"
+make -C "$SIDECAR_DIR" goldenslice-seed SLOT="$SLOT" BUILD="$GS_BUILD_DIR" || gs_die "goldenslice-seed fallo"
 _gs_timing "goldenslice-seed" "$t0"
 
 # 4) e2e-up apuntando el pm-api a la LN GOLDEN (PM_WT_LN_DB exportado; WT_ENV no lo pisa). e2e-up recrea el API
@@ -240,3 +272,5 @@ _gs_timing "TOTAL" "$GS_START_EPOCH"
 gs_log "timing por fase persistido en $PM_TIMING_LOG"
 gs_log "goldenslice-up LISTO (slot $SLOT). SQL golden VACIO + catalogos/insumos cargados desde el golden Oracle; menu UBO registrado."
 gs_log "El intake RES se dispara MANUAL desde la app: http://localhost:$(( 18100 + SLOT ))/ProgramaMaestroLN/ (OrdenesNuevasCargar_LN). Reimprime URL: make e2e-url WT=$GS_PM_WT"
+# req5/ac7: banner final GARANTIZADO (independiente del recuadro de e2e-url, que puede timeoutear y saltarse).
+gs_banner "$SLOT" "$GS_PM_WT" "$GS_LEGACY_WT" "$API_PORT"
