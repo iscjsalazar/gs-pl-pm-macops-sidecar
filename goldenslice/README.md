@@ -31,26 +31,34 @@ Materializa una **golden slice** (corte real de PROD, nueva y SEPARADA de los se
 - **Tablas LN schema-only** (`LN_SCHEMA_ONLY` en `generate.py`): `ttcibd001115`, `ttxpcf925116` se emiten VACÍAS (CREATE sin BULK). El intake las consulta pero su scope RES es 0 filas en PROD (fiel); además satisfacen el guard de completitud LN del sidecar.
 - **Knob `STEP=oracle|ln|all`** para re-seed parcial.
 
-## `make goldenslice-up` (sin parámetros, D18) — `up.sh`
+## `make goldenslice-up` — `up.sh`
 
 Un comando levanta el ambiente E2E completo sembrado con la golden slice, accesible desde la M1:
 
 1. Worktrees canónicos `gs_pm_goldenslice` + `gs_legacy_goldenslice` en `origin/develop` (`git stash` + `checkout`, preserva cambios locales).
 2. `make wt-up` (slot + Oracle propio); el slot se auto-asigna y se deriva por `wt_slot_lookup`.
-3. `make goldenslice-seed SLOT=<N>` (Oracle multi-owner + recompila + LN aislada UTF-16).
+3. `make goldenslice-seed SLOT=<N> BUILD=build-wt<N>` (Oracle multi-owner + recompila + LN aislada UTF-16). El build de la golden slice se regenera **por slot** (`build-wt<N>`, gitignored) para que varios golden concurrentes no compartan el mismo directorio.
 4. `PM_WT_LN_DB=pm_gs_ln_wt<N> make e2e-up`: recrea el pm-api apuntando a la **LN golden** (no el `pm_erpln106` compartido; el guard ve la golden completa y no siembra handcrafted), levanta el frontend IIS con su wiring, activa el flag `carga-backend/RES` e imprime las URLs (backend + legado).
 
-Reimprime la URL de un ambiente ya arriba: `make e2e-url WT=gs_pm_goldenslice`.
+Al cierre imprime SIEMPRE un **banner garantizado** (independiente de `make e2e-url`, que puede colgarse) con: slot, URL del legado (`http://localhost:$((18100+SLOT))/ProgramaMaestroLN/`), URL del backend y el comando exacto de reuso (`make goldenslice-relaunch WT=… LEGACYWT=…`). Reimprime la URL de un ambiente ya arriba: `make e2e-url WT=gs_pm_goldenslice`.
 
-## `make goldenslice-relaunch WT=<worktree>` — `relaunch.sh`
+### Modo worktree y multi-golden — `WT=<pm-wt> LEGACYWT=<legacy-wt>`
 
-Actualiza, recompila y relanza AMBAS apps (pm-api .NET + legado ASP.NET) con la última `origin/develop` **SIN rehacer el seed**. Reusa el Oracle/LN golden y la BD planning `pm_planning_wt<N>` ya sembradas/cargadas por un `goldenslice-up` previo: recrea el pm-api contra las MISMAS BD, redespliega el legado, reactiva el flag e imprime las URLs. Es `goldenslice-up` MENOS el `goldenslice-seed`, los loaders (`catalog-load`/`intake-load`) y el registro del menú UBO. `WT=` es opcional (default `gs_pm_goldenslice`).
+`make goldenslice-up WT=<pm-wt> LEGACYWT=<legacy-wt>` corre el **código de esos worktrees TAL CUAL**, sin tocar su git (sin `fetch`/`stash`/`checkout`): usa el branch actual + los cambios sin commitear (el usuario maneja git por su cuenta, incluido `git pull --rebase origin develop`). Ambas perillas son **obligatorias juntas** (no se adivina el par pm/legado); los worktrees deben pre-existir (créalos con `new-worktree`). Sin `WT`/`LEGACYWT` el comportamiento es **idéntico al canónico** (worktrees desechables en `origin/develop`).
+
+Como el slot se deriva del **nombre** del worktree pm, dos golden con nombres distintos caen en slots aislados y corren **en paralelo** sin pisarse (data tier + app + URL propios). El techo de golden concurrentes lo fija `PM_WT_SLOTS` (default 8) y la RAM/disco de la VM colima (cada golden = 1 Oracle + 1 API + 1 site IIS); el build del legado sigue serializando en el `guest-lock` global.
+
+## `make goldenslice-relaunch WT=<pm-wt> LEGACYWT=<legacy-wt>` — `relaunch.sh`
+
+Actualiza, recompila y relanza AMBAS apps (pm-api .NET + legado ASP.NET) **SIN rehacer el seed**. Reusa el Oracle/LN golden y la BD planning `pm_planning_wt<N>` ya sembradas/cargadas por un `goldenslice-up` previo: recrea el pm-api contra las MISMAS BD, redespliega el legado, reactiva el flag e imprime las URLs. Es `goldenslice-up` MENOS el `goldenslice-seed`, los loaders (`catalog-load`/`intake-load`) y el registro del menú UBO.
+
+Perillas simétricas a `goldenslice-up`: sin argumentos usa los worktrees canónicos en `origin/develop`; con `WT=<pm-wt> LEGACYWT=<legacy-wt>` (**modo worktree**, ambas obligatorias) relanza el **código de esos worktrees tal cual**, sin tocar git.
 
 **Precondición**: el slot del worktree ya existe (Oracle golden + LN golden + BD planning cargada). Si no, corta con error sugiriendo `make goldenslice-up`. El slot se deriva del registro (`wt_slot_lookup`).
 
-1. Worktrees canónicos pm (`gs_pm_goldenslice`) + legado (`gs_legacy_goldenslice`) a `origin/develop` (`git stash` + `checkout`, preserva cambios locales, D18).
+1. Worktrees a `origin/develop` (canónico) o **tal cual** (modo worktree, sin `fetch`/`stash`/`checkout`).
 2. Recrea el pm-api contra las MISMAS BD (LN golden + planning ya cargada) vía `make wt-up ORACLE=1` con `PM_WT_SKIP_PLANNING_SEED=1` (no re-siembra planning) y el env final del golden (LN golden + Tools ON). NO llama `goldenslice-seed`: el Oracle/LN golden y la BD planning persisten intactos en el motor compartido.
-3. Recompila y redespliega el legado con la última `develop` vía `make e2e-up` con `PM_E2E_FORCE=1` (fuerza `legacy-build`+`deploy`) + `PM_E2E_SKIP_WTUP=1` (el pm-api ya lo recreó el paso 2) + `PM_E2E_SKIP_SMOKE=1` (ambiente arriba; smoke aparte con `make e2e-smoke`). Reactiva el flag `carga-backend/RES` e imprime las URLs.
-4. Reimprime el recuadro de acceso (URLs desde M1). NO seed, NO `catalog-load`/`intake-load`, NO menú (ya registrado). Si el pull trae migraciones EF que tocan el schema de catálogos, AVISA (no recarga en silencio, R4).
+3. Recompila y redespliega el legado vía `make e2e-up` con `PM_E2E_SKIP_WTUP=1` (el pm-api ya lo recreó el paso 2) + `PM_E2E_SKIP_SMOKE=1` (ambiente arriba; smoke aparte con `make e2e-smoke`). El rebuild del legado (`PM_E2E_FORCE`) se decide así: `FORCE=1` manual lo fuerza; en **modo worktree** se fuerza SIEMPRE (no hay SHA before/after que diffear porque golden no mueve HEAD), con escape `LEGACYBUILD=0` para omitirlo; en modo canónico se fuerza solo si el SHA del worktree legado cambió. Reactiva el flag `carga-backend/RES` e imprime las URLs.
+4. Imprime el **banner garantizado** (igual que `goldenslice-up`). NO seed, NO `catalog-load`/`intake-load`, NO menú (ya registrado). Si el pull (modo canónico) trae migraciones EF que tocan el schema de catálogos, fuerza el re-warm de catálogos.
 
 Los tiempos por fase se persisten en `artifacts/goldenslice-timing/goldenslice-relaunch-<UTC>.log`.

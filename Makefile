@@ -175,6 +175,12 @@ LINEA     ?=
 ANOF      ?= 0
 SEMF      ?= 0
 FLAGFINAL ?= on
+# --- Variables golden (goldenslice-up/goldenslice-relaunch) ---
+# LEGACYWT = worktree del legado (pl-pm-legacy) en modo worktree; WT (arriba) = worktree pm. Vacias => flujo
+# canonico (worktrees desechables). BUILD = directorio de build de la golden slice pasado a goldenslice-seed
+# (vacio => el default $SELF_DIR/build de seed-slot.sh; up.sh lo fija a build-wt<N> por slot).
+LEGACYWT  ?=
+BUILD     ?=
 BRIDGEPORT?= 60211
 SQLPMHOST ?=
 
@@ -336,7 +342,7 @@ e2e-oracle-counts: ; $(E2E_ORCH_ENV) ./scripts/e2e.sh oracle-counts
 # goldenslice-seed SLOT=<N>: carga bulk Oracle (owners como esquemas) + LN per-slot aislada desde build/ (D20).
 goldenslice-seed: override TARGET := intel
 goldenslice-seed: REMOTE := macdata
-goldenslice-seed: ; SLOT="$(SLOT)" $(WT_ENV) bash ./goldenslice/seed-slot.sh
+goldenslice-seed: ; SLOT="$(SLOT)" BUILD="$(BUILD)" $(WT_ENV) bash ./goldenslice/seed-slot.sh
 goldenslice-verify: override TARGET := intel
 goldenslice-verify: REMOTE := macdata
 goldenslice-verify: ; SLOT="$(SLOT)" $(WT_ENV) bash ./goldenslice/verify-slot.sh
@@ -344,13 +350,13 @@ goldenslice-verify: ; SLOT="$(SLOT)" $(WT_ENV) bash ./goldenslice/verify-slot.sh
 # (sourcea load_env) y orquesta wt-up + goldenslice-seed + e2e-up (LN golden). Ver goldenslice/up.sh.
 goldenslice-up: override TARGET := intel
 goldenslice-up: REMOTE := macdata
-goldenslice-up: ; $(PM_ENV) bash ./goldenslice/up.sh
+goldenslice-up: ; $(PM_ENV) LEGACYWT=$(LEGACYWT) bash ./goldenslice/up.sh
 # goldenslice-relaunch (ac6): relanza AMBAS apps (pm-api + legado) con la ultima origin/develop SIN re-sembrar.
 # Reusa el Oracle/LN golden y la BD planning ya cargada por un goldenslice-up previo; exige slot pre-existente.
 # Ver goldenslice/relaunch.sh.
 goldenslice-relaunch: override TARGET := intel
 goldenslice-relaunch: REMOTE := macdata
-goldenslice-relaunch: ; $(PM_ENV) bash ./goldenslice/relaunch.sh
+goldenslice-relaunch: ; $(PM_ENV) LEGACYWT=$(LEGACYWT) bash ./goldenslice/relaunch.sh
 
 # --- aprovisionamiento por worktree (wt-*): intel-only (SQL compartido + bus en macdata) ---
 # 'override TARGET' fuerza intel (el SQL compartido vive en el docker de macdata); REMOTE default macdata

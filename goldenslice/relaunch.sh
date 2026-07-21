@@ -36,10 +36,10 @@ WRAPPER_DIR="$(cd "$SELF_DIR/../../.." && pwd)"
 . "$SELF_DIR/lib.sh"     # gs_run_job (helper compartido con up.sh)
 load_env
 
-# El slot del worktree pm es parametrizable por WT= (Make lo propaga via PM_ENV); GS_PM_WT gana si se fija
-# explicito; si ambos vacios, el default canonico gs_pm_goldenslice. El worktree legado usa GS_LEGACY_WT.
+# El slot del worktree pm es parametrizable por WT= (Make lo propaga); el worktree legado por LEGACYWT=. GS_PM_WT/
+# GS_LEGACY_WT (env) ganan si se fijan explicitos; si todo vacio, los defaults canonicos gs_pm/gs_legacy_goldenslice.
 GS_PM_WT="${GS_PM_WT:-${WT:-gs_pm_goldenslice}}"
-GS_LEGACY_WT="${GS_LEGACY_WT:-gs_legacy_goldenslice}"
+GS_LEGACY_WT="${GS_LEGACY_WT:-${LEGACYWT:-gs_legacy_goldenslice}}"
 GS_BASE="${GS_BASE:-develop}"
 PM_REPO="$WRAPPER_DIR/pl-programa-maestro"
 LEGACY_REPO="$WRAPPER_DIR/pl-pm-legacy"
@@ -47,6 +47,17 @@ WORKTREES="$WRAPPER_DIR/worktrees"
 
 gs_log(){ printf '== [goldenslice-relaunch] %s\n' "$*"; }
 gs_die(){ printf 'ERROR [goldenslice-relaunch]: %s\n' "$*" >&2; exit 1; }
+
+# MODO WORKTREE (req2): WT=/LEGACYWT= usan ESOS worktrees TAL CUAL, sin tocar git. Detectado por las perillas
+# CRUDAS; sin ninguna => canonico (origin/<base> desechable). Ambas obligatorias juntas (D2). En modo worktree el
+# rebuild del legado se FUERZA (D1: no hay SHA before/after que diffear); LEGACYBUILD=0 lo omite explicitamente.
+GS_WT_MODE=0
+if [ -n "${WT:-}" ] || [ -n "${LEGACYWT:-}" ]; then
+  GS_WT_MODE=1
+  [ -n "${WT:-}" ] || gs_die "modo worktree: falta WT=<pm-wt> (LEGACYWT='${LEGACYWT:-}' dado). Uso: make goldenslice-relaunch WT=<pm-wt> LEGACYWT=<legacy-wt>"
+  [ -n "${LEGACYWT:-}" ] || gs_die "modo worktree: falta LEGACYWT=<legacy-wt> (WT='${WT:-}' dado). Uso: make goldenslice-relaunch WT=<pm-wt> LEGACYWT=<legacy-wt>"
+  gs_log "modo worktree: pm='$GS_PM_WT' legado='$GS_LEGACY_WT' (codigo tal cual, sin fetch/stash/checkout)"
+fi
 
 # --- instrumentacion de tiempos por fase (aditiva; no altera la logica ni los codigos de salida) ---
 # El artefacto es maquina-legible: una linea 'fase|segundos' por fase + 'TOTAL|<wall-clock>' al final. Usa
@@ -76,6 +87,10 @@ wt_require_intel || exit 1
 #    diferencia de up.sh (que auto-asigna el slot en frio), aqui un slot ausente es un error, no un fallback.
 SLOT="$(wt_slot_lookup "$GS_PM_WT")"
 [ -n "$SLOT" ] || gs_die "el worktree '$GS_PM_WT' no tiene slot asignado: corre 'make goldenslice-up' primero (relaunch reusa un slot ya sembrado; no siembra)"
+# req6.3 (red de seguridad, drift b3): relaunch SIEMPRE resuelve una fila pre-existente => es el escenario primo del
+# bug. Si el slot resuelto apunta a un slot sin aprovisionar mientras hay un env vivo en otro => falla ruidoso (no
+# relanza contra el fantasma). Con env caido y ningun otro slot vivo NO bloquea (relaunch re-provisiona el API).
+gs_guard_slot_provisioned "$SLOT" "$GS_PM_WT"
 LN_GS_DB="pm_gs_ln_wt${SLOT}"
 PLANNING_DB="pm_planning_wt${SLOT}"
 gs_log "slot pre-existente $SLOT -> LN golden=$LN_GS_DB, planning=$PLANNING_DB (reuso sin re-sembrar)"
@@ -86,6 +101,13 @@ gs_ensure_worktree(){  # <repo> <wt_name>
   local repo="$1" name="$2"          # decls separadas: los libs activan 'set -u' y 'local a=$1 b=$WORKTREES/$a'
   local path="$WORKTREES/$name"      # expande $a ANTES de asignarlo (gotcha de local multi-asignacion)
   [ -d "$repo/.git" ] || [ -f "$repo/.git" ] || gs_die "repo no encontrado: $repo"
+  if [ "$GS_WT_MODE" = 1 ]; then
+    # Modo worktree (req2/ac1): usa el worktree TAL CUAL, sin tocar git (ni fetch, ni stash, ni checkout). Debe
+    # PRE-EXISTIR; el usuario maneja su git (incluido git pull --rebase origin develop) por su cuenta.
+    [ -d "$path" ] || gs_die "el worktree '$name' no existe en $path (modo WT=/LEGACYWT=): crealo con 'new-worktree' (o 'git worktree add') y deja tu codigo antes de correr golden"
+    gs_log "worktree $name: modo WT= (codigo tal cual; branch $(git -C "$path" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?'), sin fetch/stash/checkout)"
+    return 0
+  fi
   git -C "$repo" fetch origin "$GS_BASE" >/dev/null 2>&1 || gs_die "git fetch origin $GS_BASE fallo en $repo"
   if [ -d "$path" ]; then
     gs_log "worktree $name: git stash (autostash) + checkout origin/$GS_BASE"
@@ -215,6 +237,17 @@ GS_LEGACY_FORCE=0
 if [ "${FORCE:-0}" = "1" ]; then
   GS_LEGACY_FORCE=1
   gs_log "FORCE=1 (manual): se fuerza rebuild/redeploy del legado"
+elif [ "$GS_WT_MODE" = 1 ]; then
+  # D1 (modo worktree): golden no mueve HEAD, no hay SHA before/after que diffear; el usuario cambio codigo por
+  # definicion => se FUERZA el rebuild/redeploy del legado SIEMPRE. Escape LEGACYBUILD=0: lo omite (relaunch
+  # repetido sin cambios del legado; delega el skip por health==200 a legacy.sh).
+  if [ "${LEGACYBUILD:-1}" = "0" ]; then
+    GS_LEGACY_FORCE=0
+    gs_log "modo worktree + LEGACYBUILD=0: NO se fuerza el legado (delega el skip por health==200 a legacy.sh)"
+  else
+    GS_LEGACY_FORCE=1
+    gs_log "modo worktree: se fuerza rebuild/redeploy del legado (D1; el worktree trae tu codigo). Omite con LEGACYBUILD=0"
+  fi
 elif [ -n "$LEGACY_HEAD_BEFORE" ] && [ -n "$LEGACY_HEAD_AFTER" ] && [ "$LEGACY_HEAD_BEFORE" != "$LEGACY_HEAD_AFTER" ]; then
   GS_LEGACY_FORCE=1
   gs_log "SHA legacy cambio ($LEGACY_HEAD_BEFORE -> $LEGACY_HEAD_AFTER): se fuerza rebuild/redeploy del legado"
@@ -244,5 +277,11 @@ fi
 _gs_timing "e2e-url" "$t0"
 _gs_timing "TOTAL" "$GS_START_EPOCH"
 gs_log "timing por fase persistido en $PM_TIMING_LOG"
-gs_log "goldenslice-relaunch LISTO (slot $SLOT). Ambas apps relanzadas con origin/$GS_BASE; Oracle/LN golden + BD planning INTACTOS (no re-sembrados)."
+if [ "$GS_WT_MODE" = 1 ]; then
+  gs_log "goldenslice-relaunch LISTO (slot $SLOT). Ambas apps relanzadas con el codigo de los worktrees ($GS_PM_WT / $GS_LEGACY_WT, tal cual); Oracle/LN golden + BD planning INTACTOS (no re-sembrados)."
+else
+  gs_log "goldenslice-relaunch LISTO (slot $SLOT). Ambas apps relanzadas con origin/$GS_BASE; Oracle/LN golden + BD planning INTACTOS (no re-sembrados)."
+fi
 gs_log "Acceso al legado: http://localhost:$(( 18100 + SLOT ))/ProgramaMaestroLN/ . Reimprime URL: make e2e-url WT=$GS_PM_WT"
+# req5/ac7: banner final GARANTIZADO (independiente del recuadro de e2e-url, que puede timeoutear y saltarse).
+gs_banner "$SLOT" "$GS_PM_WT" "$GS_LEGACY_WT"
