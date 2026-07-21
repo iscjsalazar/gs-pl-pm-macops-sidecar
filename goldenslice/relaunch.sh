@@ -185,7 +185,7 @@ _gs_timing "wt-up" "$t0"
 # <force>=1 corre AMBOS loaders aunque el probe no este vacio (I8). Usa las primitivas compartidas de lib.sh
 # (GS_STRATEGY_TABLES/GS_CONVERGENCE_TABLES/gs_list_empty). API_PORT es global (lo lee gs_run_job).
 gs_ensure_catalogs(){  # <force>
-  local force="${1:-0}" pw empty_s empty_c need_intake=0 need_catalog=0 ctx API_C
+  local force="${1:-0}" pw empty_s empty_c need_intake=0 need_catalog=0 API_C
   pw="$(wt_shared_sql_password)" || gs_die "no se resolvio el SA del SQL compartido para probar los catalogos"
   wt_shared_sql_check || gs_die "el SQL compartido no esta disponible: no se pueden probar los catalogos"
   empty_s="$(gs_list_empty "$pw" "$PLANNING_DB" $GS_STRATEGY_TABLES)"
@@ -203,9 +203,8 @@ gs_ensure_catalogs(){  # <force>
   fi
   # El API recreado en el paso 3 nace con Tools:CatalogLoad/IntakeLoad ON (PM_WT_API_EXTRA_ENV); solo hace falta
   # resolver el puerto para gs_run_job. Sin re-sembrar LN/orders: los loaders solo repueblan el schema Catalogs.
-  ctx="$(remote_docker_ctx)"; API_C="pm-wt${SLOT}-api"
-  API_PORT="$(on_intel "docker $ctx port '$API_C' 8080/tcp 2>/dev/null" 2>/dev/null | head -1 | sed 's/.*://' | tr -d '\r')"
-  [ -n "$API_PORT" ] || gs_die "re-warm: no se resolvio el puerto publicado del API $API_C (revisa que wt-up recreo el pm-api)"
+  API_C="pm-wt${SLOT}-api"
+  API_PORT="$(wt_api_port "$SLOT")" || gs_die "re-warm: no se resolvio el puerto publicado del API $API_C (revisa que wt-up recreo el pm-api)"
   # Orden espejo de up.sh (5b): convergencia (catalog-load) primero, luego estrategia (intake-load).
   if [ "$need_catalog" = 1 ]; then gs_run_job "/api/v1/tools/catalog-load" '{"clean":true}' "catalog-load (re-warm)" || gs_log "AVISO: catalog-load (re-warm) no completo limpio"; fi
   if [ "$need_intake" = 1 ]; then gs_run_job "/api/v1/tools/intake-load" "" "intake-load (re-warm)" || gs_log "AVISO: intake-load (re-warm) no completo limpio"; fi

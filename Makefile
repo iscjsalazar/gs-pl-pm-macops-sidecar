@@ -59,9 +59,11 @@
 #   make wt-status                            # estado de los contenedores PM por worktree y del bus
 #   make wt-gc / make wt-gc FORCE=1           # reclama arrendamientos muertos (pid muerto + heartbeat > TTL) y huerfanos
 #   make wt-seed-ln / make wt-seed-ln FORCE=1 # asegura (o re-aplica con FORCE) la referencia LN compartida (pm_erpln106)
-#   [WT obligatorio] make wt-sql WT=<folder> SQL="SELECT ..." [SCALAR=1]   # SQL contra la BD del slot (pm_planning_wt<N>)
+#   [WT obligatorio] make wt-sql WT=<folder> SQL="SELECT ..." [SCALAR=1] [LN=1]   # SQL contra la BD planning (o LN del slot si LN=1)
 #   [WT obligatorio] make wt-oracle WT=<folder> SQL="select ..."          # SQL contra el Oracle del slot (requiere ORACLE=1)
 #   [WT obligatorio] make wt-flag WT=<folder> KEY=<flag> STATE=on|off [PLANT=RES]   # fija un feature flag en la BD del slot
+#   [WT obligatorio] make wt-health WT=<folder>                           # verifica /health/live del API del slot + 3 URLs
+#   [WT obligatorio] make wt-api WT=<folder> ROUTE=/api/v1/... [METHOD=] [BODY=|BODYFILE=] [JOB=1]   # curl al API del slot
 #   [WT obligatorio] make wt-heartbeat WT=<folder>                        # refresca el arrendamiento del slot (holds largos)
 #   # Slot 0..N-1 (N=SLOTS, default 8) -> proyecto pm-wt<N>, API :5180+N*10, BD pm_planning_wt<N>, bus prefix wt<N>,
 #   #   site IIS pm-wt<N>::8100+N, tunel :18100+N, Oracle pm-wt<N>-oracle-1::15210+N. Ver README (tabla canonica).
@@ -218,29 +220,41 @@ SHAREDSQL_PASSWORD ?=
 # Data-plane del slot (wt-sql/wt-oracle/wt-flag): SQL arbitrario, escalar, y toggle de feature flag.
 SQL         ?=
 SCALAR      ?= 0
+LN          ?= 0
 KEY         ?=
 STATE       ?=
 PLANT       ?= RES
 WARM        ?= 0
 HARD        ?= 0
+# wt-api (curl generico al API del slot): la perilla del path es ROUTE (NUNCA PATH: clobbea $PATH del recipe).
+# METHOD default GET (POST si hay body). BODY/BODYFILE alimentan curl por stdin (precedencia BODYFILE). JOB=1
+# aplica el patron async (202+jobId -> poll jobs/{id}).
+ROUTE       ?=
+METHOD      ?=
+BODY        ?=
+BODYFILE    ?=
+JOB         ?= 0
 # vm-restart-coordinated: token de confirmacion (CONFIRM=RESTART ejecuta el reinicio) y reconocimiento de slots vivos.
 CONFIRM     ?=
 ACK_LIVE    ?= 0
 # SQL se EXPORTA (no se interpola entre comillas simples en WT_ENV): un SQL con comillas simples
 # ('WHERE Plant=''RES''') rompe el quoting de make/shell si se interpola; exportado llega intacto al recipe,
-# que lo asigna a PM_WT_SQL con comillas dobles. wt-sql/wt-oracle lo consumen.
+# que lo asigna a PM_WT_SQL con comillas dobles. wt-sql/wt-oracle lo consumen. BODY se EXPORTA por lo mismo
+# (un body JSON con comillas rompe el quoting si se interpola); wt-api lo consume por $$BODY.
 export SQL
+export BODY
 
 WT_ENV = $(PM_ENV) WT=$(WT) PM_WT_SLOTS=$(SLOTS) PM_WT_ORACLE=$(ORACLE) PM_WT_GC_FORCE=$(FORCE) \
          PM_WT_SEED_FORCE=$(FORCE) PM_WT_SOLUTION_DIR='$(SOLUTION)' \
-         PM_WT_SQL_SCALAR=$(SCALAR) PM_WT_WARM=$(WARM) PM_WT_PRUNE_HARD=$(HARD) \
+         PM_WT_SQL_SCALAR=$(SCALAR) PM_WT_SQL_LN=$(LN) PM_WT_WARM=$(WARM) PM_WT_PRUNE_HARD=$(HARD) \
          PM_VM_RESTART_CONFIRM=$(CONFIRM) PM_VM_RESTART_ACK_LIVE=$(ACK_LIVE) \
          PM_WT_FLAG_KEY='$(KEY)' PM_WT_FLAG_STATE=$(STATE) PM_WT_FLAG_PLANT=$(PLANT) \
+         PM_WT_API_PATH='$(ROUTE)' PM_WT_API_METHOD='$(METHOD)' PM_WT_API_BODYFILE='$(BODYFILE)' PM_WT_API_JOB=$(JOB) \
          PM_SHARED_SQL_NETWORK=$(SHAREDSQL_NET) PM_SHARED_SQL_HOST=$(SHAREDSQL_HOST) \
          PM_SHARED_SQL_PORT=$(SHAREDSQL_PORT) PM_SHARED_SQL_PASSWORD='$(SHAREDSQL_PASSWORD)'
 
 .PHONY: pm-run pm-watch pm-migrate pm-seed pm-api pm-api-down pm-test pm-test-clean pm-gate pm-unit pm-format pm-format-check pm-down pm-nuke pm-ps pm-logs pm-port pm-bootstrap-intel \
-        wt-up wt-down wt-ls wt-info wt-status wt-gc wt-prune-cache vm-restart-coordinated wt-seed-ln wt-sql wt-oracle wt-flag wt-heartbeat wt-reclaim \
+        wt-up wt-down wt-ls wt-info wt-status wt-gc wt-prune-cache vm-restart-coordinated wt-seed-ln wt-sql wt-oracle wt-flag wt-health wt-api wt-heartbeat wt-reclaim \
         e2e-backend e2e-backend-down e2e-net-check e2e-up e2e-smoke e2e-playwright e2e-url e2e-down e2e-oracle-counts \
         legacy-launch legacy-data-up legacy-vm-up legacy-build legacy-deploy legacy-diag legacy-diag-logs \
         legacy-tunnel legacy-status legacy-url legacy-down legacy-site-down legacy-sites-status \
@@ -396,6 +410,12 @@ wt-oracle:   ; PM_WT_SQL="$$SQL" $(WT_ENV) ./wt.sh oracle
 wt-flag:     override TARGET := intel
 wt-flag:     REMOTE := macdata
 wt-flag:     ; $(WT_ENV) ./wt.sh flag
+wt-health:   override TARGET := intel
+wt-health:   REMOTE := macdata
+wt-health:   ; $(WT_ENV) ./wt.sh health
+wt-api:      override TARGET := intel
+wt-api:      REMOTE := macdata
+wt-api:      ; PM_WT_API_BODY="$$BODY" $(WT_ENV) ./wt.sh api
 wt-heartbeat: ; $(WT_ENV) ./wt.sh heartbeat
 wt-reclaim: override TARGET := intel
 wt-reclaim: REMOTE := macdata

@@ -1082,13 +1082,17 @@ cmd_wt_ls() {
     echo "[wt] registro vacio ($PM_WT_REGISTRY)"
   else
     printf 'folder\tslot\tproject\toffset\tcreated\tage\n'
-    local f s pr off cr pid hb secs age
+    local f s pr off cr pid hb secs age ln
     while IFS=$'\t' read -r f s pr off cr pid hb; do
       [ -n "$f" ] || continue
       secs="$(wt_age_secs "$cr")"; age="$(wt_age_fmt "$secs")"; [ -n "$age" ] || age="n/d"
       if wt_is_num "$secs" && [ "$secs" -ge "$WT_AGE_WARN_SECS" ]; then age="$age [viejo]"; fi
       # "[reclamable]": arrendamiento muerto (pid muerto + heartbeat/created > TTL) que wt-gc FORCE=1 retiraria.
       if wt_lease_reclaimable "$pid" "$hb" "$cr"; then age="$age [reclamable]"; fi
+      # "[golden]": el contenedor API del slot usa una LN golden pm_gs_ln_wt<N> (autoritativo por el connstr, NO por
+      # BDs golden huerfanas de otro ocupante del numero). best-effort: contenedor caido/sin remoto -> ln vacio -> sin marca.
+      ln="$(wt_slot_ln_db_live "$s")"
+      case "$ln" in pm_gs_ln_wt*) age="$age [golden]" ;; esac
       printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$f" "$s" "$pr" "$off" "$cr" "$age"
     done < "$PM_WT_REGISTRY"
   fi
@@ -1131,12 +1135,21 @@ cmd_wt_info() {
   secs="$(wt_age_secs "$created")"; age="$(wt_age_fmt "$secs")"
   if wt_is_num "$secs" && [ "$secs" -ge "$WT_AGE_WARN_SECS" ]; then old=" [viejo]"; fi
   lease="arrendamiento pid ${pid:-<ninguno>}, heartbeat ${hb:-<created>}, TTL ${PM_WT_LEASE_TTL}s"
+  # BD LN del slot (best-effort): golden pm_gs_ln_wt<N> si existe, si no la compartida. No aborta wt-info.
+  local ln_db ln_label
+  # pw solo lo usa el fallback de wt_ln_db (el path autoritativo es el connstr del contenedor, sin SA): se resuelve
+  # best-effort y NO se gatea con exit -> un slot vivo se resuelve aunque el SA no se descubra.
+  ln_db="$( ( pw="$(wt_shared_sql_password 2>/dev/null)" || true; wt_ln_db "$slot" "$pw" ) 2>/dev/null || true )"
+  if [ -z "$ln_db" ]; then ln_db="pm_gs_ln_wt${slot} (si existe) | ${PM_WT_LN_DB}"; ln_label="(no verificable sin SQL)";
+  elif [ "$ln_db" = "pm_gs_ln_wt${slot}" ]; then ln_label="(golden, aislada)";
+  else ln_label="(compartida, read-only)"; fi
   cat <<EOF
 [wt] worktree '$folder' -> slot $slot   (creado ${created:-n/d}; edad ${age:-n/d}${old}; ${lease})
 
   Backend (docker en ${PM_REMOTE_SSH:-macdata})
     contenedor API    pm-wt${slot}-api            puerto host ${PM_API_PORT}   (guest: ${PM_GUEST_GATEWAY}:${PM_API_PORT})
     BD planning       ${PM_PLANNING_DB}                 (SQL compartido ${PM_SHARED_SQL_HOST}:${PM_SHARED_SQL_PORT})
+    BD LN del slot    ${ln_db}   ${ln_label}
     prefijo de bus    ${WT_SB_PREFIX}                        (broker singleton ${PM_WT_BUS_PROJECT})
     contenedor Oracle ${WT_ORACLE_CONTAINER}    puerto host ${WT_ORACLE_PORT}  (guest: ${PM_GUEST_GATEWAY}:${WT_ORACLE_PORT})
     volumen Oracle    ${WT_ORACLE_VOLUME}
@@ -1446,21 +1459,62 @@ _wt_bind_slot() {  # setea WT_SLOT/PM_*/WT_ORACLE_* via wt_derive; imprime nada.
   WT_BOUND_FOLDER="$folder"
 }
 
-# wt-sql: corre SQL arbitrario contra la BD del slot (pm_planning_wt<N>) por el motor compartido. SCALAR=1 -> valor
-# escalar (sin encabezado). El SA, el host/puerto del motor y el nombre de la BD los resuelve el verbo.
+# wt_api_port <slot>: puerto host publicado del API del slot. Fuente de verdad: 'docker port pm-wt<slot>-api
+# 8080/tcp' en el docker de macdata. Fallback: la formula 5180 + slot*10 (misma que compute_ports). Imprime el
+# puerto en stdout. rc=0 si lo resolvio por docker port (contenedor publicado); rc=1 si cayo al fallback
+# (contenedor caido/no publicado) -> el llamador que exige el API vivo gatea con '|| gs_die'; el que solo informa
+# ignora el rc. Encapsula el snippet antes duplicado en scripts/e2e.sh, goldenslice/{up,relaunch,lib}.sh.
+wt_api_port() {  # uso: wt_api_port <slot>
+  local slot="$1" ctx p; ctx="$(remote_docker_ctx)"
+  p="$(on_intel "docker $ctx port 'pm-wt${slot}-api' 8080/tcp 2>/dev/null" 2>/dev/null | head -1 | sed 's/.*://' | tr -d '\r')"
+  if [ -n "$p" ]; then printf '%s' "$p"; return 0; fi
+  printf '%s' "$(( 5180 + slot * 10 ))"; return 1
+}
+
+# wt_slot_ln_db_live <slot>: la BD LN que el contenedor API del slot USA REALMENTE, leida de su ConnectionStrings__Ln
+# (Database=...). Fuente AUTORITATIVA de golden-ness: distingue un golden (pm_gs_ln_wt<N>) de un slot normal
+# (pm_erpln106) sin confundirse con BDs golden HUERFANAS que persisten de otro ocupante del mismo numero de slot.
+# Vacio si el contenedor no corre o no expone el env (best-effort; un docker inspect, sin SA).
+wt_slot_ln_db_live() {  # uso: wt_slot_ln_db_live <slot>
+  local slot="$1" ctx
+  ctx="$(remote_docker_ctx)"
+  on_intel "docker $ctx inspect 'pm-wt${slot}-api' --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null" 2>/dev/null \
+    | grep -i 'ConnectionStrings__Ln=' | sed -nE 's/.*[Dd]atabase=([^;]+).*/\1/p' | head -1 | tr -d '\r '
+}
+
+# wt_ln_db <slot> <pw>: nombre de la BD LN del slot. AUTORITATIVO por el connstr del contenedor (wt_slot_ln_db_live);
+# si el contenedor no responde, cae a la heuristica de existencia de la BD golden aislada (pm_gs_ln_wt<slot>) y luego
+# a la compartida $PM_WT_LN_DB (default pm_erpln106). Lo consumen wt-sql LN=1 y wt-info. <pw> solo lo usa el fallback.
+wt_ln_db() {  # uso: wt_ln_db <slot> <pw>
+  # 'gs' se asigna en linea aparte: en un 'local' de una sola linea, "${slot}" se expande ANTES de que el
+  # 'local slot' tome efecto -> bajo set -u seria "slot: unbound variable".
+  local slot="$1" pw="$2" gs live exists
+  live="$(wt_slot_ln_db_live "$slot")"
+  if [ -n "$live" ]; then printf '%s' "$live"; return 0; fi
+  gs="pm_gs_ln_wt${slot}"
+  exists="$(wt_shared_scalar "$pw" "SET NOCOUNT ON; SELECT CASE WHEN DB_ID(N'$gs') IS NULL THEN 0 ELSE 1 END")"
+  if [ "$exists" = "1" ]; then printf '%s' "$gs"; else printf '%s' "$PM_WT_LN_DB"; fi
+}
+
+# wt-sql: corre SQL arbitrario contra la BD del slot por el motor compartido. Default -> BD planning (pm_planning_wt<N>);
+# LN=1 -> BD LN del slot (golden pm_gs_ln_wt<N> si existe, si no la compartida pm_erpln106). SCALAR=1 -> valor escalar
+# (sin encabezado). El SA, el host/puerto del motor y el nombre de la BD los resuelve el verbo.
 cmd_wt_sql() {
   wt_require_intel || return 1
-  [ -n "${PM_WT_SQL:-}" ] || { wt_die "falta SQL=\"<consulta>\" (make wt-sql WT=<folder> SQL=\"SELECT ...\" [SCALAR=1])"; return 2; }
+  [ -n "${PM_WT_SQL:-}" ] || { wt_die "falta SQL=\"<consulta>\" (make wt-sql WT=<folder> SQL=\"SELECT ...\" [SCALAR=1] [LN=1])"; return 2; }
   _wt_bind_slot || return $?
   local pw; pw="$(wt_shared_sql_password)" || return 1
   wt_shared_sql_check || return 1
+  # LN=1 -> BD LN del slot (golden pm_gs_ln_wt<N> si existe, si no pm_erpln106); default -> planning del slot.
+  local db="$PM_PLANNING_DB"
+  if [ "${PM_WT_SQL_LN:-0}" = "1" ]; then db="$(wt_ln_db "$WT_SLOT" "$pw")"; wt_log "wt-sql LN=1 -> BD LN '$db'"; fi
   # Fija la BD por el flag -d de sqlcmd (no 'USE [db]'): asi no emite el mensaje "Changed database context" que
   # ensuciaria el escalar. El SQL llega intacto (con comillas simples) porque el Makefile exporta SQL (no lo
   # interpola entre comillas simples en la linea de comando).
   if [ "${PM_WT_SQL_SCALAR:-0}" = "1" ]; then
-    wt_shared_query "$pw" "SET NOCOUNT ON; $PM_WT_SQL" "-h -1 -W -d $PM_PLANNING_DB" 2>/dev/null | tr -d '\r'
+    wt_shared_query "$pw" "SET NOCOUNT ON; $PM_WT_SQL" "-h -1 -W -d $db" 2>/dev/null | tr -d '\r'
   else
-    wt_shared_query "$pw" "SET NOCOUNT ON; $PM_WT_SQL" "-d $PM_PLANNING_DB"
+    wt_shared_query "$pw" "SET NOCOUNT ON; $PM_WT_SQL" "-d $db"
   fi
 }
 
@@ -1518,6 +1572,89 @@ cmd_wt_heartbeat() {
   [ -n "$slot" ] || { wt_die "el worktree '$folder' no tiene slot asignado"; return 2; }
   wt_registry_lock wt_slot_touch "$folder"
   wt_log "arrendamiento del slot $slot ('$folder') refrescado (pid $$, heartbeat $(date -u +%Y-%m-%dT%H:%M:%SZ))"
+}
+
+# wt-health: verifica /health/live del API del slot e imprime las tres URLs etiquetadas por origen. Mismo patron de
+# guard que cmd_wt_sql/cmd_wt_oracle (exige intel + slot asignado). El puerto lo resuelve wt_api_port (docker port
+# como fuente de verdad; si cae al fallback solo avisa, no aborta -> el verbo imprime igual las URLs). Curl al
+# health por el canal canonico ssh macdata -> curl 127.0.0.1. return 0 solo si el backend responde 'Healthy'.
+cmd_wt_health() {
+  wt_require_intel || return 1
+  _wt_bind_slot || return $?
+  local port resp cmd
+  port="$(wt_api_port "$WT_SLOT")" || wt_log "wt-health: el contenedor 'pm-wt${WT_SLOT}-api' no publica el puerto (docker port vacio); uso el fallback $port"
+  cmd="curl -fsS -m 8 http://127.0.0.1:${port}/health/live"
+  resp="$(on_intel "$cmd" 2>/dev/null | tr -d '\r\n')"
+  # No hay var canonica de mDNS de la M1 (solo un local en scripts/e2e-net-check.sh); se expone PM_INTEL_MDNS.
+  local gw="${PM_GUEST_GATEWAY:-172.16.128.1}" mdns="${PM_INTEL_MDNS:-macbook-pro-de-diana.local}"
+  if [ -n "$resp" ]; then
+    wt_log "slot $WT_SLOT ('$WT_BOUND_FOLDER') puerto $port -> $resp"
+  else
+    wt_log "slot $WT_SLOT ('$WT_BOUND_FOLDER') puerto $port -> SIN RESPUESTA (en macdata: $cmd)"
+  fi
+  echo "  guest NAT (legado backendBaseUrl)  http://${gw}:${port}/health/live"
+  echo "  macdata loopback (canal canonico)  http://127.0.0.1:${port}/health/live"
+  echo "  Mac directa (mDNS LAN; segun red)  http://${mdns}:${port}/health/live"
+  [ "$resp" = "Healthy" ] && return 0 || return 1
+}
+
+# wt_run_api_job <port> <method> <path> <body-o-vacio> <label>: núcleo compartido del patrón async del backend
+# (POST/verbo -> 202 + jobId -> poll GET /api/v1/jobs/{id} hasta estado terminal). Lo consumen el verbo wt-api
+# (JOB=1) y gs_run_job de goldenslice: UNA sola implementación. Canal canónico ssh macdata -> curl 127.0.0.1
+# (host fijo; sin perilla de host). El body (si lo hay) viaja por STDIN a 'curl --data-binary @-' (sin quoting).
+# Publica WT_API_JOB_ID / WT_API_JOB_STATUS. rc=0 solo si el job llega a Completed.
+wt_run_api_job() {  # <port> <method> <path> <body-o-vacio> <label>
+  local port="$1" method="$2" path="$3" body="$4" label="$5" resp jid st i
+  WT_API_JOB_ID=""; WT_API_JOB_STATUS=""
+  if [ -n "$body" ]; then
+    resp="$(printf '%s' "$body" | on_intel "curl -fsS -m 60 -X $method 'http://127.0.0.1:${port}${path}' -H 'Content-Type: application/json' --data-binary @-" 2>/dev/null)"
+  else
+    resp="$(on_intel "curl -fsS -m 60 -X $method 'http://127.0.0.1:${port}${path}'" 2>/dev/null)"
+  fi
+  jid="$(printf '%s' "$resp" | sed -nE 's/.*"jobId"[": ]*"?([0-9a-fA-F-]{16,})"?.*/\1/p')"
+  [ -n "$jid" ] || { wt_log "AVISO: $label no devolvio jobId (resp: ${resp:-<vacio>})"; return 1; }
+  WT_API_JOB_ID="$jid"
+  for i in $(seq 1 90); do
+    st="$(on_intel "curl -fsS -m 15 http://127.0.0.1:${port}/api/v1/jobs/$jid" 2>/dev/null | sed -nE 's/.*"currentStatus"[": ]*"([A-Za-z]+)".*/\1/p')"
+    case "$st" in
+      Completed)      wt_log "$label -> Completed (job $jid)"; WT_API_JOB_STATUS=Completed; return 0 ;;
+      Failed|TimedOut) wt_log "AVISO: $label -> $st (job $jid)"; WT_API_JOB_STATUS="$st"; return 1 ;;
+    esac
+    sleep 2
+  done
+  wt_log "AVISO: $label no llego a estado terminal (job $jid)"; WT_API_JOB_STATUS=timeout; return 1
+}
+
+# wt-api: curl genérico contra el API del slot por el canal canónico (ssh macdata -> curl http://127.0.0.1:<puerto>).
+# ROUTE es el path (p. ej. /api/v1/demand/backlog/load-async). METHOD default GET (POST si hay body). Body por
+# BODY= o BODYFILE= (precedencia BODYFILE), alimentado por STDIN a curl --data-binary @-. JOB=1 aplica el patrón
+# async (202+jobId -> poll jobs/{id}); imprime 'jobId=... status=...'. Host FIJO 127.0.0.1: sin perilla de host.
+cmd_wt_api() {
+  wt_require_intel || return 1
+  [ -n "${PM_WT_API_PATH:-}" ] || { wt_die "falta ROUTE=/api/v1/... (make wt-api WT=<folder> ROUTE=/api/v1/... [METHOD=] [BODY=|BODYFILE=] [JOB=1])"; return 2; }
+  _wt_bind_slot || return $?
+  local port method body="" has_body=0
+  port="$(wt_api_port "$WT_SLOT")" || wt_log "wt-api: el contenedor 'pm-wt${WT_SLOT}-api' no publica puerto; uso el fallback $port"
+  if [ -n "${PM_WT_API_BODYFILE:-}" ]; then
+    [ -f "$PM_WT_API_BODYFILE" ] || { wt_die "BODYFILE no existe: $PM_WT_API_BODYFILE"; return 2; }
+    body="$(cat "$PM_WT_API_BODYFILE")"; has_body=1
+  elif [ -n "${PM_WT_API_BODY:-}" ]; then
+    body="$PM_WT_API_BODY"; has_body=1
+  fi
+  method="${PM_WT_API_METHOD:-}"
+  if [ -z "$method" ]; then [ "$has_body" = 1 ] && method=POST || method=GET; fi
+  if [ "${PM_WT_API_JOB:-0}" = "1" ]; then
+    wt_run_api_job "$port" "$method" "$PM_WT_API_PATH" "$body" "wt-api $method $PM_WT_API_PATH"
+    local rc=$?
+    printf 'jobId=%s status=%s\n' "${WT_API_JOB_ID:-<ninguno>}" "${WT_API_JOB_STATUS:-<n/d>}"
+    return $rc
+  fi
+  # Modo simple: la respuesta (JSON) fluye a stdout.
+  if [ "$has_body" = 1 ]; then
+    printf '%s' "$body" | on_intel "curl -fsS -m 60 -X $method 'http://127.0.0.1:${port}${PM_WT_API_PATH}' -H 'Content-Type: application/json' --data-binary @-"
+  else
+    on_intel "curl -fsS -m 60 -X $method 'http://127.0.0.1:${port}${PM_WT_API_PATH}'"
+  fi
 }
 
 # wt-reclaim: reclama UN arrendamiento reclamable especifico (el worktree WT, cuyo dueno murio + heartbeat vencido).
