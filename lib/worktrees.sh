@@ -1446,6 +1446,18 @@ _wt_bind_slot() {  # setea WT_SLOT/PM_*/WT_ORACLE_* via wt_derive; imprime nada.
   WT_BOUND_FOLDER="$folder"
 }
 
+# wt_api_port <slot>: puerto host publicado del API del slot. Fuente de verdad: 'docker port pm-wt<slot>-api
+# 8080/tcp' en el docker de macdata. Fallback: la formula 5180 + slot*10 (misma que compute_ports). Imprime el
+# puerto en stdout. rc=0 si lo resolvio por docker port (contenedor publicado); rc=1 si cayo al fallback
+# (contenedor caido/no publicado) -> el llamador que exige el API vivo gatea con '|| gs_die'; el que solo informa
+# ignora el rc. Encapsula el snippet antes duplicado en scripts/e2e.sh, goldenslice/{up,relaunch,lib}.sh.
+wt_api_port() {  # uso: wt_api_port <slot>
+  local slot="$1" ctx p; ctx="$(remote_docker_ctx)"
+  p="$(on_intel "docker $ctx port 'pm-wt${slot}-api' 8080/tcp 2>/dev/null" 2>/dev/null | head -1 | sed 's/.*://' | tr -d '\r')"
+  if [ -n "$p" ]; then printf '%s' "$p"; return 0; fi
+  printf '%s' "$(( 5180 + slot * 10 ))"; return 1
+}
+
 # wt-sql: corre SQL arbitrario contra la BD del slot (pm_planning_wt<N>) por el motor compartido. SCALAR=1 -> valor
 # escalar (sin encabezado). El SA, el host/puerto del motor y el nombre de la BD los resuelve el verbo.
 cmd_wt_sql() {
@@ -1518,6 +1530,30 @@ cmd_wt_heartbeat() {
   [ -n "$slot" ] || { wt_die "el worktree '$folder' no tiene slot asignado"; return 2; }
   wt_registry_lock wt_slot_touch "$folder"
   wt_log "arrendamiento del slot $slot ('$folder') refrescado (pid $$, heartbeat $(date -u +%Y-%m-%dT%H:%M:%SZ))"
+}
+
+# wt-health: verifica /health/live del API del slot e imprime las tres URLs etiquetadas por origen. Mismo patron de
+# guard que cmd_wt_sql/cmd_wt_oracle (exige intel + slot asignado). El puerto lo resuelve wt_api_port (docker port
+# como fuente de verdad; si cae al fallback solo avisa, no aborta -> el verbo imprime igual las URLs). Curl al
+# health por el canal canonico ssh macdata -> curl 127.0.0.1. return 0 solo si el backend responde 'Healthy'.
+cmd_wt_health() {
+  wt_require_intel || return 1
+  _wt_bind_slot || return $?
+  local port resp cmd
+  port="$(wt_api_port "$WT_SLOT")" || wt_log "wt-health: el contenedor 'pm-wt${WT_SLOT}-api' no publica el puerto (docker port vacio); uso el fallback $port"
+  cmd="curl -fsS -m 8 http://127.0.0.1:${port}/health/live"
+  resp="$(on_intel "$cmd" 2>/dev/null | tr -d '\r\n')"
+  # No hay var canonica de mDNS de la M1 (solo un local en scripts/e2e-net-check.sh); se expone PM_INTEL_MDNS.
+  local gw="${PM_GUEST_GATEWAY:-172.16.128.1}" mdns="${PM_INTEL_MDNS:-macbook-pro-de-diana.local}"
+  if [ -n "$resp" ]; then
+    wt_log "slot $WT_SLOT ('$WT_BOUND_FOLDER') puerto $port -> $resp"
+  else
+    wt_log "slot $WT_SLOT ('$WT_BOUND_FOLDER') puerto $port -> SIN RESPUESTA (en macdata: $cmd)"
+  fi
+  echo "  guest NAT (legado backendBaseUrl)  http://${gw}:${port}/health/live"
+  echo "  macdata loopback (canal canonico)  http://127.0.0.1:${port}/health/live"
+  echo "  Mac directa (mDNS LAN; segun red)  http://${mdns}:${port}/health/live"
+  [ "$resp" = "Healthy" ] && return 0 || return 1
 }
 
 # wt-reclaim: reclama UN arrendamiento reclamable especifico (el worktree WT, cuyo dueno murio + heartbeat vencido).

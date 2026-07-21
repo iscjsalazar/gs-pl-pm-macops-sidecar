@@ -128,11 +128,7 @@ e2e_derive_front_ports(){
 
 # Puerto host REALMENTE publicado por el contenedor de la API del slot (fuente de verdad; evita asumir el
 # offset de PM_API_PORT, que load_env fija una sola vez). Fallback: PM_API_PORT.
-e2e_api_port(){
-  local ctx p; ctx="$(remote_docker_ctx)"
-  p="$(on_intel "docker $ctx port 'pm-wt${E2E_SLOT}-api' 8080/tcp 2>/dev/null" 2>/dev/null | head -1 | sed 's/.*://' | tr -d '\r')"
-  printf '%s' "${p:-$PM_API_PORT}"
-}
+e2e_api_port(){ wt_api_port "$E2E_SLOT" || true; }
 
 # Puerto host REALMENTE publicado por el Oracle del slot. Fallback: la base de load_env + slot (NUNCA una
 # constante literal: PM_WT_ORACLE_PORT_BASE es configurable).

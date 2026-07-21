@@ -187,8 +187,7 @@ _gs_timing "e2e-up" "$t0"
 #        REAL (produce el plan) queda MANUAL desde la app (OrdenesNuevasCargar_LN.aspx). ---
 ctx="$(remote_docker_ctx)"
 API_C="pm-wt${SLOT}-api"; ORA_C="pm-wt${SLOT}-oracle-1"; PLANNING_DB="pm_planning_wt${SLOT}"; OH="$PM_WT_ORACLE_HOME"
-API_PORT="$(on_intel "docker $ctx port '$API_C' 8080/tcp 2>/dev/null" 2>/dev/null | head -1 | sed 's/.*://' | tr -d '\r')"
-[ -n "$API_PORT" ] || gs_die "no se resolvio el puerto publicado del API $API_C"
+API_PORT="$(wt_api_port "$SLOT")" || gs_die "no se resolvio el puerto publicado del API $API_C"
 
 # 5a) fase enable-tools ELIMINADA (I3): las Tools dev de carga (CatalogLoad + IntakeLoad) entran en la UNICA
 #     recreacion del API (fase 2, via PM_WT_API_EXTRA_ENV), en FRIO y en TIBIO. La 3a recreacion redundante ya no

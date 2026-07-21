@@ -16,6 +16,7 @@
 #   WT=<folder> SQL="..." ./wt.sh oracle     # SQL contra el Oracle del slot (requiere ORACLE=1)
 #   WT=<folder> KEY=<flag> STATE=on|off ./wt.sh flag   # fija un feature flag en la BD del slot (canal sancionado)
 #   WT=<folder> ./wt.sh heartbeat            # refresca el arrendamiento del slot (holds largos)
+#   WT=<folder> ./wt.sh health               # verifica /health/live del API del slot + imprime las 3 URLs
 # WT se autodetecta con 'git rev-parse --show-toplevel' si el comando se corre dentro del worktree.
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib/common.sh"
@@ -36,8 +37,9 @@ case "$VERB" in
   oracle)    cmd_wt_oracle ;;
   flag)      cmd_wt_flag ;;
   heartbeat) cmd_wt_heartbeat ;;
+  health)    cmd_wt_health ;;
   reclaim)   cmd_wt_reclaim ;;
   prune-cache) cmd_wt_prune_cache ;;
   vm-restart-coordinated) cmd_vm_restart_coordinated ;;
-  *) echo "uso: $0 {up|down|ls|info|status|gc|seed-ln|sql|oracle|flag|heartbeat|reclaim|prune-cache|vm-restart-coordinated}   (WT=<folder>; requiere PM_TARGET=intel REMOTE=macdata)"; exit 2 ;;
+  *) echo "uso: $0 {up|down|ls|info|status|gc|seed-ln|sql|oracle|flag|heartbeat|health|reclaim|prune-cache|vm-restart-coordinated}   (WT=<folder>; requiere PM_TARGET=intel REMOTE=macdata)"; exit 2 ;;
 esac

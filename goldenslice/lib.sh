@@ -93,12 +93,11 @@ gs_run_bounded(){  # <segundos> <etiqueta> -- <cmd...>
 # publicado del API) y el comando EXACTO de reuso del slot. El puerto del API se resuelve por docker port si no se
 # pasa; si no se puede resolver, se marca <n/d> (el banner nunca aborta). PM_GUEST_GATEWAY lo fija load_env.
 gs_banner(){  # <slot> <pm_wt> <legacy_wt> [api_port]
-  local slot="$1" pm_wt="$2" legacy_wt="$3" api_port="${4:-}" ctx gw tunnel
-  ctx="$(remote_docker_ctx)"
+  local slot="$1" pm_wt="$2" legacy_wt="$3" api_port="${4:-}" gw tunnel
   gw="${PM_GUEST_GATEWAY:-172.16.128.1}"
   tunnel=$(( 18100 + slot ))
   if [ -z "$api_port" ]; then
-    api_port="$(on_intel "docker $ctx port 'pm-wt${slot}-api' 8080/tcp 2>/dev/null" 2>/dev/null | head -1 | sed 's/.*://' | tr -d '\r')"
+    api_port="$(wt_api_port "$slot")" || true
   fi
   [ -n "$api_port" ] || api_port="<n/d>"
   printf '\n'
