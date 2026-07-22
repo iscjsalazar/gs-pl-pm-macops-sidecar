@@ -60,6 +60,7 @@
 #   make wt-gc / make wt-gc FORCE=1           # reclama arrendamientos muertos (pid muerto + heartbeat > TTL) y huerfanos
 #   make wt-seed-ln / make wt-seed-ln FORCE=1 # asegura (o re-aplica con FORCE) la referencia LN compartida (pm_erpln106)
 #   [WT obligatorio] make wt-sql WT=<folder> SQL="SELECT ..." [SCALAR=1] [LN=1]   # SQL contra la BD planning (o LN del slot si LN=1)
+#   [WT obligatorio] make wt-nucleos WT=<folder> SQL="SELECT ..." [SCALAR=1]      # SQL contra la BD Nucleos del slot (pm_nucleos_wt<N>, cores.*)
 #   [WT obligatorio] make wt-oracle WT=<folder> SQL="select ..."          # SQL contra el Oracle del slot (requiere ORACLE=1)
 #   [WT obligatorio] make wt-flag WT=<folder> KEY=<flag> STATE=on|off [PLANT=RES]   # fija un feature flag en la BD del slot
 #   [WT obligatorio] make wt-health WT=<folder>                           # verifica /health/live del API del slot + 3 URLs
@@ -254,7 +255,7 @@ WT_ENV = $(PM_ENV) WT=$(WT) PM_WT_SLOTS=$(SLOTS) PM_WT_ORACLE=$(ORACLE) PM_WT_GC
          PM_SHARED_SQL_PORT=$(SHAREDSQL_PORT) PM_SHARED_SQL_PASSWORD='$(SHAREDSQL_PASSWORD)'
 
 .PHONY: pm-run pm-watch pm-migrate pm-seed pm-api pm-api-down pm-test pm-test-clean pm-gate pm-unit pm-format pm-format-check pm-down pm-nuke pm-ps pm-logs pm-port pm-bootstrap-intel \
-        wt-up wt-down wt-ls wt-info wt-status wt-gc wt-prune-cache vm-restart-coordinated wt-seed-ln wt-sql wt-oracle wt-flag wt-health wt-api wt-heartbeat wt-reclaim \
+        wt-up wt-down wt-ls wt-info wt-status wt-gc wt-prune-cache vm-restart-coordinated wt-seed-ln wt-sql wt-nucleos wt-oracle wt-flag wt-health wt-api wt-heartbeat wt-reclaim \
         e2e-backend e2e-backend-down e2e-net-check e2e-up e2e-smoke e2e-playwright e2e-url e2e-down e2e-oracle-counts \
         run-e2e-smoke-golden \
         legacy-launch legacy-data-up legacy-vm-up legacy-build legacy-deploy legacy-diag legacy-diag-logs \
@@ -421,6 +422,9 @@ wt-info:    ; $(WT_ENV) ./wt.sh info
 wt-sql:      override TARGET := intel
 wt-sql:      REMOTE := macdata
 wt-sql:      ; PM_WT_SQL="$$SQL" $(WT_ENV) ./wt.sh sql
+wt-nucleos:  override TARGET := intel
+wt-nucleos:  REMOTE := macdata
+wt-nucleos:  ; PM_WT_SQL="$$SQL" PM_WT_SQL_NUC=1 $(WT_ENV) ./wt.sh sql
 wt-oracle:   override TARGET := intel
 wt-oracle:   REMOTE := macdata
 wt-oracle:   ; PM_WT_SQL="$$SQL" $(WT_ENV) ./wt.sh oracle
