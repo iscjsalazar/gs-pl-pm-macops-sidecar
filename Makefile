@@ -256,6 +256,7 @@ WT_ENV = $(PM_ENV) WT=$(WT) PM_WT_SLOTS=$(SLOTS) PM_WT_ORACLE=$(ORACLE) PM_WT_GC
 .PHONY: pm-run pm-watch pm-migrate pm-seed pm-api pm-api-down pm-test pm-test-clean pm-gate pm-unit pm-format pm-format-check pm-down pm-nuke pm-ps pm-logs pm-port pm-bootstrap-intel \
         wt-up wt-down wt-ls wt-info wt-status wt-gc wt-prune-cache vm-restart-coordinated wt-seed-ln wt-sql wt-oracle wt-flag wt-health wt-api wt-heartbeat wt-reclaim \
         e2e-backend e2e-backend-down e2e-net-check e2e-up e2e-smoke e2e-playwright e2e-url e2e-down e2e-oracle-counts \
+        run-e2e-smoke-golden \
         legacy-launch legacy-data-up legacy-vm-up legacy-build legacy-deploy legacy-diag legacy-diag-logs \
         legacy-tunnel legacy-status legacy-url legacy-down legacy-site-down legacy-sites-status \
         legacy-turn-status legacy-turn-heartbeat legacy-turn-release help
@@ -371,6 +372,22 @@ goldenslice-up: ; $(PM_ENV) LEGACYWT=$(LEGACYWT) bash ./goldenslice/up.sh
 goldenslice-relaunch: override TARGET := intel
 goldenslice-relaunch: REMOTE := macdata
 goldenslice-relaunch: ; $(PM_ENV) LEGACYWT=$(LEGACYWT) bash ./goldenslice/relaunch.sh
+
+# --- smoke golden mutante de BajaUnidades (I30, solicitud 260720-1225 / solicitud-03) ---
+#   [WT+LEGACYWT obligatorios] make run-e2e-smoke-golden WT=<pm-wt> LEGACYWT=<legacy-wt> [RUNNER=m1|macdata] [HEADLESS=0|1]
+#   Aprovisiona una golden FRESCA (goldenslice-up en modo worktree: codigo EXACTO de ambos worktrees, sin
+#   fetch/checkout/reset/rebase), espera health completo y ejecuta EXCLUSIVAMENTE el spec @golden-smoke.
+#   RUNNER=m1 (default): Chromium en esta Mac contra el tunel/localhost del slot; HEADLESS=0 lo hace visible.
+#   RUNNER=macdata: siempre headless; Chromium corre en macdata contra el guest directo y la evidencia se
+#   descarga siempre a la M1 (verde o rojo). Deja la golden ARRIBA y MUTADA (sin e2e-down/wt-down); una
+#   corrida nueva SIEMPRE re-invoca este target completo (nunca el spec Playwright suelto contra un slot ya
+#   consumido). Evidencia por run-id en artifacts/playwright-smoke/<run-id>/ (orchestrator.log, result.rc,
+#   summary.txt, reporte HTML/JSON, test-results). Aislado de npm test/e2e-playwright (contrato tnuc02 intacto).
+RUNNER    ?= m1
+HEADLESS  ?= 1
+run-e2e-smoke-golden: override TARGET := intel
+run-e2e-smoke-golden: REMOTE := macdata
+run-e2e-smoke-golden: ; RUNNER="$(RUNNER)" HEADLESS="$(HEADLESS)" $(PM_ENV) LEGACYWT="$(LEGACYWT)" bash ./scripts/run-e2e-smoke-golden.sh
 
 # --- aprovisionamiento por worktree (wt-*): intel-only (SQL compartido + bus en macdata) ---
 # 'override TARGET' fuerza intel (el SQL compartido vive en el docker de macdata); REMOTE default macdata
