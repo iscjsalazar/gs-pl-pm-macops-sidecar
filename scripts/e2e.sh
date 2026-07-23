@@ -688,7 +688,8 @@ e2e_playwright_stage(){
     --exclude 'node_modules/' --exclude 'bin/' --exclude 'obj/' --exclude '.git/' \
     --exclude 'test-results/' --exclude 'playwright-report/' --exclude '.runner/' --exclude '.results/' \
     "$LEGACY_SRC/tests/e2e/" "$PM_REMOTE_SSH:$PW_REMOTE_ROOT/" || return 1
-  rsync -az "$BASE_DIR/scripts/e2e-playwright-remote.sh" "$PM_REMOTE_SSH:$PW_REMOTE_ROOT/.runner/" || return 1
+  rsync -az "$BASE_DIR/scripts/e2e-playwright-remote.sh" "$BASE_DIR/lib/watchdog.sh" \
+    "$PM_REMOTE_SSH:$PW_REMOTE_ROOT/.runner/" || return 1
   e2e_playwright_remote preflight preflight || return 1
   e2e_playwright_remote prepare prepare "$PW_TIMEOUT" "$PW_INSTALL" "$PW_SEED_PROJECT"
 }
