@@ -223,6 +223,7 @@ wt_derive() {  # uso: wt_derive <slot>
   PM_PROJECT="pm-wt${WT_SLOT}"
   PM_PORT_OFFSET=$(( WT_SLOT * 10 ))
   PM_PLANNING_DB="pm_planning_wt${WT_SLOT}"
+  PM_NUCLEOS_DB="pm_nucleos_wt${WT_SLOT}"
   WT_SB_PREFIX="wt${WT_SLOT}"
   PM_PROFILE="full"; PROFILE_FLAG="--profile full"
   compute_ports
@@ -349,6 +350,38 @@ wt_seed_planning() {  # uso: wt_seed_planning <password>
   wt_log "seed data-only de '$PM_PLANNING_DB' en el SQL compartido (grupo planning; reusa $PM_WT_LN_DB) ..."
   wt_seed_group "$pw" planning "$PM_PLANNING_DB" "$PM_WT_LN_DB" \
     || { wt_die "fallo el seed de '$PM_PLANNING_DB'"; return 1; }
+}
+
+# Asegura la BD stand-in del microservicio Nucleos del slot (pm_nucleos_wt<N>). Es una fuente EXTERNA: el
+# esquema cores.* NO lo crea EF (a diferencia de la BD planning), asi que el tooling la posee igual que la
+# referencia LN. Crea la BD + el esquema cores + las tablas que la fuente lee (UnitExternalStateNucleosSource,
+# SELECT-only: cores.ResidentialOrders/ResidentialCoreTests; solo las columnas consumidas, con los tipos reales
+# del Nucleos on-prem) y siembra las filas keyed a los articulos del golden (9GART1 lote 01 series 1/2 con su
+# fecha real de arranque = MAX(TestUtcDate)). Idempotente: CREATE ... IF NULL + INSERT ... IF NOT EXISTS => re-
+# aplicar es net-cero (no disrupta un slot en vuelo que la lee). Es por-slot (no singleton compartido como LN).
+wt_ensure_nucleos() {  # uso: wt_ensure_nucleos <password>
+  local pw="$1"
+  wt_log "asegurando BD Nucleos del slot '$PM_NUCLEOS_DB' (stand-in cores.*; fuente externa SELECT-only) ..."
+  local sql
+  sql="$(cat <<SQL
+IF DB_ID(N'$PM_NUCLEOS_DB') IS NULL CREATE DATABASE [$PM_NUCLEOS_DB];
+GO
+USE [$PM_NUCLEOS_DB];
+GO
+IF SCHEMA_ID(N'cores') IS NULL EXEC('CREATE SCHEMA [cores]');
+GO
+IF OBJECT_ID(N'cores.ResidentialOrders') IS NULL CREATE TABLE cores.ResidentialOrders (Id uniqueidentifier NOT NULL CONSTRAINT PK_cores_ResidentialOrders PRIMARY KEY, ItemId varchar(47) NOT NULL, Lot varchar(3) NOT NULL, Serie int NOT NULL);
+IF OBJECT_ID(N'cores.ResidentialCoreTests') IS NULL CREATE TABLE cores.ResidentialCoreTests (Id uniqueidentifier NOT NULL CONSTRAINT PK_cores_ResidentialCoreTests PRIMARY KEY, OrderId uniqueidentifier NOT NULL, Result int NOT NULL, TestUtcDate datetime2 NOT NULL);
+GO
+IF NOT EXISTS (SELECT 1 FROM cores.ResidentialOrders WHERE ItemId='9GART1' AND Lot='01' AND Serie=1) INSERT cores.ResidentialOrders (Id,ItemId,Lot,Serie) VALUES ('9A000001-0000-0000-0000-000000000001','9GART1','01',1);
+IF NOT EXISTS (SELECT 1 FROM cores.ResidentialOrders WHERE ItemId='9GART1' AND Lot='01' AND Serie=2) INSERT cores.ResidentialOrders (Id,ItemId,Lot,Serie) VALUES ('9A000001-0000-0000-0000-000000000002','9GART1','01',2);
+IF NOT EXISTS (SELECT 1 FROM cores.ResidentialCoreTests WHERE OrderId='9A000001-0000-0000-0000-000000000001') INSERT cores.ResidentialCoreTests (Id,OrderId,Result,TestUtcDate) VALUES ('9C000001-0000-0000-0000-000000000001','9A000001-0000-0000-0000-000000000001',1,'2026-06-03T09:30:00');
+IF NOT EXISTS (SELECT 1 FROM cores.ResidentialCoreTests WHERE OrderId='9A000001-0000-0000-0000-000000000002') INSERT cores.ResidentialCoreTests (Id,OrderId,Result,TestUtcDate) VALUES ('9C000001-0000-0000-0000-000000000002','9A000001-0000-0000-0000-000000000002',1,'2026-06-04T10:00:00');
+GO
+SQL
+)"
+  wt_shared_exec "$pw" "$sql" || { wt_die "fallo al asegurar la BD Nucleos '$PM_NUCLEOS_DB'"; return 1; }
+  wt_log "BD Nucleos '$PM_NUCLEOS_DB' asegurada (cores.ResidentialOrders/ResidentialCoreTests + seed golden 9GART1)"
 }
 
 # --- Bus PM-owned (singleton compartido entre worktrees) ---
@@ -645,11 +678,14 @@ wt_up_api() {  # uso: wt_up_api <password>
     WT_LOCK_WAIT_MAX=1800 wt_lock build _wt_build_api_image "$ctx" "$img" "$src_sha" || return 1
   fi
   # connstrings vistas desde el contenedor: SQL por alias de la red compartida; bus por alias del singleton.
-  local cs ln sbcs
+  local cs ln nuc sbcs
   cs="Server=$PM_SHARED_SQL_HOST,$PM_SHARED_SQL_PORT;Database=$PM_PLANNING_DB;User Id=sa;Password=$pw;TrustServerCertificate=True"
   ln="Server=$PM_SHARED_SQL_HOST,$PM_SHARED_SQL_PORT;Database=$PM_WT_LN_DB;User Id=sa;Password=$pw;TrustServerCertificate=True"
+  # Fuente externa Nucleos: BD propia del slot (pm_nucleos_wt<N>), no la planning. La API la LEE SELECT-only por
+  # el job de refresh de proyecciones externas (fecha real de arranque).
+  nuc="Server=$PM_SHARED_SQL_HOST,$PM_SHARED_SQL_PORT;Database=$PM_NUCLEOS_DB;User Id=sa;Password=$pw;TrustServerCertificate=True"
   sbcs="Endpoint=sb://servicebus:5672;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;"
-  cs="$(wt_esc "$cs")"; ln="$(wt_esc "$ln")"; sbcs="$(wt_esc "$sbcs")"
+  cs="$(wt_esc "$cs")"; ln="$(wt_esc "$ln")"; nuc="$(wt_esc "$nuc")"; sbcs="$(wt_esc "$sbcs")"
   # Con el Oracle del slot activo la API lee ControlPiso de EL (alias 'oracle' dentro de pm-wt<N>_default) y la
   # fuente viva de paridad pasa de csv a oracle. Sin el, el comportamiento queda intacto (csv, sin CtrlPiso).
   local psrc oracle_env="" oracle_net=""
@@ -688,7 +724,7 @@ wt_up_api() {  # uso: wt_up_api <password>
   on_intel "docker $ctx rm -f '$cname' >/dev/null 2>&1; \
     docker $ctx create --name '$cname' --network '$PM_SHARED_SQL_NETWORK' -p '$PM_API_PORT:8080' \
       -e ASPNETCORE_ENVIRONMENT=IntegrationTest \
-      -e ConnectionStrings__Planning='$cs' -e ConnectionStrings__Ln='$ln' \
+      -e ConnectionStrings__Planning='$cs' -e ConnectionStrings__Ln='$ln' -e ConnectionStrings__Nucleos='$nuc' \
       -e ServiceBus__ConnectionString='$sbcs' -e ServiceBus__SubscriptionPrefix='$WT_SB_PREFIX' \
       -e FeatureManagement__FlagCacheTtlSeconds=0 \
       -e Parity__LegacySource='$psrc'$oracle_env $(pm_parity_env_flags) ${PM_WT_API_EXTRA_ENV:-} '$img' >/dev/null \
@@ -713,6 +749,16 @@ wt_drop_planning() {  # uso: wt_drop_planning <password>
   wt_log "dropeando BD de producto '$PM_PLANNING_DB' del SQL compartido ..."
   local sql="IF DB_ID(N'$PM_PLANNING_DB') IS NOT NULL BEGIN ALTER DATABASE [$PM_PLANNING_DB] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [$PM_PLANNING_DB]; END"
   wt_shared_exec "$pw" "$sql" || wt_log "aviso: no se pudo dropear '$PM_PLANNING_DB' (quiza ya no existe)"
+}
+
+# Baja la BD Nucleos del slot (pm_nucleos_wt<N>) del SQL compartido (mata conexiones; idempotente). Es por-slot,
+# como planning: se dropea en el teardown/reclaim del slot (a diferencia de la referencia LN, que es singleton
+# compartido y NO se dropea).
+wt_drop_nucleos() {  # uso: wt_drop_nucleos <password>
+  local pw="$1"
+  wt_log "dropeando BD Nucleos del slot '$PM_NUCLEOS_DB' del SQL compartido ..."
+  local sql="IF DB_ID(N'$PM_NUCLEOS_DB') IS NOT NULL BEGIN ALTER DATABASE [$PM_NUCLEOS_DB] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [$PM_NUCLEOS_DB]; END"
+  wt_shared_exec "$pw" "$sql" || wt_log "aviso: no se pudo dropear '$PM_NUCLEOS_DB' (quiza ya no existe)"
 }
 
 # --- Presupuesto de aprovisionamiento (topes reales: disco/RAM de la VM colima, docker, guest, slots) ---
@@ -1019,7 +1065,13 @@ _cmd_wt_up_locked() {
     wt_ensure_oracle || return 1
   fi
 
-  # 4) per-worktree: API ANTES del seed. La API aplica las migraciones EF al arrancar (entorno
+  # 4) BD Nucleos del slot (fuente externa stand-in): se asegura ANTES del API para que ConnectionStrings:Nucleos
+  # apunte a una BD viva con el esquema cores.* + seed. NO la crea EF (es fuente externa, no un schema de PM); la
+  # posee el tooling igual que la referencia LN. Se aplica siempre (independiente de PM_WT_SKIP_PLANNING_SEED, que
+  # solo gobierna el seed data-only de planning).
+  wt_ensure_nucleos "$pw" || return 1
+
+  # 5) per-worktree: API ANTES del seed. La API aplica las migraciones EF al arrancar (entorno
   # IntegrationTest => !Production): crea la BD por-slot y el DDL de todos los schemas. Recien entonces
   # corre el seed data-only de la BD de producto (los loaders requieren las tablas ya creadas por EF).
   wt_up_api "$pw" || return 1
@@ -1038,6 +1090,7 @@ _cmd_wt_up_locked() {
   echo "[wt]   API      -> http://$PM_REMOTE_SSH:$PM_API_PORT/health/live"
   echo "[wt]   SQL      -> $PM_SHARED_SQL_HOST/$PM_PLANNING_DB (compartido; publicado en $PM_REMOTE_SSH:$PM_SHARED_SQL_PUBLISHED)"
   echo "[wt]   LN ref   -> $PM_WT_LN_DB (compartido, read-only)"
+  echo "[wt]   Nucleos  -> $PM_NUCLEOS_DB (propio del slot; cores.* stand-in, SELECT-only)"
   echo "[wt]   bus      -> $PM_WT_BUS_PROJECT (prefix $WT_SB_PREFIX)"
   if [ "$WT_ORACLE_ACTIVE" = "1" ]; then
     echo "[wt]   Oracle   -> $WT_ORACLE_CONTAINER (propio del slot; $PM_REMOTE_SSH:$WT_ORACLE_PORT, guest 172.16.128.1:$WT_ORACLE_PORT)"
@@ -1065,7 +1118,8 @@ cmd_wt_down() {
   if wt_oracle_exists; then
     wt_oracle_down || { wt_die "el slot $slot NO se libera: revisa '$WT_ORACLE_CONTAINER' en $PM_REMOTE_SSH"; return 1; }
   fi
-  local pw; pw="$(wt_shared_sql_password)" && wt_drop_planning "$pw" || wt_log "aviso: no se dropeo la BD (sin password del SQL compartido)"
+  local pw
+  if pw="$(wt_shared_sql_password)"; then wt_drop_planning "$pw"; wt_drop_nucleos "$pw"; else wt_log "aviso: no se dropearon las BDs del slot (sin password del SQL compartido)"; fi
   wt_registry_lock wt_slot_release "$folder"
   wt_log "worktree '$folder' bajado y slot $slot liberado (singletons compartidos intactos)"
   wt_log "nota: el site del legado no lo baja este verbo; usa 'make e2e-down WT=$folder' (o 'make legacy-site-down SLOT=$slot')"
@@ -1150,6 +1204,7 @@ cmd_wt_info() {
     contenedor API    pm-wt${slot}-api            puerto host ${PM_API_PORT}   (guest: ${PM_GUEST_GATEWAY}:${PM_API_PORT})
     BD planning       ${PM_PLANNING_DB}                 (SQL compartido ${PM_SHARED_SQL_HOST}:${PM_SHARED_SQL_PORT})
     BD LN del slot    ${ln_db}   ${ln_label}
+    BD Nucleos slot   ${PM_NUCLEOS_DB}                  (propio del slot; cores.* stand-in, fuente externa SELECT-only)
     prefijo de bus    ${WT_SB_PREFIX}                        (broker singleton ${PM_WT_BUS_PROJECT})
     contenedor Oracle ${WT_ORACLE_CONTAINER}    puerto host ${WT_ORACLE_PORT}  (guest: ${PM_GUEST_GATEWAY}:${WT_ORACLE_PORT})
     volumen Oracle    ${WT_ORACLE_VOLUME}
@@ -1197,8 +1252,8 @@ _wt_reclaim_slot() {  # uso: _wt_reclaim_slot <slot> <folder>
   tport=$(( PM_WT_TUNNEL_PORT_BASE + slot ))
   tpid="$(pgrep -f -- "-L ${tport}:${PM_GUEST_WINHOST}:" 2>/dev/null | head -1)"
   [ -n "$tpid" ] && kill "$tpid" 2>/dev/null || true
-  # BD de producto del slot (higiene de disco del /dev/vdb1).
-  pw="$(wt_shared_sql_password 2>/dev/null)" && wt_drop_planning "$pw" >/dev/null 2>&1 || true
+  # BDs del slot (planning + Nucleos; higiene de disco del /dev/vdb1). La referencia LN NO se dropea (singleton).
+  pw="$(wt_shared_sql_password 2>/dev/null)" && { wt_drop_planning "$pw" >/dev/null 2>&1; wt_drop_nucleos "$pw" >/dev/null 2>&1; } || true
   wt_registry_lock wt_slot_release "$folder"
   wt_log "slot $slot reclamado (recursos retirados, fila liberada)"
 }
@@ -1505,9 +1560,11 @@ cmd_wt_sql() {
   _wt_bind_slot || return $?
   local pw; pw="$(wt_shared_sql_password)" || return 1
   wt_shared_sql_check || return 1
-  # LN=1 -> BD LN del slot (golden pm_gs_ln_wt<N> si existe, si no pm_erpln106); default -> planning del slot.
+  # LN=1 -> BD LN del slot (golden pm_gs_ln_wt<N> si existe, si no pm_erpln106); NUC=1 -> BD Nucleos del slot
+  # (pm_nucleos_wt<N>, cores.*); default -> planning del slot. LN y NUC son mutuamente excluyentes (gana NUC).
   local db="$PM_PLANNING_DB"
   if [ "${PM_WT_SQL_LN:-0}" = "1" ]; then db="$(wt_ln_db "$WT_SLOT" "$pw")"; wt_log "wt-sql LN=1 -> BD LN '$db'"; fi
+  if [ "${PM_WT_SQL_NUC:-0}" = "1" ]; then db="$PM_NUCLEOS_DB"; wt_log "wt-nucleos -> BD Nucleos '$db'"; fi
   # Fija la BD por el flag -d de sqlcmd (no 'USE [db]'): asi no emite el mensaje "Changed database context" que
   # ensuciaria el escalar. El SQL llega intacto (con comillas simples) porque el Makefile exporta SQL (no lo
   # interpola entre comillas simples en la linea de comando).

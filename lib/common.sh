@@ -177,6 +177,7 @@ load_env() {
   # integration tests del backend: host/BD del SQL a apuntar (contenedores en macdata).
   PM_TEST_SQL_HOST="${PM_TEST_SQL_HOST:-127.0.0.1}"   # intel: IP/host LAN de macdata
   PM_PLANNING_DB="${PM_PLANNING_DB:-pm_planning}"      # BD de producto (la crean las migraciones EF)
+  PM_NUCLEOS_DB="${PM_NUCLEOS_DB:-pm_nucleos}"         # BD stand-in del microservicio Nucleos (cores.*); la posee el tooling (fuente externa SELECT-only, NO EF)
   # Service Bus (emulador, contenedor amd64 junto al data tier): host por defecto el mismo del SQL.
   PM_SERVICEBUS_HOST="${PM_SERVICEBUS_HOST:-$PM_TEST_SQL_HOST}"
   PM_SB_SA_PASSWORD="${PM_SB_SA_PASSWORD:-Sb_Local_2026!}"
