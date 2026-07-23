@@ -39,6 +39,19 @@ DOTNET_CONTAINER_SEQ=0
 ACTIVE_CMD_PID=''
 ACTIVE_WATCHDOG_PID=''
 
+# Watchdog central (lib/watchdog.sh). En stage remoto vive junto a este script; en local, en ../lib.
+_SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$_SELF_DIR/watchdog.sh" ]; then
+  # shellcheck source=/dev/null
+  . "$_SELF_DIR/watchdog.sh"
+elif [ -f "$_SELF_DIR/../lib/watchdog.sh" ]; then
+  # shellcheck source=/dev/null
+  . "$_SELF_DIR/../lib/watchdog.sh"
+else
+  die "lib/watchdog.sh no encontrado (stage incompleto o checkout roto)"
+fi
+WATCHDOG_RUNNER=e2e-playwright-remote
+
 LOG_FILE="$RESULT_ROOT/$PHASE.log"
 exec 3>&1
 : > "$LOG_FILE"
@@ -78,43 +91,6 @@ ensure_dotnet_runner(){
   command -v docker >/dev/null 2>&1 || return 1
   "${DOCKER_CMD[@]}" image inspect "$DOTNET_IMAGE" >/dev/null 2>&1 || return 1
   DOTNET_RUNNER=docker
-}
-
-process_tree(){
-  local pid="$1" child children
-  children="$(pgrep -P "$pid" 2>/dev/null || true)"
-  for child in $children; do process_tree "$child"; done
-  printf '%s\n' "$pid"
-}
-
-run_with_watchdog(){
-  local timeout_s="$1"; shift
-  valid_uint "$timeout_s" && [ "$timeout_s" -gt 0 ] || die "timeout invalido '$timeout_s'"
-  local cmd_pid watchdog_pid rc=0 marker tree pid
-  marker="$RESULT_ROOT/.timeout-$PHASE-$$"
-  "$@" & cmd_pid=$!; ACTIVE_CMD_PID="$cmd_pid"
-  (
-    sleep "$timeout_s"
-    if kill -0 "$cmd_pid" 2>/dev/null; then
-      mkdir "$marker" 2>/dev/null || true
-      tree="$(process_tree "$cmd_pid")"
-      for pid in $tree; do kill -TERM "$pid" 2>/dev/null || true; done
-      sleep 5
-      for pid in $tree; do kill -KILL "$pid" 2>/dev/null || true; done
-    fi
-  ) & watchdog_pid=$!; ACTIVE_WATCHDOG_PID="$watchdog_pid"
-  wait "$cmd_pid" || rc=$?
-  if [ -d "$marker" ]; then
-    wait "$watchdog_pid" 2>/dev/null || true
-    rmdir "$marker" 2>/dev/null || true
-    ACTIVE_CMD_PID=''; ACTIVE_WATCHDOG_PID=''
-    return 124
-  fi
-  tree="$(process_tree "$watchdog_pid")"
-  for pid in $tree; do kill -TERM "$pid" 2>/dev/null || true; done
-  wait "$watchdog_pid" 2>/dev/null || true
-  ACTIVE_CMD_PID=''; ACTIVE_WATCHDOG_PID=''
-  return "$rc"
 }
 
 docker_cleanup_container(){

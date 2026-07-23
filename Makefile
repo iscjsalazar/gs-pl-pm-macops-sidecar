@@ -374,7 +374,7 @@ goldenslice-relaunch: override TARGET := intel
 goldenslice-relaunch: REMOTE := macdata
 goldenslice-relaunch: ; $(PM_ENV) LEGACYWT=$(LEGACYWT) bash ./goldenslice/relaunch.sh
 
-# --- smoke golden mutante de BajaUnidades (I30, solicitud 260720-1225 / solicitud-03) ---
+# --- smoke golden mutante de BajaUnidades (I30, solicitud 260720-1225 / solicitud-03; T-002 fail-closed) ---
 #   [WT+LEGACYWT obligatorios] make run-e2e-smoke-golden WT=<pm-wt> LEGACYWT=<legacy-wt> [RUNNER=m1|macdata] [HEADLESS=0|1]
 #   Aprovisiona una golden FRESCA (goldenslice-up en modo worktree: codigo EXACTO de ambos worktrees, sin
 #   fetch/checkout/reset/rebase), espera health completo y ejecuta EXCLUSIVAMENTE el spec @golden-smoke.
@@ -383,12 +383,26 @@ goldenslice-relaunch: ; $(PM_ENV) LEGACYWT=$(LEGACYWT) bash ./goldenslice/relaun
 #   descarga siempre a la M1 (verde o rojo). Deja la golden ARRIBA y MUTADA (sin e2e-down/wt-down); una
 #   corrida nueva SIEMPRE re-invoca este target completo (nunca el spec Playwright suelto contra un slot ya
 #   consumido). Evidencia por run-id en artifacts/playwright-smoke/<run-id>/ (orchestrator.log, result.rc,
-#   summary.txt, reporte HTML/JSON, test-results). Aislado de npm test/e2e-playwright (contrato tnuc02 intacto).
+#   result.status, summary.txt, reporte HTML/JSON, test-results). Aislado de npm test/e2e-playwright
+#   (contrato tnuc02 intacto).
+#   Perillas de watchdog (segundos; defaults conservadores T-002):
+#     GOLDEN_NPM_TIMEOUT_S=300  GOLDEN_CHROMIUM_TIMEOUT_S=900
+#     GOLDEN_PLAYWRIGHT_TIMEOUT_S=1800  GOLDEN_RSYNC_TIMEOUT_S=300
+#   El techo SSH remoto se deriva: npm+chromium+playwright+120.
 RUNNER    ?= m1
 HEADLESS  ?= 1
+GOLDEN_NPM_TIMEOUT_S        ?= 300
+GOLDEN_CHROMIUM_TIMEOUT_S   ?= 900
+GOLDEN_PLAYWRIGHT_TIMEOUT_S ?= 1800
+GOLDEN_RSYNC_TIMEOUT_S      ?= 300
 run-e2e-smoke-golden: override TARGET := intel
 run-e2e-smoke-golden: REMOTE := macdata
-run-e2e-smoke-golden: ; RUNNER="$(RUNNER)" HEADLESS="$(HEADLESS)" $(PM_ENV) LEGACYWT="$(LEGACYWT)" bash ./scripts/run-e2e-smoke-golden.sh
+run-e2e-smoke-golden: ; RUNNER="$(RUNNER)" HEADLESS="$(HEADLESS)" \
+	PM_E2E_GOLDEN_NPM_TIMEOUT_S="$(GOLDEN_NPM_TIMEOUT_S)" \
+	PM_E2E_GOLDEN_CHROMIUM_TIMEOUT_S="$(GOLDEN_CHROMIUM_TIMEOUT_S)" \
+	PM_E2E_GOLDEN_PLAYWRIGHT_TIMEOUT_S="$(GOLDEN_PLAYWRIGHT_TIMEOUT_S)" \
+	PM_E2E_GOLDEN_RSYNC_TIMEOUT_S="$(GOLDEN_RSYNC_TIMEOUT_S)" \
+	$(PM_ENV) LEGACYWT="$(LEGACYWT)" bash ./scripts/run-e2e-smoke-golden.sh
 
 # --- aprovisionamiento por worktree (wt-*): intel-only (SQL compartido + bus en macdata) ---
 # 'override TARGET' fuerza intel (el SQL compartido vive en el docker de macdata); REMOTE default macdata
