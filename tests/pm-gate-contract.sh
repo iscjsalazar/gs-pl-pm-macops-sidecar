@@ -45,6 +45,27 @@ grep -A8 '^pm-gate:' "$ROOT/Makefile" | grep -q 'pm.sh gate' && ok "make gate->p
 # No recursión make wt-up + pm-test-clean (viejo pm-gate)
 ! grep -E 'pm-gate:.*;.*wt-up.*pm-test-clean' "$ROOT/Makefile" && ok "old recursive pm-gate removed" || bad "old recursive pm-gate removed"
 
+# --- reason_code fino: desviacion de conteos != pruebas rojas ---
+grep -q 'coverage_manifest_mismatch' "$ROOT/lib/unit-macdata.sh" && ok "reason coverage_manifest_mismatch" || bad "reason coverage_manifest_mismatch"
+grep -q 'PM_UNIT_FAIL_REASON' "$ROOT/lib/unit-macdata.sh" && ok "fail reason plumbing" || bad "fail reason plumbing"
+grep -A12 'local gate_reason="unit_failed_failfast"' "$ROOT/lib/unit-macdata.sh" | grep -q 'PM_UNIT_FAIL_REASON' \
+  && ok "gate seal usa el reason fino" || bad "gate seal usa el reason fino"
+grep -q 'pm_unit_desviacion_hint' "$ROOT/lib/unit-macdata.sh" && ok "hint de regeneracion/override" || bad "hint de regeneracion/override"
+grep -q 'pm-gate-manifest-regen WT=' "$ROOT/lib/unit-macdata.sh" && ok "hint cita el verbo real" || bad "hint cita el verbo real"
+grep -q 'MANIFEST=artifacts/gate-manifests' "$ROOT/lib/unit-macdata.sh" && ok "hint cita el knob MANIFEST" || bad "hint cita el knob MANIFEST"
+
+# --- evidencia: identidad del manifiesto activo y modo regeneracion ---
+grep -q '"manifest_path"' "$ROOT/lib/unit-macdata.sh" && ok "result.json trae manifest_path" || bad "result.json trae manifest_path"
+grep -q '"regen_mode"' "$ROOT/lib/unit-macdata.sh" && ok "result.json marca regen_mode" || bad "result.json marca regen_mode"
+grep -q 'manifest_regen_observed' "$ROOT/lib/unit-macdata.sh" && ok "verde de observacion no se confunde con sello" || bad "verde de observacion no se confunde con sello"
+
+# --- la fase de integracion tambien separa veredicto de identidad ---
+grep -q 'local phase_ok=0' "$ROOT/lib/unit-macdata.sh" && ok "integration phase_ok separado de baseline_match" || bad "integration phase_ok separado de baseline_match"
+
+# --- regeneracion: nunca sobre el manifiesto canonico ---
+grep -q 'manifest_regen_refused' "$ROOT/scripts/pm-gate-manifest-write.py" && ok "writer fail-closed" || bad "writer fail-closed"
+grep -q 'pm-gate-manifest-regen exige WT' "$ROOT/Makefile" && ok "regen exige WT" || bad "regen exige WT"
+
 echo "----"
 echo "PASS=$pass FAIL=$fail"
 [ "$fail" -eq 0 ]

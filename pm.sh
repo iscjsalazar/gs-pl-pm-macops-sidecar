@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Orquestador del data tier PM (SQL Server + Oracle) + API real para macOS.
-# Verbos: run [--watch] | migrate | seed | api | api-down | e2e-backend (DEPRECADO) | e2e-backend-down (DEPRECADO) | test | test-clean | unit | format | format-check | down | nuke | ps | logs | port
+# Verbos: run [--watch] | migrate | seed | api | api-down | e2e-backend (DEPRECADO) | e2e-backend-down (DEPRECADO) | test | test-clean | unit | gate | gate-manifest-regen | format | format-check | down | nuke | ps | logs | port
 # Target: PM_TARGET=local (colima/desktop) | intel (rsync + docker compose en la mac Intel via SSH)
 #
 #   ./pm.sh run                 # levanta el data tier + migra EF (crea BD/DDL) + seedea data-only (local)
@@ -18,6 +18,8 @@
 #   PM_TEST_FILTER='FullyQualifiedName~RtSync' ./pm.sh test                                    # un filtro
 #   WT=<worktree> ./pm.sh unit  # unit+architecture en macdata (14 proyectos, receta durable T-008); WT obligatorio
 #   WT=<worktree> ./pm.sh gate  # cierre canonico: unit macdata -> fail-fast -> wt-up ORACLE=1 -> IntegrationTests
+#   WT=<worktree> ./pm.sh gate-manifest-regen  # manifiesto DE RAMA con los conteos reales (artifacts/, nunca config/)
+#   PM_UNIT_MANIFEST_REL=<ruta> WT=<worktree> ./pm.sh gate  # corre el gate contra un manifiesto de rama
 #   ./pm.sh down / nuke         # baja el data tier (conserva / borra volumenes)
 #   # La confirmacion NUKE=1 vive en la capa make (make pm-nuke NUKE=1); la invocacion directa './pm.sh nuke' la salta.
 #   # Data tier en la mac Intel + API en esta mac (el alias 'macdata' debe resolver como host p/ BD/AMQP: ver README):
@@ -194,6 +196,13 @@ cmd_gate() {           # Cierre canonico: unit macdata PRIMERO; rojo unitario co
   pm_gate_macdata_run
 }
 
+cmd_gate_manifest_regen() {  # Manifiesto DE RAMA con los conteos reales de la rama (artifacts/,
+                             # nunca config/). Corrida de observacion o derivacion de evidencia.
+  # shellcheck disable=SC1090
+  . "$(dirname "${BASH_SOURCE[0]}")/lib/unit-macdata.sh"
+  pm_gate_manifest_regen_run
+}
+
 cmd_down() { echo "[pm] down (conserva volumenes y VM) ..."; compose down; }
 cmd_nuke() { echo "[pm] nuke (borra contenedores+volumenes; NO la VM colima) ..."; compose down --volumes --remove-orphans; }
 cmd_ps()   { compose ps; }
@@ -255,6 +264,7 @@ case "$VERB" in
   test-clean) cmd_test_clean "$@" ;;
   unit)       cmd_unit ;;
   gate)       cmd_gate ;;
+  gate-manifest-regen) cmd_gate_manifest_regen ;;
   wait-gate)  cmd_wait_gate "$@" ;;
   format)       cmd_format "$@" ;;
   format-check) cmd_format_check "$@" ;;
@@ -263,5 +273,5 @@ case "$VERB" in
   ps)       cmd_ps ;;
   logs)     cmd_logs ;;
   port)     cmd_port ;;
-  *) echo "uso: $0 {run [--watch]|migrate|seed|api|api-down|e2e-backend (DEPRECADO)|e2e-backend-down (DEPRECADO)|test|test-clean|unit|gate|wait-gate|format|format-check|down|nuke|ps|logs|port}"; exit 2 ;;
+  *) echo "uso: $0 {run [--watch]|migrate|seed|api|api-down|e2e-backend (DEPRECADO)|e2e-backend-down (DEPRECADO)|test|test-clean|unit|gate|gate-manifest-regen|wait-gate|format|format-check|down|nuke|ps|logs|port}"; exit 2 ;;
 esac

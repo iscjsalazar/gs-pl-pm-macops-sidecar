@@ -48,8 +48,9 @@ while IFS= read -r line || [ -n "$line" ]; do
 "
 done < "$PROJECTS_FILE"
 
-if [ "$n_proj" -ne 14 ]; then
-  log "manifest_invalid: projects=$n_proj"
+# El numero de proyectos lo declara el manifiesto ACTIVO (EXPECTED_PROJECTS); 14 es el del canonico.
+if [ "$n_proj" -ne "${EXPECTED_PROJECTS:-14}" ]; then
+  log "manifest_invalid: projects=$n_proj esperados=${EXPECTED_PROJECTS:-14}"
   printf '{"exit_code":3,"reason":"manifest_invalid","restore_rc":1,"build_rc":1,"projects":[]}\n' > "$SUMMARY"
   exit 3
 fi
