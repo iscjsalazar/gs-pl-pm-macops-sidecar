@@ -27,7 +27,7 @@ assert len(d["required_assets"])==4
 assert "@sha256:" in d["sdk_image"]
 assert d["expected_sdk_version"]=="10.0.302"
 assert d["integration_project"]=="tests/PL.PM.IntegrationTests/PL.PM.IntegrationTests.csproj"
-assert sum(p["expected_total"] for p in d["projects"])==2162
+assert sum(p["expected_total"] for p in d["projects"])==2200
 assert d["integration_expected_total"]==334
 paths=[p["path"] for p in d["projects"]]
 assert len(paths)==len(set(paths))
