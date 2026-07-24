@@ -14,6 +14,8 @@
 #   [WT obligatorio] make pm-gate WT=<worktree>         # CIERRE CANONICO: unit+arch en macdata PRIMERO (fail-fast) -> wt-up ORACLE=1 -> PL.PM.IntegrationTests una vez
 #   [WT obligatorio] make pm-test-clean WT=<worktree>   # alias de compatibilidad hacia pm-gate (misma maquina de estados; NO ejecuta PL.PM.sln)
 #   [WT obligatorio] make pm-unit WT=<worktree>         # fase unit+architecture en macdata (14 proyectos, assets allowlist, restore/build unicos); sin FILTER
+#   [WT obligatorio] make pm-gate-manifest-regen WT=<worktree>   # manifiesto DE RAMA con conteos reales -> artifacts/gate-manifests/ (nunca config/); ALLOW_DROP=1 REASON='...' si la rama retira pruebas
+#   [WT obligatorio] make pm-gate WT=<worktree> MANIFEST=artifacts/gate-manifests/pm-gate-manifest-<worktree>.json  # gate contra el manifiesto de rama (equivalente: PM_UNIT_MANIFEST_REL=<ruta>)
 #   make pm-test FILTER='FullyQualifiedName~RtSync'   # acota por filtro (inner-loop diagnostico; NO es evidencia de cierre)
 #   make pm-test APIFORCE=1                            # relanza la API (api-down+api) antes de testear; no reusa
 #   make pm-format               # formatea los .cs modificados vs develop (delega a scripts/format.sh in-repo)
@@ -244,7 +246,11 @@ ACK_LIVE    ?= 0
 export SQL
 export BODY
 
-WT_ENV = $(PM_ENV) WT=$(WT) PM_WT_SLOTS=$(SLOTS) PM_WT_ORACLE=$(ORACLE) PM_WT_GC_FORCE=$(FORCE) \
+# MANIFEST=<ruta> apunta la fase unit a un manifiesto DE RAMA (regenerado con pm-gate-manifest-regen).
+# Se inyecta solo si viene con valor: vacio NO debe pisar un PM_UNIT_MANIFEST_REL ya exportado al entorno.
+MANIFEST_ENV = $(if $(MANIFEST),PM_UNIT_MANIFEST_REL='$(MANIFEST)',)
+
+WT_ENV = $(PM_ENV) $(MANIFEST_ENV) WT=$(WT) PM_WT_SLOTS=$(SLOTS) PM_WT_ORACLE=$(ORACLE) PM_WT_GC_FORCE=$(FORCE) \
          PM_WT_SEED_FORCE=$(FORCE) PM_WT_SOLUTION_DIR='$(SOLUTION)' \
          PM_WT_SQL_SCALAR=$(SCALAR) PM_WT_SQL_LN=$(LN) PM_WT_WARM=$(WARM) PM_WT_PRUNE_HARD=$(HARD) \
          PM_VM_RESTART_CONFIRM=$(CONFIRM) PM_VM_RESTART_ACK_LIVE=$(ACK_LIVE) \
@@ -253,7 +259,7 @@ WT_ENV = $(PM_ENV) WT=$(WT) PM_WT_SLOTS=$(SLOTS) PM_WT_ORACLE=$(ORACLE) PM_WT_GC
          PM_SHARED_SQL_NETWORK=$(SHAREDSQL_NET) PM_SHARED_SQL_HOST=$(SHAREDSQL_HOST) \
          PM_SHARED_SQL_PORT=$(SHAREDSQL_PORT) PM_SHARED_SQL_PASSWORD='$(SHAREDSQL_PASSWORD)'
 
-.PHONY: pm-run pm-watch pm-migrate pm-seed pm-api pm-api-down pm-test pm-test-clean pm-gate pm-unit pm-format pm-format-check pm-down pm-nuke pm-ps pm-logs pm-port pm-bootstrap-intel \
+.PHONY: pm-run pm-watch pm-migrate pm-seed pm-api pm-api-down pm-test pm-test-clean pm-gate pm-gate-manifest-regen pm-unit pm-format pm-format-check pm-down pm-nuke pm-ps pm-logs pm-port pm-bootstrap-intel \
         wt-up wt-down wt-ls wt-info wt-status wt-gc wt-prune-cache vm-restart-coordinated wt-seed-ln wt-sql wt-nucleos wt-oracle wt-flag wt-health wt-api wt-heartbeat wt-reclaim \
         e2e-backend e2e-backend-down e2e-net-check e2e-up e2e-smoke e2e-playwright e2e-url e2e-down e2e-oracle-counts \
         run-e2e-smoke-golden \
@@ -297,6 +303,20 @@ pm-unit:
 	@if [ -z "$(WT)" ]; then echo "pm-unit exige WT=<worktree> (receta macdata)" >&2; exit 2; fi
 	@if [ -n "$(FILTER)" ]; then echo "pm-unit rechaza FILTER (corpus completo)" >&2; exit 2; fi
 	$(WT_ENV) UNIT_RUN_ID='$(UNIT_RUN_ID)' ./pm.sh unit
+# Manifiesto DE RAMA del gate: corre la fase real en modo observacion y escribe los conteos medidos a
+# artifacts/gate-manifests/ (NUNCA config/pm-gate-manifest.json). MODE=gate mide tambien integracion;
+# MODE=unit solo la fase unit (integracion heredada del canonico). FROM=<dir de evidencia> deriva de una
+# corrida ya sellada sin volver a correr. Una CAIDA de conteos exige ALLOW_DROP=1 REASON='<por que>'.
+pm-gate-manifest-regen: override TARGET := intel
+pm-gate-manifest-regen: REMOTE  := macdata
+pm-gate-manifest-regen: PROFILE := full
+pm-gate-manifest-regen: ORACLE  := 1
+pm-gate-manifest-regen:
+	@if [ -z "$(WT)" ]; then echo "pm-gate-manifest-regen exige WT=<worktree>" >&2; exit 2; fi
+	@if [ -n "$(FILTER)" ]; then echo "pm-gate-manifest-regen rechaza FILTER (corpus completo)" >&2; exit 2; fi
+	$(WT_ENV) PM_GATE_MANIFEST_MODE='$(or $(MODE),gate)' PM_GATE_MANIFEST_FROM='$(FROM)' \
+	  PM_GATE_MANIFEST_OUT='$(OUT)' PM_GATE_MANIFEST_ALLOW_DROP='$(ALLOW_DROP)' \
+	  PM_GATE_MANIFEST_REASON='$(REASON)' ./pm.sh gate-manifest-regen
 pm-format:       ; $(PM_ENV) ./pm.sh format          # formatea .cs modificados vs develop (delega a scripts/format.sh in-repo)
 pm-format-check: ; $(PM_ENV) ./pm.sh format-check    # gate de formato changed-vs-develop (delega a scripts/format-check.sh)
 pm-gate-wait:    ; $(PM_ENV) ./pm.sh wait-gate    # espera el veredicto del gate leyendo el .rc canonico (LOG=<ruta.log> o el mas reciente)

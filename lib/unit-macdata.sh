@@ -5,7 +5,11 @@
 set -euo pipefail
 
 # --- constantes de la receta ---
-PM_UNIT_MANIFEST_REL="config/pm-gate-manifest.json"
+# Manifiesto ACTIVO de la fase. El canonico (versionado) es el baseline de la rama de integracion;
+# una rama con pruebas nuevas o retiradas legitimos apunta aqui su manifiesto de rama
+# (make pm-gate-manifest-regen), por ruta relativa a BASE_DIR o absoluta. El default no cambia.
+PM_UNIT_MANIFEST_CANONICAL_REL="config/pm-gate-manifest.json"
+PM_UNIT_MANIFEST_REL="${PM_UNIT_MANIFEST_REL:-$PM_UNIT_MANIFEST_CANONICAL_REL}"
 PM_UNIT_RUNSETTINGS_REL="config/pm-unit.runsettings"
 PM_UNIT_REMOTE_NS="pm-unit-workspaces"
 PM_UNIT_LOCK_DIR="${TMPDIR:-/tmp}/pm-unit-macdata.lock"
@@ -116,7 +120,40 @@ pm_unit_resolve_solution() {
 # Manifiesto versionado
 # ---------------------------------------------------------------------------
 pm_unit_manifest_path() {
-  printf '%s/%s' "$BASE_DIR" "$PM_UNIT_MANIFEST_REL"
+  # Acepta ruta absoluta (manifiesto de rama fuera del arbol) o relativa a BASE_DIR.
+  case "$PM_UNIT_MANIFEST_REL" in
+    /*) printf '%s' "$PM_UNIT_MANIFEST_REL" ;;
+    *)  printf '%s/%s' "$BASE_DIR" "$PM_UNIT_MANIFEST_REL" ;;
+  esac
+}
+
+pm_unit_manifest_canonical_path() {
+  printf '%s/%s' "$BASE_DIR" "$PM_UNIT_MANIFEST_CANONICAL_REL"
+}
+
+pm_unit_manifest_is_canonical() {
+  [ "$(pm_unit_manifest_path)" = "$(pm_unit_manifest_canonical_path)" ]
+}
+
+pm_unit_manifest_branch_out() {
+  # Ruta por default del manifiesto de rama (evidencia, no config versionada).
+  local wt_short="${1:-${PM_UNIT_WT_SHORT:-${WT:-branch}}}"
+  wt_short="$(basename "$wt_short")"
+  printf '%s/artifacts/gate-manifests/pm-gate-manifest-%s.json' "$BASE_DIR" "$wt_short"
+}
+
+pm_unit_desviacion_hint() {
+  # Mensaje accionable cuando el corte es por conteos (no por pruebas rojas).
+  local wt_short="${PM_UNIT_WT_SHORT:-${WT:-<worktree>}}"
+  wt_short="$(basename "$wt_short")"
+  local kind="de rama"
+  pm_unit_manifest_is_canonical && kind="canonico"
+  pm_unit_log "coverage_manifest_mismatch: cero pruebas rojas; el corte es por DESVIACION DE CONTEOS contra el manifiesto activo ($kind): $(pm_unit_manifest_path)"
+  pm_unit_log "  baseline pinneado: baseline_pm_sha=$(pm_unit_manifest_field baseline_pm_sha)"
+  pm_unit_log "  si la desviacion es legitima (pruebas nuevas o retiros deliberados de esta rama):"
+  pm_unit_log "    1) make pm-gate-manifest-regen WT=$wt_short   # agrega ALLOW_DROP=1 REASON='<por que>' si la rama RETIRA pruebas"
+  pm_unit_log "    2) make pm-gate WT=$wt_short MANIFEST=artifacts/gate-manifests/pm-gate-manifest-$wt_short.json"
+  pm_unit_log "  (equivalente por entorno: PM_UNIT_MANIFEST_REL=<ruta>). El manifiesto canonico solo se mueve cuando cambia el baseline de la rama de integracion."
 }
 
 pm_unit_load_manifest() {
@@ -134,8 +171,12 @@ except Exception as e:
 if data.get("schema_version") != 1:
     print("manifest_invalid: schema_version", file=sys.stderr); sys.exit(3)
 projects = data.get("projects") or []
-if len(projects) != 14:
-    print(f"manifest_invalid: project_count={len(projects)} (esperado 14)", file=sys.stderr); sys.exit(3)
+# El numero de proyectos lo declara el propio manifiesto (project_count): una rama que agrega o
+# retira un proyecto de pruebas regenera su manifiesto y sigue siendo verificable. El anti-drift
+# real es la igualdad exacta contra el descubrimiento del arbol, mas abajo.
+expected_n = int(data.get("project_count") or len(projects))
+if expected_n < 1 or len(projects) != expected_n:
+    print(f"manifest_invalid: projects={len(projects)} declarados={expected_n}", file=sys.stderr); sys.exit(3)
 paths = []
 for p in projects:
     path = p.get("path") or ""
@@ -639,7 +680,10 @@ doc = {
   "host_mem": os.environ.get("PM_UNIT_HOST_MEM",""),
   "docker_cpus": os.environ.get("PM_UNIT_DOCKER_CPUS",""),
   "docker_memory": os.environ.get("PM_UNIT_DOCKER_MEMORY",""),
-  "manifest_project_count": 14,
+  "manifest_project_count": int(os.environ.get("PM_UNIT_MANIFEST_PROJECT_COUNT") or 14),
+  "manifest_path": os.environ.get("PM_UNIT_MANIFEST_ACTIVE",""),
+  "manifest_is_canonical": os.environ.get("PM_UNIT_MANIFEST_ACTIVE","").endswith("config/pm-gate-manifest.json"),
+  "regen_mode": os.environ.get("PM_UNIT_REGEN","0") == "1",
   "phases": {p.get("phase"): p for p in phases},
   "projects": projects,
   "integration": json.loads(os.environ.get("PM_UNIT_INTEGRATION_JSON","null") or "null"),
@@ -956,6 +1000,7 @@ PY"
       -e DOTNET_CLI_HOME=/work/cache/dotnet-home \
       -e HOME=/work/cache/home \
       -e EXPECTED_SDK_VERSION='$PM_UNIT_SDK_EXPECTED_VER' \
+      -e EXPECTED_PROJECTS='${PM_UNIT_MANIFEST_PROJECT_COUNT:-14}' \
       -v '$src:/work/source' \
       -v '$run_dir:/work/run' \
       -v '$cache_nuget:/work/cache/nuget' \
@@ -1042,59 +1087,14 @@ PY"
   on_intel "docker $ctx rm -f '$PM_UNIT_CONTAINER_NAME' >/dev/null 2>&1 || true"
   PM_UNIT_CONTAINER_NAME=""
 
-  # Parsea projects.jsonl desde summary
+  # Parsea projects.jsonl desde summary y compara conteos contra el manifiesto ACTIVO.
+  # La comparacion vive en un script versionado (scripts/pm-unit-coverage-compare.py) para que el
+  # guard sea verificable por contrato con fixtures sinteticos, no solo con una corrida real.
   if [ -f "$PM_UNIT_EVIDENCE_DIR/remote-out/summary.json" ]; then
-    python3 - "$PM_UNIT_EVIDENCE_DIR/remote-out/summary.json" "$PM_UNIT_PROJECTS_JSONL" "$(pm_unit_manifest_path)" <<'PY'
-import json, sys, pathlib
-summary = json.load(open(sys.argv[1]))
-out = pathlib.Path(sys.argv[2])
-mf = json.load(open(sys.argv[3]))
-exp = {p["path"]: p for p in mf["projects"]}
-lines = []
-ok = True
-reasons = []
-for i, pr in enumerate(summary.get("projects") or [], 1):
-    path = pr.get("path")
-    e = exp.get(path, {})
-    total = int(pr.get("total") if pr.get("total") is not None else 0)
-    executed = int(pr.get("executed") if pr.get("executed") is not None else 0)
-    skipped = int(pr.get("skipped") if pr.get("skipped") is not None else 0)
-    failed = int(pr.get("failed") if pr.get("failed") is not None else 0)
-    # OJO: no usar `x or 1` — exit_code 0 es falsy en Python.
-    rc = int(pr["exit_code"]) if "exit_code" in pr and pr["exit_code"] is not None else 1
-    match = (
-        total == e.get("expected_total")
-        and executed == e.get("expected_executed")
-        and skipped == e.get("expected_skipped")
-        and failed == e.get("expected_failed", 0)
-        and rc == 0
-        and total > 0
-    )
-    if not match:
-        ok = False
-        reasons.append(f"{path}: total={total}/{e.get('expected_total')} exec={executed} skip={skipped} fail={failed} rc={rc}")
-    lines.append(json.dumps({
-        "index": i,
-        "path": path,
-        "invocation_count": 1,
-        "exit_code": rc,
-        "total": total,
-        "executed": executed,
-        "skipped": skipped,
-        "failed": failed,
-        "duration_ms": pr.get("duration_ms"),
-        "trx": pr.get("trx"),
-        "baseline_match": match,
-    }))
-out.write_text("\n".join(lines) + ("\n" if lines else ""))
-# también resume counts
-agg = summary.get("aggregates") or {}
-pathlib.Path(sys.argv[1]).with_name("coverage_ok.txt").write_text(
-    "1\n" if ok and summary.get("restore_rc")==0 and summary.get("build_rc")==0 and len(lines)==14 else "0\n"
-)
-pathlib.Path(sys.argv[1]).with_name("coverage_reasons.txt").write_text("\n".join(reasons)+"\n")
-print("projects", len(lines), "ok" if ok else "mismatch")
-PY
+    python3 "$BASE_DIR/scripts/pm-unit-coverage-compare.py" \
+      "$PM_UNIT_EVIDENCE_DIR/remote-out/summary.json" \
+      "$PM_UNIT_PROJECTS_JSONL" \
+      "$(pm_unit_manifest_path)"
   else
     pm_unit_log "evidence_invalid: falta summary.json remoto"
     return 3
@@ -1114,12 +1114,25 @@ PY
 
   if [ "$restore_rc" != "0" ] || [ "$build_rc" != "0" ]; then
     pm_unit_log "unit failed: restore_rc=$restore_rc build_rc=$build_rc"
+    PM_UNIT_FAIL_REASON="unit_build"
+    export PM_UNIT_FAIL_REASON
     return 1
   fi
   if [ "$cov_ok" != "1" ]; then
-    pm_unit_log "unit failed: coverage/baseline mismatch o test rojo"
+    local cov_class
+    cov_class="$(cat "$PM_UNIT_EVIDENCE_DIR/remote-out/coverage_class.txt" 2>/dev/null || echo unknown)"
+    case "$cov_class" in
+      counts_only) PM_UNIT_FAIL_REASON="coverage_manifest_mismatch" ;;
+      structural)  PM_UNIT_FAIL_REASON="coverage_manifest_structural" ;;
+      *)           PM_UNIT_FAIL_REASON="unit_tests" ;;
+    esac
+    export PM_UNIT_FAIL_REASON
+    pm_unit_log "unit failed: class=$cov_class reason=$PM_UNIT_FAIL_REASON manifest=$(pm_unit_manifest_path)"
     if [ -f "$PM_UNIT_EVIDENCE_DIR/remote-out/coverage_reasons.txt" ]; then
       pm_unit_log "$(cat "$PM_UNIT_EVIDENCE_DIR/remote-out/coverage_reasons.txt")"
+    fi
+    if [ "$cov_class" = "counts_only" ] || [ "$cov_class" = "structural" ]; then
+      pm_unit_desviacion_hint
     fi
     return 1
   fi
@@ -1137,6 +1150,11 @@ pm_unit_macdata_run() {
   local mode="${1:-unit}"
   local run_id="${2:-}"
   local t_wall0; t_wall0="$(pm_unit_mono_ms)"
+
+  # Motivo fino del rojo (coverage_manifest_mismatch vs unit_tests). Se limpia por corrida para no
+  # heredar el de una corrida previa del mismo proceso.
+  PM_UNIT_FAIL_REASON=""
+  export PM_UNIT_FAIL_REASON
 
   pm_unit_reject_public_filters || return $?
   pm_unit_force_macdata || return $?
@@ -1185,6 +1203,11 @@ pm_unit_macdata_run() {
     pm_unit_seal_result not_operational "manifest_or_asset" "$mrc"
     return "$mrc"
   fi
+  PM_UNIT_MANIFEST_ACTIVE="$(pm_unit_manifest_path)"
+  PM_UNIT_MANIFEST_PROJECT_COUNT="$(pm_unit_manifest_field project_count)"
+  export PM_UNIT_MANIFEST_ACTIVE PM_UNIT_MANIFEST_PROJECT_COUNT
+  pm_unit_manifest_is_canonical \
+    || pm_unit_log "manifest activo NO canonico: $PM_UNIT_MANIFEST_ACTIVE (baseline_pm_sha=$(pm_unit_manifest_field baseline_pm_sha))"
   pm_unit_phase_end validate passed 0
 
   # Lock
@@ -1355,7 +1378,9 @@ PY
   if [ "$unit_rc" -eq 0 ]; then
     pm_unit_phase_end unit_arch_macdata passed 0
     if [ "$mode" = "unit" ]; then
-      pm_unit_seal_result passed "ok" 0
+      local unit_pass_reason="ok"
+      [ "${PM_UNIT_REGEN:-0}" = "1" ] && unit_pass_reason="manifest_regen_observed"
+      pm_unit_seal_result passed "$unit_pass_reason" 0
     fi
     return 0
   fi
@@ -1368,7 +1393,7 @@ PY
   fi
   pm_unit_phase_end unit_arch_macdata failed 1
   if [ "$mode" = "unit" ]; then
-    pm_unit_seal_result failed "unit_tests" 1
+    pm_unit_seal_result failed "${PM_UNIT_FAIL_REASON:-unit_tests}" 1
   fi
   return 1
 }
@@ -1419,7 +1444,12 @@ pm_gate_macdata_run() {
     [ "$unit_rc" -eq 2 ] && st=invalid_invocation
     [ "$unit_rc" -eq 3 ] && st=not_operational
     [ "$unit_rc" -ge 128 ] && st=interrupted
-    pm_unit_seal_result "$st" "unit_failed_failfast" "$unit_rc"
+    # reason_code fino: con cero rojos y desviacion de conteos, `unit_failed_failfast` era engañoso.
+    local gate_reason="unit_failed_failfast"
+    if [ "$unit_rc" -eq 1 ] && [ -n "${PM_UNIT_FAIL_REASON:-}" ] && [ "$PM_UNIT_FAIL_REASON" != "unit_tests" ]; then
+      gate_reason="$PM_UNIT_FAIL_REASON"
+    fi
+    pm_unit_seal_result "$st" "$gate_reason" "$unit_rc"
     return "$unit_rc"
   fi
 
@@ -1456,12 +1486,113 @@ pm_gate_macdata_run() {
   int_rc=$?
   set -e
   if [ "$int_rc" -eq 0 ]; then
-    pm_unit_seal_result passed "ok" 0
+    # En regeneracion el verde NO es un sello del gate: los conteos se observaron, no se exigieron.
+    local pass_reason="ok"
+    [ "${PM_UNIT_REGEN:-0}" = "1" ] && pass_reason="manifest_regen_observed"
+    pm_unit_seal_result passed "$pass_reason" 0
     return 0
   else
-    pm_unit_seal_result failed "integration_test" 1
+    pm_unit_seal_result failed "${PM_UNIT_FAIL_REASON:-integration_test}" 1
     return 1
   fi
+}
+
+# ---------------------------------------------------------------------------
+# Regeneración del manifiesto de RAMA (jamás toca el canónico)
+# ---------------------------------------------------------------------------
+pm_gate_manifest_regen_run() {
+  # Entradas por entorno: WT (obligatorio), PM_GATE_MANIFEST_MODE=gate|unit (default gate),
+  # PM_GATE_MANIFEST_FROM=<dir de evidencia ya sellada> (no vuelve a correr),
+  # PM_GATE_MANIFEST_OUT=<ruta>, PM_GATE_MANIFEST_ALLOW_DROP=1 + PM_GATE_MANIFEST_REASON='...'.
+  local mode="${PM_GATE_MANIFEST_MODE:-gate}"
+  local from="${PM_GATE_MANIFEST_FROM:-}"
+  local out="${PM_GATE_MANIFEST_OUT:-}"
+
+  case "$mode" in
+    gate|unit) : ;;
+    *) echo "[pm-gate-manifest] invalid_invocation: MODE=$mode (usa gate|unit)" >&2; return 2 ;;
+  esac
+
+  if ! pm_unit_resolve_solution >/dev/null; then
+    return 2
+  fi
+  export PM_SOLUTION_DIR WT
+
+  local canonical base_manifest scaffold result_json
+  canonical="$(pm_unit_manifest_canonical_path)"
+  base_manifest="$canonical"   # la identidad de la receta (SDK, assets) sale SIEMPRE del canónico
+  [ -f "$base_manifest" ] || { echo "[pm-gate-manifest] not_operational: falta $base_manifest" >&2; return 3; }
+  [ -n "$out" ] || out="$(pm_unit_manifest_branch_out "$PM_UNIT_WT_SHORT")"
+  case "$out" in /*) : ;; *) out="$BASE_DIR/$out" ;; esac
+  mkdir -p "$(dirname "$out")"
+
+  local run_id="regen-$(pm_unit_now_utc)-$$"
+  if [ -n "$from" ]; then
+    case "$from" in /*) : ;; *) from="$BASE_DIR/$from" ;; esac
+    result_json="$from/result.json"
+    [ -f "$result_json" ] || { echo "[pm-gate-manifest] invalid_invocation: sin result.json en $from" >&2; return 2; }
+    echo "[pm-gate-manifest] deriva de evidencia existente: $result_json"
+  else
+    # Andamio: la lista de proyectos sale del árbol real de la rama (soporta proyectos nuevos o
+    # retirados), la identidad de la receta sale del canónico.
+    scaffold="$(dirname "$out")/scaffold-$PM_UNIT_WT_SHORT.json"
+    python3 "$BASE_DIR/scripts/pm-gate-manifest-scaffold.py" "$base_manifest" "$PM_SOLUTION_DIR" "$scaffold" || return 3
+
+    echo "[pm-gate-manifest] corrida de observacion (MODE=$mode, PM_UNIT_REGEN=1) sobre WT=$PM_UNIT_WT_SHORT"
+    # OJO bash: los prefijos `VAR=x funcion` no son fiables (persisten tras el retorno y su export
+    # a hijos depende del modo); el comparador es un PROCESO HIJO que lee PM_UNIT_REGEN del entorno,
+    # así que ambas variables se exportan explícitamente y se restauran al terminar.
+    local prev_manifest="$PM_UNIT_MANIFEST_REL"
+    PM_UNIT_MANIFEST_REL="$scaffold"; export PM_UNIT_MANIFEST_REL
+    PM_UNIT_REGEN=1; export PM_UNIT_REGEN
+    local rc=0
+    set +e
+    if [ "$mode" = "gate" ]; then
+      GATE_RUN_ID="$run_id" pm_gate_macdata_run
+      rc=$?
+    else
+      pm_unit_macdata_run unit "$run_id"
+      rc=$?
+    fi
+    set +e
+    PM_UNIT_REGEN=0; export PM_UNIT_REGEN
+    PM_UNIT_MANIFEST_REL="$prev_manifest"; export PM_UNIT_MANIFEST_REL
+    if [ "$rc" -ne 0 ]; then
+      echo "[pm-gate-manifest] la corrida de observacion no quedo verde (rc=$rc): no se regenera baseline desde una corrida roja" >&2
+      echo "[pm-gate-manifest] evidencia: ${PM_UNIT_EVIDENCE_DIR:-<sin evidencia>}" >&2
+      return "$rc"
+    fi
+    result_json="$PM_UNIT_EVIDENCE_DIR/result.json"
+  fi
+
+  local pm_sha pm_branch pm_dirty
+  pm_sha="$(cd "$PM_SOLUTION_DIR" && git rev-parse HEAD 2>/dev/null || echo unknown)"
+  pm_branch="$(cd "$PM_SOLUTION_DIR" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+  if [ -n "$(cd "$PM_SOLUTION_DIR" && git status --porcelain 2>/dev/null | head -1)" ]; then
+    pm_dirty=1
+  else
+    pm_dirty=0
+  fi
+
+  PM_GATE_MANIFEST_PM_SHA="$pm_sha" \
+  PM_GATE_MANIFEST_PM_BRANCH="$pm_branch" \
+  PM_GATE_MANIFEST_PM_DIRTY="$pm_dirty" \
+  PM_GATE_MANIFEST_RUN_ID="${PM_UNIT_RUN_ID:-$run_id}" \
+  PM_GATE_MANIFEST_EVIDENCE_DIR="${PM_UNIT_EVIDENCE_DIR:-$from}" \
+  PM_GATE_MANIFEST_WT="$PM_UNIT_WT_SHORT" \
+  PM_GATE_MANIFEST_GENERATED_AT="$(pm_unit_now_iso)" \
+    python3 "$BASE_DIR/scripts/pm-gate-manifest-write.py" \
+      "$base_manifest" "$result_json" "$out" "$canonical"
+  local wrc=$?
+  [ "$wrc" -eq 0 ] || return "$wrc"
+
+  local rel="$out"
+  case "$out" in "$BASE_DIR"/*) rel="${out#"$BASE_DIR"/}" ;; esac
+  echo "PM_GATE_MANIFEST=$out"
+  echo "[pm-gate-manifest] usa el manifiesto de rama con:"
+  echo "    make pm-gate WT=$PM_UNIT_WT_SHORT MANIFEST=$rel"
+  echo "    (equivalente: PM_UNIT_MANIFEST_REL=$rel make pm-gate WT=$PM_UNIT_WT_SHORT)"
+  return 0
 }
 
 pm_gate_parse_integration_trx() {
@@ -1597,11 +1728,21 @@ pm_gate_run_integration_physical() {
   fi
 
   # Cualquier diferencia de conteos invalida el verde, incluso si dotnet retornó 0 (AC de T-008).
+  # phase_ok separa el veredicto de la fase de `match` (identidad contra el manifiesto): en modo
+  # regeneracion la desviacion de conteos con cero rojos es el INSUMO, no un fallo.
+  local phase_ok=0
   if [ "$rc" -eq 0 ] && [ "$total" -gt 0 ] && [ "$total" = "$exp_total" ] \
      && [ "$executed" = "$exp_exec" ] && [ "$skipped" = "$exp_skip" ] && [ "$failed" -eq 0 ]; then
     match=1
+    phase_ok=1
   else
     pm_unit_log "integration mismatch/rojo: total=$total/$exp_total executed=$executed/$exp_exec skipped=$skipped/$exp_skip failed=$failed rc=$rc"
+    if [ "$rc" -eq 0 ] && [ "$failed" -eq 0 ] && [ "$total" -gt 0 ]; then
+      PM_UNIT_FAIL_REASON="coverage_manifest_mismatch"
+      export PM_UNIT_FAIL_REASON
+      pm_unit_desviacion_hint
+      [ "${PM_UNIT_REGEN:-0}" = "1" ] && phase_ok=1
+    fi
   fi
 
   PM_UNIT_INTEGRATION_JSON="$(python3 - "${trx_path:-}" "$rc" "$total" "$executed" "$skipped" "$failed" "$exp_total" "$exp_exec" "$exp_skip" "$match" <<'PY'
@@ -1625,7 +1766,7 @@ PY
 )"
   export PM_UNIT_INTEGRATION_JSON
 
-  if [ "$match" -eq 1 ]; then
+  if [ "$phase_ok" -eq 1 ]; then
     pm_unit_phase_end integration_test passed 0
     return 0
   fi

@@ -22,3 +22,7 @@
 # los directorios de build POR SLOT (multi-golden en paralelo, req4).
 /goldenslice/build/
 /goldenslice/build-wt*/
+
+# Bytecode de python (scripts/*.py)
+__pycache__/
+*.pyc

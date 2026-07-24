@@ -65,6 +65,7 @@ gs-pl-pm-macops-sidecar/
 | `make pm-test` | Inner-loop: reusa la API si responde y corre `dotnet test` (default `PROFILE=sql`; acota con `FILTER=`/`TESTPROJECT=`, fuerza API con `APIFORCE=1`). |
 | `make pm-gate WT=<worktree>` | **Cierre canónico**: unit+architecture en macdata (14 proyectos, una vez) → fail-fast → `wt-up ORACLE=1` → `PL.PM.IntegrationTests` una vez. Log único bajo `artifacts/test-logs/gate/<run_id>/`. |
 | `make pm-test-clean WT=<worktree>` | Alias de compatibilidad hacia `pm-gate` (misma máquina de estados; no ejecuta `PL.PM.sln` ni repite unitarias). |
+| `make pm-gate-manifest-regen WT=<worktree>` | Manifiesto **de rama** con los conteos reales medidos → `artifacts/gate-manifests/` (nunca `config/`). Perillas: `MODE=gate\|unit`, `FROM=`, `OUT=`, `ALLOW_DROP=1 REASON='…'`. Ver §Manifiesto de conteos. |
 | `make pm-down` / `make pm-nuke NUKE=1` | Baja el data tier (conserva / borra volúmenes); `pm-nuke` **exige la confirmación `NUKE=1`** (sin ella corta con exit 2). |
 | `make pm-ps` / `make pm-logs` / `make pm-port` | Estado / logs / puertos publicados del data tier. |
 | `make pm-bootstrap-intel REMOTE=macdata` | Aprovisiona colima/docker en la mac Intel (una vez). |
@@ -450,6 +451,40 @@ Para la vía E2E por slot (`make wt-up` / `make e2e-up`), la API corre en un con
 - **`make pm-test`** es el **inner-loop**: rápido, `PROFILE=sql`, reusa la API arriba; acota con
   `FILTER=`/`TESTPROJECT=` (o `APIFORCE=1` para relanzar la API). La suite de mensajería sólo corre con `full`.
 - **`make pm-unit WT=<worktree>`** corre **unitarias + architecture en macdata** (14 proyectos del manifiesto, assets de `containers/` allowlist, SDK por RepoDigest, sin FILTER). Es la fase unitaria del cierre; el gate integral es `make pm-gate WT=<worktree>`.
+
+### Manifiesto de conteos: canónico vs de rama
+
+El gate compara los conteos reales de cada proyecto (y de `PL.PM.IntegrationTests`) contra un manifiesto:
+una suite cortada o un proyecto que pierde pruebas en silencio invalida el verde aunque `dotnet` retorne 0.
+`config/pm-gate-manifest.json` es el **baseline canónico**, pinneado al SHA de la rama de integración
+(`baseline_pm_sha`), y **solo se mueve cuando ese baseline cambia**.
+
+Una rama con pruebas nuevas (o con retiros deliberados) desvía esos conteos sin tener una sola prueba roja.
+Ese corte se reporta con `reason_code=coverage_manifest_mismatch` (no `unit_failed_failfast`), y el log
+imprime cómo resolverlo:
+
+```bash
+# 1) manifiesto DE RAMA con los conteos medidos (jamás toca config/): corre la fase real en modo
+#    observación y escribe a artifacts/gate-manifests/pm-gate-manifest-<worktree>.json
+make pm-gate-manifest-regen WT=<worktree>
+
+# 2) el gate, fail-closed, contra ese manifiesto
+make pm-gate WT=<worktree> MANIFEST=artifacts/gate-manifests/pm-gate-manifest-<worktree>.json
+```
+
+| Perilla | Efecto |
+|---|---|
+| `MANIFEST=<ruta>` (o `PM_UNIT_MANIFEST_REL=<ruta>`) | manifiesto activo de la fase; relativa a la raíz del sidecar o absoluta. Sin valor, el canónico. |
+| `MODE=gate` (default) / `MODE=unit` | `gate` mide también los conteos de integración; `unit` solo la fase unit (integración heredada del canónico y marcada como tal). |
+| `FROM=<dir de evidencia>` | deriva el manifiesto de una corrida ya sellada (`result.json`), sin volver a correr. |
+| `OUT=<ruta>` | destino del manifiesto de rama (default `artifacts/gate-manifests/`). |
+| `ALLOW_DROP=1 REASON='<por qué>'` | única forma de aceptar una **caída** de conteos; queda registrada en `drops_allowed`/`drop_justification`. |
+
+La regeneración es fail-closed y no relaja la intención del guard: no sella baseline desde una corrida con
+rojos, `PM_UNIT_REGEN` no tapa un rojo ni una suite incompleta, una caída de cobertura exige justificación
+explícita y el escritor **rechaza** cualquier salida dentro de `config/`. El `result.json` de cada corrida
+registra `manifest_path`, `manifest_is_canonical` y `regen_mode`, y el verde de una corrida de observación
+se sella como `manifest_regen_observed` para que no se confunda con el sello del gate.
 
 ## Paralelismo
 
