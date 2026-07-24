@@ -11,12 +11,11 @@
 #   make pm-seed                  # re-seed data-only idempotente (requiere la BD ya migrada)
 #   make pm-api / pm-api-down     # levanta / detiene la API real en ESTA mac (M1)
 #   make pm-test                  # inner-loop: reusa la API si responde + dotnet test (default PROFILE=sql)
-#   [WT obligatorio] make pm-test-clean WT=<worktree>   # GATE limpio POR SLOT: wt-up (slot API+BD+seed+Oracle) + migrate por puente + suite; sin WT/slot falla (exit 2)
-#   [WT obligatorio] make pm-gate WT=<worktree>         # ONE-SHOT: encadena wt-up ORACLE=1 + pm-test-clean en un solo comando (aprovisiona-y-corre)
-#   [WT obligatorio] make pm-test-clean WT=<worktree> WARM=1   # re-run tras kill esporadico: reusa el slot sano (sin rsync/build/reseed/cold-init)
-#   make pm-test FILTER='FullyQualifiedName~RtSync'   # acota por filtro (inner-loop)
+#   [WT obligatorio] make pm-gate WT=<worktree>         # CIERRE CANONICO: unit+arch en macdata PRIMERO (fail-fast) -> wt-up ORACLE=1 -> PL.PM.IntegrationTests una vez
+#   [WT obligatorio] make pm-test-clean WT=<worktree>   # alias de compatibilidad hacia pm-gate (misma maquina de estados; NO ejecuta PL.PM.sln)
+#   [WT obligatorio] make pm-unit WT=<worktree>         # fase unit+architecture en macdata (14 proyectos, assets allowlist, restore/build unicos); sin FILTER
+#   make pm-test FILTER='FullyQualifiedName~RtSync'   # acota por filtro (inner-loop diagnostico; NO es evidencia de cierre)
 #   make pm-test APIFORCE=1                            # relanza la API (api-down+api) antes de testear; no reusa
-#   make pm-unit                  # unit tests puros (*.UnitTests): sin Docker, sin red, sin data tier; FILTER= acota
 #   make pm-format               # formatea los .cs modificados vs develop (delega a scripts/format.sh in-repo)
 #   make pm-format-check         # gate de formato changed-vs-develop (delega a scripts/format-check.sh); sin data tier
 #   make pm-down                  # baja el data tier (conserva volumenes)
@@ -26,7 +25,7 @@
 #   [DEPRECADO] make pm-run PROJECT=pm-ag2 OFFSET=10          # como ambiente de trabajo: PROJECT/OFFSET solo vale para el singleton pm-local; usa make wt-up WT=<worktree> (§5)
 #   make pm-bootstrap-intel REMOTE=macdata                   # aprovisiona colima/docker en la Intel (1 vez)
 #   make help                     # imprime este catalogo (grep del encabezado)
-#   # Gate: el comando verde es 'pm-test-clean' (perfil full = Oracle+bus, API fresca). 'pm-test' a secas corre sql-only.
+#   # Gate: el cierre canonico es 'pm-gate' (unit macdata + IntegrationTests). 'pm-test-clean' es alias. 'pm-test' es inner-loop.
 #   # Vars del bus/Ln: PM_LN_DB (erpln106), PM_SERVICEBUS_HOST, PM_SB_HOST_PORT (5672+OFFSET), PM_SB_SA_PASSWORD.
 #
 # Backend en modo E2E (Opción C) — via DEPRECADA, solo tombstone permanente (§5; la sustituyen wt-up / e2e-up por slot):
@@ -270,15 +269,34 @@ pm-seed:     ; $(PM_ENV) ./pm.sh seed                 # re-seed data-only (requi
 pm-api:      ; $(PM_ENV) ./pm.sh api
 pm-api-down: ; $(PM_ENV) ./pm.sh api-down
 pm-test:     ; $(PM_ENV) ./pm.sh test
-pm-test-clean: override TARGET := intel        # el data tier del slot vive en macdata (como wt-up)
+# Cierre canonico T-008: unit macdata -> fail-fast -> wt-up ORACLE=1 -> IntegrationTests.
+# Rechaza FILTER/TESTPROJECT (corpus completo). WT obligatorio. Host fijo macdata.
+pm-gate: override TARGET := intel
+pm-gate: REMOTE  := macdata
+pm-gate: PROFILE := full
+pm-gate: ORACLE  := 1
+pm-gate:
+	@if [ -z "$(WT)" ]; then echo "pm-gate exige WT=<worktree>" >&2; exit 2; fi
+	@if [ -n "$(FILTER)" ]; then echo "pm-gate rechaza FILTER (corpus completo)" >&2; exit 2; fi
+	@if [ -n "$(TESTPROJECT)" ]; then echo "pm-gate rechaza TESTPROJECT (fija IntegrationTests internamente)" >&2; exit 2; fi
+	$(WT_ENV) GATE_RUN_ID='$(GATE_RUN_ID)' ./pm.sh gate
+# Alias de compatibilidad: misma maquina de estados que pm-gate (no repite unitarias ni PL.PM.sln).
+pm-test-clean: override TARGET := intel
 pm-test-clean: REMOTE  := macdata
 pm-test-clean: PROFILE := full
-pm-test-clean: ORACLE  := 1                     # gate full: aprovisiona el Oracle ControlPiso del slot
-pm-test-clean: ; $(WT_ENV) ./pm.sh test-clean   # gate limpio POR SLOT (WT=<worktree pl-programa-maestro>)
-pm-unit:     ; $(PM_ENV) ./pm.sh unit           # unit tests puros (*.UnitTests): sin Docker, sin red, sin data tier
-# One-shot (D1): aprovisiona el slot (wt-up ORACLE=1) y corre el gate en UN comando. No toca el guard de
-# pm-test-clean (que sigue exigiendo wt-up previo); pm-gate encadena ambos. wt-up es idempotente (reusa el slot).
-pm-gate: ; @[ -n "$(WT)" ] || { echo "pm-gate exige WT=<worktree>: aprovisiona-y-corre el gate en un paso" >&2; exit 2; }; $(MAKE) wt-up WT=$(WT) ORACLE=1 && $(MAKE) pm-test-clean WT=$(WT) WARM=1
+pm-test-clean: ORACLE  := 1
+pm-test-clean:
+	@if [ -z "$(WT)" ]; then echo "pm-test-clean exige WT=<worktree> (alias de pm-gate)" >&2; exit 2; fi
+	@if [ -n "$(FILTER)" ]; then echo "pm-test-clean rechaza FILTER (corpus completo)" >&2; exit 2; fi
+	@if [ -n "$(TESTPROJECT)" ]; then echo "pm-test-clean rechaza TESTPROJECT" >&2; exit 2; fi
+	$(WT_ENV) GATE_RUN_ID='$(GATE_RUN_ID)' ./pm.sh test-clean
+# Fase unit+architecture en macdata (14 proyectos). WT obligatorio. Sin FILTER. Sin fallback M1.
+pm-unit: override TARGET := intel
+pm-unit: REMOTE  := macdata
+pm-unit:
+	@if [ -z "$(WT)" ]; then echo "pm-unit exige WT=<worktree> (receta macdata)" >&2; exit 2; fi
+	@if [ -n "$(FILTER)" ]; then echo "pm-unit rechaza FILTER (corpus completo)" >&2; exit 2; fi
+	$(WT_ENV) UNIT_RUN_ID='$(UNIT_RUN_ID)' ./pm.sh unit
 pm-format:       ; $(PM_ENV) ./pm.sh format          # formatea .cs modificados vs develop (delega a scripts/format.sh in-repo)
 pm-format-check: ; $(PM_ENV) ./pm.sh format-check    # gate de formato changed-vs-develop (delega a scripts/format-check.sh)
 pm-gate-wait:    ; $(PM_ENV) ./pm.sh wait-gate    # espera el veredicto del gate leyendo el .rc canonico (LOG=<ruta.log> o el mas reciente)

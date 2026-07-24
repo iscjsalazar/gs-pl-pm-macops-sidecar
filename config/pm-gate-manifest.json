@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "solution_path": "PL.PM.sln",
+  "project_count": 14,
+  "integration_project": "tests/PL.PM.IntegrationTests/PL.PM.IntegrationTests.csproj",
+  "integration_expected_total": 334,
+  "integration_expected_executed": 332,
+  "integration_expected_skipped": 2,
+  "sdk_image": "mcr.microsoft.com/dotnet/sdk@sha256:ed034a8bf0b24ded0cbbac07e17825d8e9ebfe21e308191d0f7421eaf5ad4664",
+  "sdk_platform": "linux/amd64",
+  "expected_sdk_version": "10.0.302",
+  "baseline_pm_sha": "401bebe69c744b75e4ddc8e40e6fe681113c0212",
+  "baseline_evidence_id": "20260723T232751Z-scfc1a5f9-pm401bebe",
+  "baseline_unit_warm_min": 2.546,
+  "target_unit_incremental_min": 1.5,
+  "required_assets": [
+    "containers/sql/init/planning/0203-filters-loader.sql",
+    "containers/sql/init/planning/0203-productionmachines-loader.sql",
+    "containers/oracle/data/maquinas.csv",
+    "containers/oracle/init/2034-maquinas.csv.ctl"
+  ],
+  "projects": [
+    {
+      "path": "tests/PL.PM.ArchitectureTests/PL.PM.ArchitectureTests.csproj",
+      "kind": "architecture",
+      "expected_total": 60,
+      "expected_executed": 60,
+      "expected_skipped": 0,
+      "expected_failed": 0
+    },
+    {
+      "path": "tests/PL.PM.Catalogs.UnitTests/PL.PM.Catalogs.UnitTests.csproj",
+      "kind": "unit",
+      "expected_total": 396,
+      "expected_executed": 396,
+      "expected_skipped": 0,
+      "expected_failed": 0
+    },
+    {
+      "path": "tests/PL.PM.Demand.UnitTests/PL.PM.Demand.UnitTests.csproj",
+      "kind": "unit",
+      "expected_total": 601,
+      "expected_executed": 601,
+      "expected_skipped": 0,
+      "expected_failed": 0
+    },
+    {
+      "path": "tests/PL.PM.FeatureManagement.UnitTests/PL.PM.FeatureManagement.UnitTests.csproj",
+      "kind": "unit",
+      "expected_total": 20,
+      "expected_executed": 20,
+      "expected_skipped": 0,
+      "expected_failed": 0
+    },
+    {
+      "path": "tests/PL.PM.Jobs.UnitTests/PL.PM.Jobs.UnitTests.csproj",
+      "kind": "unit",
+      "expected_total": 69,
+      "expected_executed": 69,
+      "expected_skipped": 0,
+      "expected_failed": 0
+    },
+    {
+      "path": "tests/PL.PM.LoadSummary.UnitTests/PL.PM.LoadSummary.UnitTests.csproj",
+      "kind": "unit",
+      "expected_total": 11,
+      "expected_executed": 11,
+      "expected_skipped": 0,
+      "expected_failed": 0
+    },
+    {
+      "path": "tests/PL.PM.MasterSchedule.UnitTests/PL.PM.MasterSchedule.UnitTests.csproj",
+      "kind": "unit",
+      "expected_total": 266,
+      "expected_executed": 266,
+      "expected_skipped": 0,
+      "expected_failed": 0
+    },
+    {
+      "path": "tests/PL.PM.Oracle.Infrastructure.UnitTests/PL.PM.Oracle.Infrastructure.UnitTests.csproj",
+      "kind": "unit",
+      "expected_total": 68,
+      "expected_executed": 68,
+      "expected_skipped": 0,
+      "expected_failed": 0
+    },
+    {
+      "path": "tests/PL.PM.Parity.UnitTests/PL.PM.Parity.UnitTests.csproj",
+      "kind": "unit",
+      "expected_total": 108,
+      "expected_executed": 108,
+      "expected_skipped": 0,
+      "expected_failed": 0
+    },
+    {
+      "path": "tests/PL.PM.Planning.UnitTests/PL.PM.Planning.UnitTests.csproj",
+      "kind": "unit",
+      "expected_total": 32,
+      "expected_executed": 32,
+      "expected_skipped": 0,
+      "expected_failed": 0
+    },
+    {
+      "path": "tests/PL.PM.SharedKernel.UnitTests/PL.PM.SharedKernel.UnitTests.csproj",
+      "kind": "unit",
+      "expected_total": 27,
+      "expected_executed": 27,
+      "expected_skipped": 0,
+      "expected_failed": 0
+    },
+    {
+      "path": "tests/PL.PM.SubordinateSchedule.UnitTests/PL.PM.SubordinateSchedule.UnitTests.csproj",
+      "kind": "unit",
+      "expected_total": 195,
+      "expected_executed": 195,
+      "expected_skipped": 0,
+      "expected_failed": 0
+    },
+    {
+      "path": "tests/PL.PM.TestHarness.UnitTests/PL.PM.TestHarness.UnitTests.csproj",
+      "kind": "unit",
+      "expected_total": 68,
+      "expected_executed": 68,
+      "expected_skipped": 0,
+      "expected_failed": 0
+    },
+    {
+      "path": "tests/PL.PM.UserBulkOperations.UnitTests/PL.PM.UserBulkOperations.UnitTests.csproj",
+      "kind": "unit",
+      "expected_total": 202,
+      "expected_executed": 202,
+      "expected_skipped": 0,
+      "expected_failed": 0
+    }
+  ]
+}

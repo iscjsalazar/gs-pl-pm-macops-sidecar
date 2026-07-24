@@ -16,7 +16,8 @@
 #   PM_API_FORCE=1 ./pm.sh test # relanza la API (api-down+api) antes de testear; no reusa la que este arriba
 #   PM_TEST_PROJECT=tests/PL.PM.IntegrationTests/PL.PM.IntegrationTests.csproj ./pm.sh test   # un proyecto
 #   PM_TEST_FILTER='FullyQualifiedName~RtSync' ./pm.sh test                                    # un filtro
-#   ./pm.sh unit                # unit tests puros (*.UnitTests): sin API, sin Docker, sin data tier; PM_TEST_FILTER acota
+#   WT=<worktree> ./pm.sh unit  # unit+architecture en macdata (14 proyectos, receta durable T-008); WT obligatorio
+#   WT=<worktree> ./pm.sh gate  # cierre canonico: unit macdata -> fail-fast -> wt-up ORACLE=1 -> IntegrationTests
 #   ./pm.sh down / nuke         # baja el data tier (conserva / borra volumenes)
 #   # La confirmacion NUKE=1 vive en la capa make (make pm-nuke NUKE=1); la invocacion directa './pm.sh nuke' la salta.
 #   # Data tier en la mac Intel + API en esta mac (el alias 'macdata' debe resolver como host p/ BD/AMQP: ver README):
@@ -136,13 +137,19 @@ cmd_test() {           # asegura la API real arriba (M1) y corre dotnet test con
   [ "$PM_PROFILE" = "full" ] && { wg_dml="true"; wg_host="$PM_TEST_SQL_HOST"; wg_db="XE"; }
   # ServiceBus__SubscriptionPrefix aisla los topics/subscriptions del bus compartido por slot (wt<N>). En modo
   # slot (cmd_test_clean) lo fija wt_derive; en la via singleton (pm-test) va vacio = sin prefijo.
-  # Log completo por corrida a disco (artifacts/, gitignored): un '| tail' del terminal nunca pierde la
-  # evidencia; la lista de pruebas fallidas se recupera con grep. El 'if' evita el abort de set -e y captura
-  # el rc real de dotnet por pipefail (set -euo pipefail); tee solo duplica la salida.
+  # Log completo por corrida a disco (artifacts/, gitignored). Si el gate suministra PM_TEST_LOG_SINK, se
+  # escribe ahi (log unico del cierre) en vez de crear un test-*.log paralelo.
   local logdir="$BASE_DIR/artifacts/test-logs"; mkdir -p "$logdir"
-  local logf="$logdir/test-$(date -u +%Y%m%dT%H%M%SZ)-${PM_PROJECT}.log"
+  local logf rcf
+  if [ -n "${PM_TEST_LOG_SINK:-}" ]; then
+    logf="$PM_TEST_LOG_SINK"
+    rcf="${PM_UNIT_EVIDENCE_DIR:-$logdir}/integration.rc"
+  else
+    logf="$logdir/test-$(date -u +%Y%m%dT%H%M%SZ)-${PM_PROJECT}.log"
+    rcf="${logf%.log}.rc"
+  fi
   echo "[pm] test: log completo -> $logf (fallos: grep -E 'Failed|Con error PL' \"$logf\")"
-  local rc=0 rcf="${logf%.log}.rc"
+  local rc=0
   # Veredicto persistido de forma robusta: un sidecar .rc (maquina-legible) y una linea EXIT= al final del log. Un
   # trap de SIGTERM/INT deja rastro si el background muere a media corrida (el harness lo mata tras compilar/migrar
   # pero antes de terminar): asi el veredicto se lee del ARCHIVO, no del status del background. 'running' hasta fin.
@@ -153,7 +160,7 @@ cmd_test() {           # asegura la API real arriba (M1) y corre dotnet test con
        ConnectionStrings__Ln="$(pm_ln_connstr)" ServiceBus__ConnectionString="$sbcs" \
        ServiceBus__SubscriptionPrefix="${WT_SB_PREFIX:-}" \
        Oracle__WriteGuard__DmlEnabled="$wg_dml" Oracle__WriteGuard__AllowedHosts__0="$wg_host" Oracle__WriteGuard__AllowedDbNames__0="$wg_db" \
-       ConnectionStrings__CtrlPiso="$ctrlcs" dotnet "${args[@]}" "$@" 2>&1 | tee "$logf"; then
+       ConnectionStrings__CtrlPiso="$ctrlcs" dotnet "${args[@]}" "$@" 2>&1 | tee -a "$logf"; then
     rc=0
   else
     rc=$?
@@ -165,127 +172,26 @@ cmd_test() {           # asegura la API real arriba (M1) y corre dotnet test con
   return "$rc"
 }
 
-cmd_test_clean() {     # gate "limpio" POR SLOT: aprovisiona el data tier del slot (API fresca + BD + seed +
-                       # Oracle/bus), migra determinista por el puente y corre la suite contra la API del slot.
-                       # El singleton pm-local queda DEPRECADO como ambiente de validacion (doc canonico §5) y el
-                       # gate es slot-mandatorio: sin WT o sin slot asignado en el registro falla en seco (exit 2)
-                       # pidiendo 'make wt-up WT=<worktree>'; el gate NO aprovisiona slots por si mismo.
-  # Carga perezosa de la capa de worktrees SOLO para este verbo (aprovisionamiento del slot, puente SQL,
-  # derivacion): asi el resto de verbos de pm.sh no heredan su trap INT/TERM ni su superficie.
-  . "$(dirname "${BASH_SOURCE[0]}")/lib/worktrees.sh"
-  # Guard slot-mandatorio: corta ANTES de cualquier aprovisionamiento, compose, SSH o build. La consulta del
-  # registro es READ-ONLY (wt_slot_lookup: sin wt_registry_lock de escritura ni asignacion de slot nuevo).
-  local gate_folder gate_abs gate_short gate_slot
-  if ! gate_folder="$(wt_resolve_folder 2>/dev/null)"; then
-    echo "[pm] test-clean: falta WT: el gate corre SIEMPRE sobre el slot del worktree (process-e2e-local-slots.md). Usa: make pm-test-clean WT=<worktree> (aprovisiona antes con make wt-up WT=<worktree>)" >&2
-    return 2
-  fi
-  if ! gate_abs="$(pm_resolve_worktree_dir "$gate_folder")"; then
-    echo "[pm] test-clean: WT '$gate_folder' no es un worktree PM valido; se rechazo antes de consultar/provisionar slots" >&2
-    return 2
-  fi
-  gate_short="$(basename "$gate_abs")"
-  gate_slot="$(wt_slot_lookup "$gate_folder")"
-  if [ -z "$gate_slot" ]; then gate_slot="$(wt_slot_lookup "$gate_abs")"; [ -n "$gate_slot" ] && gate_folder="$gate_abs"; fi
-  if [ -z "$gate_slot" ]; then gate_slot="$(wt_slot_lookup "$gate_short")"; [ -n "$gate_slot" ] && gate_folder="$gate_short"; fi
-  if [ -z "$gate_slot" ]; then
-    echo "[pm] test-clean: el worktree valido '$gate_abs' no tiene slot asignado (se probaron las claves '$gate_folder', '$gate_abs' y '$gate_short'); corre primero make wt-up WT=$gate_short. No se uso el checkout central." >&2
-    return 2
-  fi
-  WT="$gate_folder"
-  wt_require_intel || return 1
-  # 1) Aprovisiona el slot: reusa el slot ya asignado (el guard de arriba garantiza que existe en el registro),
-  #    recrea la API del slot (frescura = el analogo de APIFORCE) y siembra la BD. Deja en scope los globals del
-  #    slot que fija wt_derive: PM_PLANNING_DB (pm_planning_wt<N>), PM_PORT_OFFSET, PM_API_PORT (5180+N*10),
-  #    PM_ORACLE_HOST_PORT (15210+N), WT_SB_PREFIX.
-  # Modo warm (WARM=1): re-correr el gate tras un kill esporadico del background es caro si rehace rsync+build de
-  # la API y el cold-init del Oracle (~91 s) sobre un slot que ya quedo sano. Con WARM=1, si el slot responde
-  # /health/live y su Oracle corre, se REUSA el aprovisionamiento: wt_derive fija los globals del slot sin re-
-  # provisionar. Si el slot NO esta sano, cae al aprovisionamiento normal (no hay atajo enganoso).
-  if [ "${PM_WT_WARM:-0}" = "1" ]; then
-    wt_derive "$gate_slot"
-    if on_intel "curl -fsS -o /dev/null http://127.0.0.1:$PM_API_PORT/health/live" 2>/dev/null && wt_oracle_running; then
-      WT_ORACLE_ACTIVE=1
-      echo "[pm] test-clean: WARM=1 y slot $gate_slot sano (API :$PM_API_PORT + Oracle $WT_ORACLE_CONTAINER) -> se reusa el aprovisionamiento (sin wt-up; evita rsync/build/reseed/cold-init)"
-    else
-      echo "[pm] test-clean: WARM=1 pero el slot $gate_slot NO esta sano (API o Oracle abajo) -> aprovisionando normalmente (wt-up) ..."
-      cmd_wt_up || return 1
-    fi
-  else
-    echo "[pm] test-clean: aprovisionando el data tier del slot (wt-up) ..."
-    cmd_wt_up || return 1
-  fi
-  # Falla-cerrado (regla dura del gate): el gate DEBE correr con el Oracle del slot activo y listo (perfil full).
-  # Sin el, las pruebas dependientes de Oracle se saltan y el gate quedaria verde sin cobertura real. cmd_wt_up
-  # ya verifico la readiness al aprovisionar/adoptar el Oracle (WT_ORACLE_ACTIVE=1 via wt_oracle_ready); si quedo
-  # en 0 (p. ej. 'ORACLE=0' o una corrida cruda 'WT=... ./pm.sh test-clean') se aborta en vez de degradar a csv.
-  if [ "${WT_ORACLE_ACTIVE:-0}" != "1" ]; then
-    echo "[pm] test-clean: el slot NO tiene Oracle activo del slot -> degradaria a modo csv (pruebas Oracle omitidas, gate verde falso). El gate exige ORACLE=1/perfil full: usa 'make pm-test-clean WT=<worktree>'; una corrida cruda 'WT=... ./pm.sh test-clean' o 'ORACLE=0' no es un gate valido." >&2
-    return 2
-  fi
-  # 2) Host M1-resoluble hacia macdata: el mDNS del host Intel, NUNCA el alias 'macdata' (D36). Override por SQLHOST.
-  local m1host="$PM_TEST_SQL_HOST"
-  # Nota (D36): SQLHOST=macdata NO resuelve desde el M1 (es alias SSH, no un nombre DNS/mDNS); el nombre
-  # M1-resoluble es macbook-pro-de-diana.local (mDNS del host Intel) o una entrada en /etc/hosts del M1.
-  case "$m1host" in macdata) echo "[pm] nota: SQLHOST=macdata no resuelve desde el M1 (alias SSH); se usa macbook-pro-de-diana.local (mDNS) o una entrada en /etc/hosts (D36)." ;; esac
-  case "$m1host" in ""|127.0.0.1|localhost|macdata) m1host="macbook-pro-de-diana.local" ;; esac
-  # 3) Puente 60211 -> SQL compartido (idempotente, adopt-if-present, bajo wt_lock bridge; factorizado en lib/).
-  local bport pw; bport="$(wt_bridge_port)"
-  wt_bridge_up || return 1
-  pw="$(wt_shared_sql_password)" || return 1
-  # 4) Redirige los helpers de connstring/test hacia el slot: BD del slot por el puente, SA del SQL compartido,
-  #    Oracle/bus/API del slot por el host M1-resoluble. PM_PLANNING_DB/PM_API_PORT/PM_ORACLE_HOST_PORT/WT_SB_PREFIX
-  #    ya los fijo wt_derive dentro de cmd_wt_up.
-  PM_TEST_SQL_HOST="$m1host"; PM_SQL_HOST_PORT="$bport"; PM_SQL_SA_PASSWORD="$pw"
-  PM_SERVICEBUS_HOST="$m1host"; PM_SB_HOST_PORT="$PM_WT_BUS_HOST_PORT"; PM_API_HOST="$m1host"
-  echo "[pm] test-clean: slot -> BD $PM_PLANNING_DB via puente $m1host:$bport | API $m1host:$PM_API_PORT | Oracle $m1host:$PM_ORACLE_HOST_PORT | bus $m1host:$PM_SB_HOST_PORT prefix ${WT_SB_PREFIX:-<none>}"
-  # 5) Migraciones EF deterministas contra la BD del slot por el puente (pm_ef_migrate descubre los 7 contextos,
-  #    incluye FeatureManagement -> absorbe el puente temporal e2e_ensure_flag_schema). Idempotente sobre lo que
-  #    la API ya aplico al arrancar; garantiza el esquema completo antes de la suite.
-  pm_ef_migrate "$(pm_planning_connstr)" || return 1
-  # 6) Suite contra la API del slot (ya arriba: PM_SKIP_API=1 evita relanzar una API local). cmd_test arma la
-  #    superficie de env del slot (PM_API_BASE_URL, ConnectionStrings__*, ServiceBus__* + SubscriptionPrefix).
-  PM_SKIP_API=1 cmd_test "$@"
+cmd_test_clean() {     # Alias de compatibilidad hacia el cierre canonico `gate` (T-008).
+                       # Ya no ejecuta PL.PM.sln ni repite unitarias: la cadena es unit-macdata ->
+                       # fail-fast -> wt-up ORACLE=1 -> PL.PM.IntegrationTests una vez.
+  cmd_gate "$@"
 }
 
-cmd_unit() {           # unit tests puros (*.UnitTests): 100% locales en esta mac, sin API, sin Docker y sin
-                       # data tier (contrato: gs-pl-pm-guidelines/testing.md). Anti-molde vs cmd_test: NO asegura
-                       # la API ni exporta variables de conexion (nada de PM_API_BASE_URL / ConnectionStrings__* /
-                       # ServiceBus__* / PM_TEST_SQL*): la suite queda verde con el data tier apagado.
-  command -v dotnet >/dev/null 2>&1 || { echo "[pm] falta 'dotnet' en PATH" >&2; return 2; }
-  # Descubrimiento por convencion: tests/*.UnitTests/*.csproj + tests/*.ArchitectureTests/*.csproj bajo la raiz de
-  # la solucion (resolve_solution_dir, via load_env: PM_SOLUTION_DIR explicito > WT=<worktree> > CWD en un worktree
-  # de codigo > checkout central). Los ArchitectureTests son puros (NetArchTest lee IL: sin Docker ni data tier),
-  # asi que pertenecen al loop rapido local: el guard de escritura Oracle (ADR-0010) exige que su test corra aqui.
-  local projects=() p
-  while IFS= read -r p; do projects+=("$p"); done \
-    < <({ find "$PM_SOLUTION_DIR/tests" -maxdepth 2 -name '*.UnitTests.csproj' 2>/dev/null; \
-          find "$PM_SOLUTION_DIR/tests" -maxdepth 2 -name '*.ArchitectureTests.csproj' 2>/dev/null; } | sort)
-  if [ "${#projects[@]}" -eq 0 ]; then
-    echo "[pm] unit: ningun *.UnitTests.csproj ni *.ArchitectureTests.csproj bajo $PM_SOLUTION_DIR/tests; la raiz resuelta no parece la solucion pl-programa-maestro (revisa WT=<worktree> / PM_SOLUTION_DIR)" >&2
-    return 2
-  fi
-  # Guard warn-only (I6): un FILTER sin operador vstest (~ = ! ( & |) casa 0 pruebas y sale EXIT=0 -> falso verde
-  # de "0 tests corridos". No bloquea (podria haber un caso legitimo); solo avisa para no leerlo como evidencia.
-  case "${PM_TEST_FILTER:-}" in
-    ''|*'~'*|*'='*|*'!'*|*'('*|*'&'*|*'|'*) : ;;
-    *) echo "[pm] AVISO: FILTER='$PM_TEST_FILTER' sin operador vstest: puede casar 0 pruebas y dar verde vacuo. Usa FullyQualifiedName~$PM_TEST_FILTER (o Name~...). La corrida de EVIDENCIA de cierre va SIN FILTER." >&2 ;;
-  esac
-  local args=(); [ -n "${PM_TEST_FILTER:-}" ] && args+=(--filter "$PM_TEST_FILTER")
-  echo "[pm] unit: ${#projects[@]} proyectos *.UnitTests + *.ArchitectureTests bajo $PM_SOLUTION_DIR/tests (filtro: ${PM_TEST_FILTER:-<todos>})"
-  # Corre TODOS los proyectos aunque alguno falle (reporte completo); exit !=0 si CUALQUIERA fallo.
-  local run=0 green=0 red=0 failed=""
-  for p in "${projects[@]}"; do
-    run=$((run+1))
-    echo "[pm] unit: dotnet test ${p#"$PM_SOLUTION_DIR/"} ..."
-    if dotnet test "$p" -v minimal ${args[@]+"${args[@]}"}; then
-      green=$((green+1))
-    else
-      red=$((red+1)); failed="$failed ${p#"$PM_SOLUTION_DIR/"}"
-    fi
-  done
-  echo "[pm] unit: proyectos corridos=$run verdes=$green rojos=$red${failed:+ (fallaron:$failed)}"
-  [ "$red" -eq 0 ] || return 1
+cmd_unit() {           # Unitarias + arquitectura en macdata (receta durable T-008).
+                       # WT obligatorio. Sin FILTER/TESTPROJECT. Host fijo macdata. Cero fallback M1.
+  # shellcheck disable=SC1090
+  . "$(dirname "${BASH_SOURCE[0]}")/lib/unit-macdata.sh"
+  local run_id="${UNIT_RUN_ID:-}"
+  pm_unit_macdata_run unit "$run_id"
+}
+
+cmd_gate() {           # Cierre canonico: unit macdata PRIMERO; rojo unitario corta ANTES de wt-up;
+                       # verde unitario -> slot_setup + IntegrationTests una vez (no PL.PM.sln).
+  # shellcheck disable=SC1090
+  . "$(dirname "${BASH_SOURCE[0]}")/lib/unit-macdata.sh"
+  # worktrees se carga perezosa dentro del gate cuando hace falta wt-up
+  pm_gate_macdata_run
 }
 
 cmd_down() { echo "[pm] down (conserva volumenes y VM) ..."; compose down; }
@@ -348,6 +254,7 @@ case "$VERB" in
   test)       cmd_test "$@" ;;
   test-clean) cmd_test_clean "$@" ;;
   unit)       cmd_unit ;;
+  gate)       cmd_gate ;;
   wait-gate)  cmd_wait_gate "$@" ;;
   format)       cmd_format "$@" ;;
   format-check) cmd_format_check "$@" ;;
@@ -356,5 +263,5 @@ case "$VERB" in
   ps)       cmd_ps ;;
   logs)     cmd_logs ;;
   port)     cmd_port ;;
-  *) echo "uso: $0 {run [--watch]|migrate|seed|api|api-down|e2e-backend (DEPRECADO)|e2e-backend-down (DEPRECADO)|test|test-clean|unit|wait-gate|format|format-check|down|nuke|ps|logs|port}"; exit 2 ;;
+  *) echo "uso: $0 {run [--watch]|migrate|seed|api|api-down|e2e-backend (DEPRECADO)|e2e-backend-down (DEPRECADO)|test|test-clean|unit|gate|wait-gate|format|format-check|down|nuke|ps|logs|port}"; exit 2 ;;
 esac

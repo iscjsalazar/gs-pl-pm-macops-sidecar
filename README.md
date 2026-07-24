@@ -63,7 +63,8 @@ gs-pl-pm-macops-sidecar/
 | `make pm-seed` | Re-siembra el SQL (idempotente). |
 | `make pm-api` / `make pm-api-down` | Levanta / detiene la API real en esta máquina (M1). |
 | `make pm-test` | Inner-loop: reusa la API si responde y corre `dotnet test` (default `PROFILE=sql`; acota con `FILTER=`/`TESTPROJECT=`, fuerza API con `APIFORCE=1`). |
-| `make pm-test-clean WT=<worktree>` | **Gate** por slot: reusa `cmd_wt_up` (API fresca + BD `pm_planning_wt<N>` + seed + Oracle/bus del slot) + `pm_ef_migrate` por el puente SQL `60211` + toda la suite (`PROFILE=full`). Fuerza `TARGET=intel REMOTE=macdata ORACLE=1`; sustituye al singleton `pm-local` como ambiente de validación. |
+| `make pm-gate WT=<worktree>` | **Cierre canónico**: unit+architecture en macdata (14 proyectos, una vez) → fail-fast → `wt-up ORACLE=1` → `PL.PM.IntegrationTests` una vez. Log único bajo `artifacts/test-logs/gate/<run_id>/`. |
+| `make pm-test-clean WT=<worktree>` | Alias de compatibilidad hacia `pm-gate` (misma máquina de estados; no ejecuta `PL.PM.sln` ni repite unitarias). |
 | `make pm-down` / `make pm-nuke NUKE=1` | Baja el data tier (conserva / borra volúmenes); `pm-nuke` **exige la confirmación `NUKE=1`** (sin ella corta con exit 2). |
 | `make pm-ps` / `make pm-logs` / `make pm-port` | Estado / logs / puertos publicados del data tier. |
 | `make pm-bootstrap-intel REMOTE=macdata` | Aprovisiona colima/docker en la mac Intel (una vez). |
@@ -441,13 +442,14 @@ Para la vía E2E por slot (`make wt-up` / `make e2e-up`), la API corre en un con
 
 ## Gate vs inner-loop
 
-- **`make pm-test-clean WT=<worktree>`** es el **gate por slot**: reusa el aprovisionamiento del slot (API fresca
+- **`make pm-gate WT=<worktree>`** es el **cierre canónico**: ejecuta primero las unitarias/arquitectura en macdata (receta durable, 14 proyectos, assets allowlist, restore/build únicos) y solo si quedan verdes aprovisiona el slot y corre `PL.PM.IntegrationTests` una vez. `pm-test-clean` es alias de la misma cadena.
+- **`make pm-test-clean WT=<worktree>`** (alias): reusa el aprovisionamiento del slot (API fresca
   + BD `pm_planning_wt<N>` + seed + Oracle/bus del slot) + `pm_ef_migrate` por el puente `60211`, y corre toda la
   suite con `PROFILE=full` (Oracle + Service Bus). Único comando para "¿pasa todo en limpio?" en el slot aislado;
   fuerza `TARGET=intel REMOTE=macdata ORACLE=1` y sustituye al singleton `pm-local` como ambiente de validación.
 - **`make pm-test`** es el **inner-loop**: rápido, `PROFILE=sql`, reusa la API arriba; acota con
   `FILTER=`/`TESTPROJECT=` (o `APIFORCE=1` para relanzar la API). La suite de mensajería sólo corre con `full`.
-- **`make pm-unit [WT=<worktree>] [FILTER=…]`** corre los **unit tests puros** (`*.UnitTests`): sin Docker, sin red y sin data tier; es la superficie de la evidencia **unit** por separado. El gate integral sigue siendo `make pm-test-clean WT=<worktree>`.
+- **`make pm-unit WT=<worktree>`** corre **unitarias + architecture en macdata** (14 proyectos del manifiesto, assets de `containers/` allowlist, SDK por RepoDigest, sin FILTER). Es la fase unitaria del cierre; el gate integral es `make pm-gate WT=<worktree>`.
 
 ## Paralelismo
 
