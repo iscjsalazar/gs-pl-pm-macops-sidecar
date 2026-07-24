@@ -9,8 +9,8 @@
   "sdk_image": "mcr.microsoft.com/dotnet/sdk@sha256:ed034a8bf0b24ded0cbbac07e17825d8e9ebfe21e308191d0f7421eaf5ad4664",
   "sdk_platform": "linux/amd64",
   "expected_sdk_version": "10.0.302",
-  "baseline_pm_sha": "2131d0b0abef275c5f8f7578d86d9eff6b0a0fd2",
-  "baseline_evidence_id": "20260724T092316Z-sc363ee3d-pm2131d0b",
+  "baseline_pm_sha": "1c67ffb9ae575d270153194d51063ec4c3925d04",
+  "baseline_evidence_id": "20260724T092653Z-59758-pm1c67ffb",
   "baseline_unit_warm_min": 2.546,
   "target_unit_incremental_min": 1.5,
   "required_assets": [
@@ -111,8 +111,8 @@
     {
       "path": "tests/PL.PM.SubordinateSchedule.UnitTests/PL.PM.SubordinateSchedule.UnitTests.csproj",
       "kind": "unit",
-      "expected_total": 195,
-      "expected_executed": 195,
+      "expected_total": 233,
+      "expected_executed": 233,
       "expected_skipped": 0,
       "expected_failed": 0
     },
