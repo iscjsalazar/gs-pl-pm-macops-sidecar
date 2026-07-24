@@ -9,8 +9,8 @@
   "sdk_image": "mcr.microsoft.com/dotnet/sdk@sha256:ed034a8bf0b24ded0cbbac07e17825d8e9ebfe21e308191d0f7421eaf5ad4664",
   "sdk_platform": "linux/amd64",
   "expected_sdk_version": "10.0.302",
-  "baseline_pm_sha": "401bebe69c744b75e4ddc8e40e6fe681113c0212",
-  "baseline_evidence_id": "20260723T232751Z-scfc1a5f9-pm401bebe",
+  "baseline_pm_sha": "2131d0b0abef275c5f8f7578d86d9eff6b0a0fd2",
+  "baseline_evidence_id": "20260724T092316Z-sc363ee3d-pm2131d0b",
   "baseline_unit_warm_min": 2.546,
   "target_unit_incremental_min": 1.5,
   "required_assets": [
@@ -31,8 +31,8 @@
     {
       "path": "tests/PL.PM.Catalogs.UnitTests/PL.PM.Catalogs.UnitTests.csproj",
       "kind": "unit",
-      "expected_total": 396,
-      "expected_executed": 396,
+      "expected_total": 398,
+      "expected_executed": 398,
       "expected_skipped": 0,
       "expected_failed": 0
     },
@@ -71,24 +71,24 @@
     {
       "path": "tests/PL.PM.MasterSchedule.UnitTests/PL.PM.MasterSchedule.UnitTests.csproj",
       "kind": "unit",
-      "expected_total": 266,
-      "expected_executed": 266,
+      "expected_total": 270,
+      "expected_executed": 270,
       "expected_skipped": 0,
       "expected_failed": 0
     },
     {
       "path": "tests/PL.PM.Oracle.Infrastructure.UnitTests/PL.PM.Oracle.Infrastructure.UnitTests.csproj",
       "kind": "unit",
-      "expected_total": 68,
-      "expected_executed": 68,
+      "expected_total": 91,
+      "expected_executed": 91,
       "expected_skipped": 0,
       "expected_failed": 0
     },
     {
       "path": "tests/PL.PM.Parity.UnitTests/PL.PM.Parity.UnitTests.csproj",
       "kind": "unit",
-      "expected_total": 108,
-      "expected_executed": 108,
+      "expected_total": 118,
+      "expected_executed": 118,
       "expected_skipped": 0,
       "expected_failed": 0
     },
