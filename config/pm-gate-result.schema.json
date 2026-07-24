@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pm-gate-result.schema.json",
+  "title": "PM gate/unit result",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_id",
+    "mode",
+    "status",
+    "reason_code",
+    "runner_exit_code",
+    "canonical_evidence"
+  ],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "run_id": { "type": "string", "minLength": 1 },
+    "mode": { "type": "string", "enum": ["unit", "gate"] },
+    "status": {
+      "type": "string",
+      "enum": ["passed", "failed", "invalid_invocation", "not_operational", "interrupted", "running"]
+    },
+    "reason_code": { "type": "string" },
+    "runner_exit_code": { "type": "integer" },
+    "canonical_evidence": { "type": "boolean" },
+    "phases": { "type": "object" },
+    "projects": { "type": "array" },
+    "source_fingerprint": { "type": "string" },
+    "assets_fingerprint": { "type": "string" },
+    "sdk_image": { "type": "string" },
+    "sdk_version": { "type": "string" },
+    "wall_total_ms": { "type": "integer" },
+    "active_total_ms": { "type": "integer" }
+  },
+  "additionalProperties": true
+}
