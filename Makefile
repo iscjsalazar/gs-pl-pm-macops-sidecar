@@ -3,6 +3,14 @@
 # Marcas (norma de slots, process-e2e-local-slots.md): [WT obligatorio] = exige WT=<worktree> con slot;
 # [SLOT obligatorio] = exige SLOT=<N>; [DEPRECADO] = modo sustituido por la via por slots (corta o avisa; §5).
 #
+# Método canónico de validación (el sidecar y su worktree se actualizan primero al tip que se va a probar):
+#   1) inner-loop: dotnet build/test directo en el worktree de pl-programa-maestro (iteración; NO es evidencia).
+#   2) veredicto unitario: make pm-unit WT=<worktree> (macdata; corpus completo, sin FILTER/TESTPROJECT).
+#   3) gate canónico: make pm-gate WT=<worktree> PM_WT_FORCE_BUILD=1 (unit fail-fast -> integración una vez;
+#      el slot vive la tarea, pero el veredicto decisivo usa slot fresco). pm-test-clean es alias.
+#   [DEPRECADO] pm-test y ./pm.sh test: no usan esta escalera; el veredicto usa pm-unit y el inner-loop usa dotnet test.
+#   [AVISO DEPRECADO] WARM=1 repetido sobre el mismo slot no es evidencia; no bloquea a quienes lo usan en vuelo.
+#
 # Data tier + API + tests (pm-*):
 #   make pm-run                   # local: levanta el data tier + migra EF (crea BD/DDL) + seed data-only
 #   make pm-run PROFILE=full      # local: + Oracle + Service Bus emulador
@@ -10,14 +18,14 @@
 #   make pm-migrate               # aplica solo las migraciones EF (crea BD y DDL; EF = dueno del DDL)
 #   make pm-seed                  # re-seed data-only idempotente (requiere la BD ya migrada)
 #   make pm-api / pm-api-down     # levanta / detiene la API real en ESTA mac (M1)
-#   make pm-test                  # inner-loop: reusa la API si responde + dotnet test (default PROFILE=sql)
+#   [DEPRECADO] make pm-test      # tombstone: el veredicto usa pm-unit / el inner-loop usa dotnet test directo
 #   [WT obligatorio] make pm-gate WT=<worktree>         # CIERRE CANONICO: unit+arch en macdata PRIMERO (fail-fast) -> wt-up ORACLE=1 -> PL.PM.IntegrationTests una vez
 #   [WT obligatorio] make pm-test-clean WT=<worktree>   # alias de compatibilidad hacia pm-gate (misma maquina de estados; NO ejecuta PL.PM.sln)
 #   [WT obligatorio] make pm-unit WT=<worktree>         # fase unit+architecture en macdata (14 proyectos, assets allowlist, restore/build unicos); sin FILTER
 #   [WT obligatorio] make pm-gate-manifest-regen WT=<worktree>   # manifiesto DE RAMA con conteos reales -> artifacts/gate-manifests/ (nunca config/); ALLOW_DROP=1 REASON='...' si la rama retira pruebas
 #   [WT obligatorio] make pm-gate WT=<worktree> MANIFEST=artifacts/gate-manifests/pm-gate-manifest-<worktree>.json  # gate contra el manifiesto de rama (equivalente: PM_UNIT_MANIFEST_REL=<ruta>)
-#   make pm-test FILTER='FullyQualifiedName~RtSync'   # acota por filtro (inner-loop diagnostico; NO es evidencia de cierre)
-#   make pm-test APIFORCE=1                            # relanza la API (api-down+api) antes de testear; no reusa
+#   # Inner-loop con filtro: ejecuta dotnet test directamente en el worktree (no usa pm-test ni es evidencia).
+#   dotnet test <project> --filter 'FullyQualifiedName~RtSync'
 #   make pm-format               # formatea los .cs modificados vs develop (delega a scripts/format.sh in-repo)
 #   make pm-format-check         # gate de formato changed-vs-develop (delega a scripts/format-check.sh); sin data tier
 #   make pm-down                  # baja el data tier (conserva volumenes)
@@ -27,7 +35,7 @@
 #   [DEPRECADO] make pm-run PROJECT=pm-ag2 OFFSET=10          # como ambiente de trabajo: PROJECT/OFFSET solo vale para el singleton pm-local; usa make wt-up WT=<worktree> (§5)
 #   make pm-bootstrap-intel REMOTE=macdata                   # aprovisiona colima/docker en la Intel (1 vez)
 #   make help                     # imprime este catalogo (grep del encabezado)
-#   # Gate: el cierre canonico es 'pm-gate' (unit macdata + IntegrationTests). 'pm-test-clean' es alias. 'pm-test' es inner-loop.
+#   # Gate: el cierre canonico es 'pm-gate' (unit macdata + IntegrationTests). 'pm-test-clean' es alias. 'pm-test' esta deprecado.
 #   # Vars del bus/Ln: PM_LN_DB (erpln106), PM_SERVICEBUS_HOST, PM_SB_HOST_PORT (5672+OFFSET), PM_SB_SA_PASSWORD.
 #
 # Backend en modo E2E (Opción C) — via DEPRECADA, solo tombstone permanente (§5; la sustituyen wt-up / e2e-up por slot):
@@ -111,7 +119,7 @@ CONTEXT     ?=
 SQLHOST     ?= 127.0.0.1
 APIPORT     ?=
 # FILTER: filtro de dotnet test y perilla CANONICA. El default toma PM_TEST_FILTER del entorno, de modo que
-# 'PM_TEST_FILTER=... make pm-test|pm-test-clean' YA NO se pisa con vacio (PM_ENV re-emite el mismo valor);
+# 'PM_TEST_FILTER=... make pm-test-clean|pm-gate' YA NO se pisa con vacio (PM_ENV re-emite el mismo valor);
 # FILTER=<expr> en la linea de comando gana. Vacio = sin filtro.
 FILTER      ?= $(PM_TEST_FILTER)
 TESTPROJECT ?=
@@ -274,6 +282,7 @@ pm-migrate:  ; $(PM_ENV) ./pm.sh migrate              # aplica solo las migracio
 pm-seed:     ; $(PM_ENV) ./pm.sh seed                 # re-seed data-only (requiere la BD ya migrada)
 pm-api:      ; $(PM_ENV) ./pm.sh api
 pm-api-down: ; $(PM_ENV) ./pm.sh api-down
+# Tombstone: la prueba singleton pm-local no pertenece a la escalera canónica. pm.sh corta antes de cargar el entorno.
 pm-test:     ; $(PM_ENV) ./pm.sh test
 # Cierre canonico T-008: unit macdata -> fail-fast -> wt-up ORACLE=1 -> IntegrationTests.
 # Rechaza FILTER/TESTPROJECT (corpus completo). WT obligatorio. Host fijo macdata.
@@ -282,6 +291,7 @@ pm-gate: REMOTE  := macdata
 pm-gate: PROFILE := full
 pm-gate: ORACLE  := 1
 pm-gate:
+	@if [ "$(WARM)" = "1" ]; then echo "[pm] AVISO DEPRECADO: WARM=1 repetido sobre el mismo slot no es evidencia canónica; se recomienda un slot fresco para pm-gate (PM_WT_FORCE_BUILD=1 si el árbol está sucio)." >&2; fi
 	@if [ -z "$(WT)" ]; then echo "pm-gate exige WT=<worktree>" >&2; exit 2; fi
 	@if [ -n "$(FILTER)" ]; then echo "pm-gate rechaza FILTER (corpus completo)" >&2; exit 2; fi
 	@if [ -n "$(TESTPROJECT)" ]; then echo "pm-gate rechaza TESTPROJECT (fija IntegrationTests internamente)" >&2; exit 2; fi
@@ -292,6 +302,7 @@ pm-test-clean: REMOTE  := macdata
 pm-test-clean: PROFILE := full
 pm-test-clean: ORACLE  := 1
 pm-test-clean:
+	@if [ "$(WARM)" = "1" ]; then echo "[pm] AVISO DEPRECADO: WARM=1 repetido sobre el mismo slot no es evidencia canónica; se recomienda un slot fresco para pm-test-clean (alias de pm-gate)." >&2; fi
 	@if [ -z "$(WT)" ]; then echo "pm-test-clean exige WT=<worktree> (alias de pm-gate)" >&2; exit 2; fi
 	@if [ -n "$(FILTER)" ]; then echo "pm-test-clean rechaza FILTER (corpus completo)" >&2; exit 2; fi
 	@if [ -n "$(TESTPROJECT)" ]; then echo "pm-test-clean rechaza TESTPROJECT" >&2; exit 2; fi

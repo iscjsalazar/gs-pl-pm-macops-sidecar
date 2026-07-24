@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Orquestador del data tier PM (SQL Server + Oracle) + API real para macOS.
-# Verbos: run [--watch] | migrate | seed | api | api-down | e2e-backend (DEPRECADO) | e2e-backend-down (DEPRECADO) | test | test-clean | unit | gate | gate-manifest-regen | format | format-check | down | nuke | ps | logs | port
+# Verbos: run [--watch] | migrate | seed | api | api-down | e2e-backend (DEPRECADO) | e2e-backend-down (DEPRECADO) | test (DEPRECADO) | test-clean | unit | gate | gate-manifest-regen | wait-gate | format | format-check | down | nuke | ps | logs | port
 # Target: PM_TARGET=local (colima/desktop) | intel (rsync + docker compose en la mac Intel via SSH)
 #
 #   ./pm.sh run                 # levanta el data tier + migra EF (crea BD/DDL) + seedea data-only (local)
@@ -11,11 +11,10 @@
 #   # [DEPRECADO] Modo E2E (Opción C): lo sustituye la via por slots (make wt-up WT=<worktree>; guia §5).
 #   [DEPRECADO] PM_TARGET=intel PM_REMOTE_SSH=macdata ./pm.sh e2e-backend       # tombstone: corta con aviso (exit 2)
 #   [DEPRECADO] PM_TARGET=intel PM_REMOTE_SSH=macdata ./pm.sh e2e-backend-down  # tombstone: corta con aviso (exit 2)
-#   ./pm.sh test                # asegura la API arriba y corre dotnet test (toda la suite) contra ella
+#   [DEPRECADO] ./pm.sh test    # tombstone: el veredicto usa make pm-unit WT=<worktree> / el inner-loop usa dotnet test directo
 #   WT=<worktree> ./pm.sh test-clean   # gate limpio POR SLOT: wt-up (slot API+BD+seed+Oracle) + migrate por puente + suite
-#   PM_API_FORCE=1 ./pm.sh test # relanza la API (api-down+api) antes de testear; no reusa la que este arriba
-#   PM_TEST_PROJECT=tests/PL.PM.IntegrationTests/PL.PM.IntegrationTests.csproj ./pm.sh test   # un proyecto
-#   PM_TEST_FILTER='FullyQualifiedName~RtSync' ./pm.sh test                                    # un filtro
+#   # Inner-loop: dotnet build/test directo en el worktree; el gate canónico no usa este verbo deprecado.
+#   dotnet test <project> --filter 'FullyQualifiedName~RtSync'
 #   WT=<worktree> ./pm.sh unit  # unit+architecture en macdata (14 proyectos, receta durable T-008); WT obligatorio
 #   WT=<worktree> ./pm.sh gate  # cierre canonico: unit macdata -> fail-fast -> wt-up ORACLE=1 -> IntegrationTests
 #   WT=<worktree> ./pm.sh gate-manifest-regen  # manifiesto DE RAMA con los conteos reales (artifacts/, nunca config/)
@@ -24,11 +23,28 @@
 #   # La confirmacion NUKE=1 vive en la capa make (make pm-nuke NUKE=1); la invocacion directa './pm.sh nuke' la salta.
 #   # Data tier en la mac Intel + API en esta mac (el alias 'macdata' debe resolver como host p/ BD/AMQP: ver README):
 #   PM_TARGET=intel PM_REMOTE_SSH=macdata PM_TEST_SQL_HOST=macdata ./pm.sh run
-#   PM_TEST_SQL_HOST=macdata ./pm.sh test
+#   # pm.sh test está deprecado; el veredicto unitario se obtiene con make pm-unit WT=<worktree>.
 set -euo pipefail
+VERB="${1:-}"; shift || true
+
+# Tombstones de pruebas heredadas: se corta antes de cargar el entorno o tocar data tier/API.
+case "$VERB" in
+  test)
+    echo "[pm] [DEPRECATED] pm-test/pm.sh test usaba el singleton pm-local y no produce un veredicto canónico. Reemplazos: make pm-unit WT=<worktree> para el veredicto unitario; dotnet test <project> directo en el worktree para inner-loop." >&2
+    exit 2
+    ;;
+  e2e-backend)
+    echo "[pm] [DEPRECATED] e2e-backend está deprecado. Reemplazo: make wt-up WT=<worktree> (o make e2e-up WT=<worktree> LEGACYSRC=<path>)." >&2
+    exit 2
+    ;;
+  e2e-backend-down)
+    echo "[pm] [DEPRECATED] e2e-backend-down está deprecado. Reemplazo: make wt-down WT=<worktree> (o make e2e-down WT=<worktree>)." >&2
+    exit 2
+    ;;
+esac
+
 . "$(dirname "${BASH_SOURCE[0]}")/lib/common.sh"
 
-VERB="${1:-}"; shift || true
 WATCH=0
 for a in "$@"; do [ "$a" = "--watch" ] && WATCH=1; done
 
@@ -113,19 +129,18 @@ cmd_api_down() {       # detiene la API levantada por cmd_api (pidfile + fallbac
   echo "[pm] api detenida ($PM_API_HOST:$PM_API_PORT)"
 }
 
-cmd_test() {           # asegura la API real arriba (M1) y corre dotnet test contra ella + el SQL del data tier
+cmd_test() {           # asegura la API real arriba y ejecuta dotnet test contra ella y el SQL del data tier
   command -v dotnet >/dev/null 2>&1 || { echo "[pm] falta 'dotnet' en PATH" >&2; return 2; }
   [ "${PM_SKIP_API:-0}" = "1" ] || cmd_api || return 1
   local base; base="$(pm_api_base_url)"
   local cs; cs="$(pm_planning_connstr)"
-  local target="${PM_TEST_PROJECT:-PL.PM.sln}"   # default: toda la suite
+  local target="${PM_TEST_PROJECT:-PL.PM.sln}"   # valor por defecto: toda la suite
   echo "[pm] test: $target (filtro: ${PM_TEST_FILTER:-<todos>}) -> api $base"
   local args=(test "$PM_SOLUTION_DIR/$target")
-  # Guard warn-only (I6): un FILTER sin operador vstest (~ = ! ( & |) casa 0 pruebas y sale EXIT=0 -> falso verde
-  # de "0 tests corridos". No bloquea (podria haber un caso legitimo); solo avisa para no leerlo como evidencia.
+  # Guard warn-only (I6): un FILTER sin operador vstest (~ = ! ( & |) puede casar cero pruebas y producir un falso verde.
   case "${PM_TEST_FILTER:-}" in
     ''|*'~'*|*'='*|*'!'*|*'('*|*'&'*|*'|'*) : ;;
-    *) echo "[pm] AVISO: FILTER='$PM_TEST_FILTER' sin operador vstest: puede casar 0 pruebas y dar verde vacuo. Usa FullyQualifiedName~$PM_TEST_FILTER (o Name~...). La corrida de EVIDENCIA de cierre va SIN FILTER." >&2 ;;
+    *) echo "[pm] AVISO: FILTER='$PM_TEST_FILTER' sin operador vstest: puede casar 0 pruebas y dar verde vacuo. La forma recomendada es FullyQualifiedName~$PM_TEST_FILTER (o Name~...). La corrida de EVIDENCIA de cierre va SIN FILTER." >&2 ;;
   esac
   [ -n "${PM_TEST_FILTER:-}" ] && args+=(--filter "$PM_TEST_FILTER")
   local sbcs=""; [ "$PM_PROFILE" = "full" ] && sbcs="$(pm_servicebus_connstr)"
@@ -152,9 +167,9 @@ cmd_test() {           # asegura la API real arriba (M1) y corre dotnet test con
   fi
   echo "[pm] test: log completo -> $logf (fallos: grep -E 'Failed|Con error PL' \"$logf\")"
   local rc=0
-  # Veredicto persistido de forma robusta: un sidecar .rc (maquina-legible) y una linea EXIT= al final del log. Un
-  # trap de SIGTERM/INT deja rastro si el background muere a media corrida (el harness lo mata tras compilar/migrar
-  # pero antes de terminar): asi el veredicto se lee del ARCHIVO, no del status del background. 'running' hasta fin.
+  # Veredicto persistido de forma robusta: un sidecar .rc y una linea EXIT= al final del log. Un
+  # trap de SIGTERM/INT deja rastro si el proceso en background muere a media corrida; el veredicto
+  # se lee del archivo, no del estado del proceso en background. 'running' se conserva hasta el fin.
   echo running > "$rcf"
   # shellcheck disable=SC2064
   trap 'echo "[pm] test: EXIT=143 (killed)" >> "'"$logf"'"; echo 143 > "'"$rcf"'"; type wt_lock_release_all >/dev/null 2>&1 && wt_lock_release_all; exit 143' TERM INT
@@ -167,7 +182,7 @@ cmd_test() {           # asegura la API real arriba (M1) y corre dotnet test con
   else
     rc=$?
   fi
-  # Restaura el trap (a wt_lock_release_all si worktrees.sh esta sourced, si no al default) y sella el veredicto.
+  # Restaura el trap y sella el veredicto.
   if type wt_lock_release_all >/dev/null 2>&1; then trap 'wt_lock_release_all' TERM INT; else trap - TERM INT; fi
   echo "$rc" > "$rcf"
   echo "[pm] test: EXIT=$rc | log -> $logf | rc -> $rcf" | tee -a "$logf"
@@ -257,10 +272,6 @@ case "$VERB" in
   seed)     cmd_seed ;;
   api)      cmd_api ;;
   api-down) cmd_api_down ;;
-  # Tombstones (guard permanente): cortan ANTES de cualquier accion; las funciones de la via e2e-backend se retiraron en el follow-up 260711-1901.
-  e2e-backend)      echo "[pm] [DEPRECADO] e2e-backend esta deprecado (process-e2e-local-slots.md §5: no aisla nada; la via por slots la sustituye). Usa: make wt-up WT=<worktree>." >&2; exit 2 ;;
-  e2e-backend-down) echo "[pm] [DEPRECADO] e2e-backend-down esta deprecado. El analogo por slot es: make wt-down WT=<worktree>." >&2; exit 2 ;;
-  test)       cmd_test "$@" ;;
   test-clean) cmd_test_clean "$@" ;;
   unit)       cmd_unit ;;
   gate)       cmd_gate ;;
@@ -273,5 +284,5 @@ case "$VERB" in
   ps)       cmd_ps ;;
   logs)     cmd_logs ;;
   port)     cmd_port ;;
-  *) echo "uso: $0 {run [--watch]|migrate|seed|api|api-down|e2e-backend (DEPRECADO)|e2e-backend-down (DEPRECADO)|test|test-clean|unit|gate|gate-manifest-regen|wait-gate|format|format-check|down|nuke|ps|logs|port}"; exit 2 ;;
+  *) echo "uso: $0 {run [--watch]|migrate|seed|api|api-down|e2e-backend (DEPRECATED)|e2e-backend-down (DEPRECATED)|test (DEPRECATED)|test-clean|unit|gate|gate-manifest-regen|wait-gate|format|format-check|down|nuke|ps|logs|port}"; exit 2 ;;
 esac
