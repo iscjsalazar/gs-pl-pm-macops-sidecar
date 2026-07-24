@@ -62,7 +62,7 @@ gs-pl-pm-macops-sidecar/
 | `make pm-watch` | `pm-run` con logs en vivo. |
 | `make pm-seed` | Re-siembra el SQL (idempotente). |
 | `make pm-api` / `make pm-api-down` | Levanta / detiene la API real en esta máquina (M1). |
-| `make pm-test` | Inner-loop: reusa la API si responde y corre `dotnet test` (default `PROFILE=sql`; acota con `FILTER=`/`TESTPROJECT=`, fuerza API con `APIFORCE=1`). |
+| `make pm-test` | **[DEPRECADO]** Tombstone de la vía singleton `pm-local`: corta con exit 2. El veredicto unitario se obtiene con `make pm-unit WT=<worktree>` y el inner-loop con `dotnet test <project>` directo en el worktree. |
 | `make pm-gate WT=<worktree>` | **Cierre canónico**: unit+architecture en macdata (14 proyectos, una vez) → fail-fast → `wt-up ORACLE=1` → `PL.PM.IntegrationTests` una vez. Log único bajo `artifacts/test-logs/gate/<run_id>/`. |
 | `make pm-test-clean WT=<worktree>` | Alias de compatibilidad hacia `pm-gate` (misma máquina de estados; no ejecuta `PL.PM.sln` ni repite unitarias). |
 | `make pm-gate-manifest-regen WT=<worktree>` | Manifiesto **de rama** con los conteos reales medidos → `artifacts/gate-manifests/` (nunca `config/`). Perillas: `MODE=gate\|unit`, `FROM=`, `OUT=`, `ALLOW_DROP=1 REASON='…'`. Ver §Manifiesto de conteos. |
@@ -74,16 +74,15 @@ gs-pl-pm-macops-sidecar/
 # Gate (check verde) por slot: ambiente limpio del slot del worktree
 make pm-test-clean WT=<worktree>
 
-# Inner-loop: data tier arriba + iterar tests (rápido, sql)
-make pm-run
-make pm-test
-make pm-test FILTER='FullyQualifiedName~RtSync'
-make pm-test TESTPROJECT=tests/PL.PM.IntegrationTests/PL.PM.IntegrationTests.csproj
+# Inner-loop: itera directamente en el worktree (NO es evidencia de cierre)
+dotnet build <project-or-solution>
+dotnet test <project-or-solution> --filter 'FullyQualifiedName~RtSync'
 
 # Data tier en la mac Intel (macdata) + API en esta máquina
 #   requiere 'macdata' resoluble como host (ver §Requisito de host)
 make pm-run TARGET=intel REMOTE=macdata SQLHOST=macdata
-make pm-test SQLHOST=macdata
+# `pm-test` está deprecado: el inner-loop se ejecuta con dotnet test directo en el worktree.
+dotnet test <project-or-solution>
 
 # [DEPRECADO] Stacks compose manuales del data tier: como ambiente de trabajo la vía es el slot (make wt-up WT=)
 make pm-run PROJECT=pm-ag2 OFFSET=10      # avisa DEPRECADO sin bloquear (offset desplaza puertos de SQL/Oracle/API/bus)
@@ -396,10 +395,10 @@ los drivers. Los puertos del data tier se derivan en un solo lugar (`compute_por
 | `OFFSET` | pm | `0` | Desplaza puertos por agente (SQL, Oracle y API). |
 | `SQLHOST` | pm | `127.0.0.1` | Host del SQL/bus; para `intel`, el alias `macdata` (requiere mapearlo en `/etc/hosts`, ver §Requisito de host). |
 | `APIPORT` | pm | `5180 + OFFSET` | Puerto de la API en la M1. |
-| `FILTER` | pm | (vacío) | Filtro `--filter` de `dotnet test`. |
-| `TESTPROJECT` | pm | `PL.PM.sln` | Proyecto/solución a probar. |
+| `FILTER` | pm | (vacío) | Rechazado por `pm-unit`/`pm-gate`; el inner-loop usa `dotnet test <project> --filter ...` directamente. |
+| `TESTPROJECT` | pm | (vacío) | Rechazado por `pm-unit`/`pm-gate`; el gate fija `PL.PM.IntegrationTests` internamente. |
 | `REMOTE` | pm | (vacío) | Alias/host SSH de la mac Intel. |
-| `APIFORCE` | pm | `0` | `1` relanza la API (`api-down`+`api`) antes de testear. `pm-test-clean` lo fija. |
+| `APIFORCE` | pm | `0` | `1` relanza la API (`api-down`+`api`) al invocar `make pm-api`; no reanima el tombstone `pm-test`. |
 | `GATEWAY` | e2e | `172.16.128.1` | IP de `macdata` vista desde el guest (pasarela NAT); URL del backend para el guest. |
 | `GUESTKEY` | e2e | `~/pm-host-windows/.../id_pmwin` | Llave SSH al guest, residente en `macdata` (el `~` se expande allá). |
 | `WINHOST` | e2e/legacy | `172.16.128.129` | IP NAT del guest Windows (reusada del legado). |
@@ -441,6 +440,26 @@ Tras esto, `SQLHOST=macdata` sirve para SSH **y** para BD/AMQP. Si la IP de la `
 
 Para la vía E2E por slot (`make wt-up` / `make e2e-up`), la API corre en un contenedor **en** `macdata` y el guest la alcanza por la pasarela NAT (`172.16.128.1`), no por la IP LAN del M1: no hace falta tocar el firewall del M1. En `macdata` basta `docker` (no el SDK de .NET) y que su firewall permita la conexión entrante del guest al puerto de la API del slot (`5180+N*10`). El mapeo `/etc/hosts` del M1 sigue aplicando para `make e2e-net-check` (probes M1 → `macdata`) y para alcanzar la API por la LAN.
 
+## Método canónico de validación
+
+Antes de medir o aceptar un resultado, el sidecar y el worktree del sidecar se actualizan primero al tip que se va a
+probar; el SHA y el estado del árbol quedan registrados. No se usa un worktree stale como evidencia. La escalera tiene tres
+niveles y cada uno tiene un propósito distinto:
+
+1. **Inner-loop:** `dotnet build`/`dotnet test` directo en el worktree de `pl-programa-maestro`. Sirve para iterar
+   y diagnosticar, pero **no es evidencia** del veredicto del sidecar.
+2. **Veredicto unitario:** `make pm-unit WT=<worktree>`. Ejecuta el corpus completo de unitarias y arquitectura en
+   `macdata`, sin `FILTER` ni `TESTPROJECT`; su evidencia queda en `artifacts/test-logs/unit/`.
+3. **Gate canónico:** `make pm-gate WT=<worktree> PM_WT_FORCE_BUILD=1`. Hace unitarias primero y fail-fast;
+   solo después aprovisiona el slot y corre `PL.PM.IntegrationTests` una vez. `make pm-test-clean WT=<worktree>`
+   es el alias compatible de la misma cadena.
+
+El slot vive durante la tarea, pero el veredicto decisivo se toma sobre un slot fresco. `PM_WT_FORCE_BUILD=1` es
+la perilla explícita cuando el árbol está sucio. Repetir `WARM=1` sobre el mismo slot está **DEPRECADO**: el
+sidecar muestra un aviso visible, pero no rompe a quienes todavía lo usan en vuelo y ese resultado no sustituye
+un gate fresco. `make pm-test` y `./pm.sh test` están retirados con tombstone porque recorrían el singleton
+`pm-local`.
+
 ## Gate vs inner-loop
 
 - **`make pm-gate WT=<worktree>`** es el **cierre canónico**: ejecuta primero las unitarias/arquitectura en macdata (receta durable, 14 proyectos, assets allowlist, restore/build únicos) y solo si quedan verdes aprovisiona el slot y corre `PL.PM.IntegrationTests` una vez. `pm-test-clean` es alias de la misma cadena.
@@ -448,8 +467,7 @@ Para la vía E2E por slot (`make wt-up` / `make e2e-up`), la API corre en un con
   + BD `pm_planning_wt<N>` + seed + Oracle/bus del slot) + `pm_ef_migrate` por el puente `60211`, y corre toda la
   suite con `PROFILE=full` (Oracle + Service Bus). Único comando para "¿pasa todo en limpio?" en el slot aislado;
   fuerza `TARGET=intel REMOTE=macdata ORACLE=1` y sustituye al singleton `pm-local` como ambiente de validación.
-- **`make pm-test`** es el **inner-loop**: rápido, `PROFILE=sql`, reusa la API arriba; acota con
-  `FILTER=`/`TESTPROJECT=` (o `APIFORCE=1` para relanzar la API). La suite de mensajería sólo corre con `full`.
+- **`dotnet build`/`dotnet test` directo** es el **inner-loop**: rápido y acotable, pero no es evidencia del gate.
 - **`make pm-unit WT=<worktree>`** corre **unitarias + architecture en macdata** (14 proyectos del manifiesto, assets de `containers/` allowlist, SDK por RepoDigest, sin FILTER). Es la fase unitaria del cierre; el gate integral es `make pm-gate WT=<worktree>`.
 
 ### Manifiesto de conteos: canónico vs de rama
