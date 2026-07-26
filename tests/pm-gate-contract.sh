@@ -66,6 +66,13 @@ grep -q 'local phase_ok=0' "$ROOT/lib/unit-macdata.sh" && ok "integration phase_
 grep -q 'manifest_regen_refused' "$ROOT/scripts/pm-gate-manifest-write.py" && ok "writer fail-closed" || bad "writer fail-closed"
 grep -q 'pm-gate-manifest-regen exige WT' "$ROOT/Makefile" && ok "regen exige WT" || bad "regen exige WT"
 
+# --- promocion del canonico (T-009): unico canal que mueve config/pm-gate-manifest.json ---
+grep -q 'manifest_promote_refused' "$ROOT/scripts/pm-gate-manifest-promote.py" && ok "promote fail-closed" || bad "promote fail-closed"
+grep -q 'manifest_promote_ok' "$ROOT/scripts/pm-gate-manifest-promote.py" && ok "promote sella resumen maquina-legible" || bad "promote sella resumen maquina-legible"
+grep -q 'pm-gate-manifest-promote:' "$ROOT/Makefile" && ok "verbo pm-gate-manifest-promote en Makefile" || bad "verbo pm-gate-manifest-promote en Makefile"
+grep -q 'pm-gate-manifest-promote exige FROM' "$ROOT/Makefile" && ok "promote exige FROM" || bad "promote exige FROM"
+grep -q 'pm-gate-manifest-promote exige PM_SHA' "$ROOT/Makefile" && ok "promote exige PM_SHA" || bad "promote exige PM_SHA"
+
 echo "----"
 echo "PASS=$pass FAIL=$fail"
 [ "$fail" -eq 0 ]

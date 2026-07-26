@@ -27,11 +27,30 @@ assert len(d["required_assets"])==4
 assert "@sha256:" in d["sdk_image"]
 assert d["expected_sdk_version"]=="10.0.302"
 assert d["integration_project"]=="tests/PL.PM.IntegrationTests/PL.PM.IntegrationTests.csproj"
-assert sum(p["expected_total"] for p in d["projects"])==2200
-assert d["integration_expected_total"]==334
+assert sum(p["expected_total"] for p in d["projects"])==2384
+assert d["integration_expected_total"]==475
+assert d["integration_expected_executed"]==473
+assert d["integration_expected_skipped"]==2
 paths=[p["path"] for p in d["projects"]]
 assert len(paths)==len(set(paths))
 assert "PL.PM.IntegrationTests" not in " ".join(paths)
+PY
+
+# --- manifiesto: procedencia fechable (T-009) ---
+python3 - "$ROOT/config/pm-gate-manifest.json" <<'PY' && ok "manifest provenance" || bad "manifest provenance"
+import json, sys
+d=json.load(open(sys.argv[1]))
+assert d.get("generated_at"), "generated_at vacio"
+assert d.get("commit"), "commit vacio"
+assert d.get("baseline_pm_sha"), "baseline_pm_sha vacio"
+assert d["commit"]==d["baseline_pm_sha"], "commit != baseline_pm_sha"
+assert len(d["commit"])==40, "commit no es un sha40"
+assert d.get("baseline_evidence_id"), "baseline_evidence_id vacio"
+assert d.get("scope")=="canonical"
+assert d.get("generated_by")=="make pm-gate-manifest-promote"
+for noise in ("drops_allowed", "drop_justification", "baseline_pm_dirty", "derived_from",
+              "baseline_pm_branch", "baseline_wt", "baseline_source_fingerprint"):
+    assert noise not in d, f"{noise} no deberia viajar al canonico"
 PY
 
 # --- runsettings: TreatNoTestsAsError, sin filtros ---
@@ -298,11 +317,253 @@ rc=0; python3 "$wr_py" "$tmp/canon/pm-gate-manifest.json" "$tmp/res-grow.json" "
   "$ROOT/config/pm-gate-manifest.json" >/dev/null 2>&1 || rc=$?
 [ "$rc" -eq 4 ] && [ ! -f "$ROOT/config/otro.json" ] && ok "regen no escribe dentro de config/" || bad "regen no escribe dentro de config/ (rc=$rc)"
 
+# ===========================================================================
+# Promotor del CANONICO (T-009): scripts/pm-gate-manifest-promote.py
+# ===========================================================================
+pr_py="$ROOT/scripts/pm-gate-manifest-promote.py"
+
+gen_branch_mf() {  # $1=out $2=pm_sha $3=dirty(0|1) $4=integ_source(measured|inherited_from_canonical)
+                    # $5=totalA(default 130) $6=drops_allowed_json(default []) $7=drop_justification(default "")
+  python3 - "$1" "$2" "$3" "$4" "${5:-130}" "${6:-[]}" "${7:-}" <<'PY'
+import json, sys
+out, pm_sha, dirty, integ_src, total_a, drops_json, just = sys.argv[1:8]
+json.dump({
+  "schema_version": 1, "solution_path": "PL.PM.sln", "project_count": 2,
+  "integration_project": "tests/PL.PM.IntegrationTests/PL.PM.IntegrationTests.csproj",
+  "integration_expected_total": 340, "integration_expected_executed": 338,
+  "integration_expected_skipped": 2, "integration_counts_source": integ_src,
+  "sdk_image": "img@sha256:deadbeef", "sdk_platform": "linux/amd64", "expected_sdk_version": "10.0.302",
+  "required_assets": ["a", "b", "c", "d"],
+  "baseline_unit_warm_min": 2.5, "target_unit_incremental_min": 1.5,
+  "projects": [
+    {"path": "tests/A.UnitTests/A.UnitTests.csproj", "kind": "unit",
+     "expected_total": int(total_a), "expected_executed": int(total_a),
+     "expected_skipped": 0, "expected_failed": 0},
+    {"path": "tests/B.UnitTests/B.UnitTests.csproj", "kind": "unit",
+     "expected_total": 10, "expected_executed": 10, "expected_skipped": 0, "expected_failed": 0},
+  ],
+  "scope": "branch",
+  "baseline_pm_sha": pm_sha, "baseline_pm_dirty": dirty == "1",
+  "baseline_evidence_id": "run-fixture", "baseline_evidence_dir": "artifacts/test-logs/gate/run-fixture",
+  "drops_allowed": json.loads(drops_json), "drop_justification": just,
+  "generated_at": "2026-07-25T00:00:00Z", "generated_by": "make pm-gate-manifest-regen",
+}, open(out, "w"), indent=2)
+PY
+}
+
+# Canonico sintetico DEDICADO (A/B, con el schema COMPLETO del canonico real): el REAL
+# config/pm-gate-manifest.json tiene otros 14 paths y compararia el fixture A/B contra el, viendo
+# los 14 reales como "removidos" (falso drop); el destino real ya se verifico en la instancia
+# ejecutada por Paso 4 (arriba de este archivo, en el propio repo).
+promote_canon="$tmp/promote-canon.json"
+python3 - "$promote_canon" <<'PY'
+import json, sys
+json.dump({
+  "schema_version": 1, "solution_path": "PL.PM.sln", "project_count": 2,
+  "integration_project": "tests/PL.PM.IntegrationTests/PL.PM.IntegrationTests.csproj",
+  "integration_expected_total": 300, "integration_expected_executed": 298,
+  "integration_expected_skipped": 2,
+  "sdk_image": "img@sha256:deadbeef", "sdk_platform": "linux/amd64", "expected_sdk_version": "10.0.302",
+  "baseline_pm_sha": "oldsha0000000000000000000000000000000000"[:40],
+  "baseline_evidence_id": "old-id", "baseline_unit_warm_min": 2.5, "target_unit_incremental_min": 1.5,
+  "required_assets": ["a", "b", "c", "d"],
+  "projects": [
+    {"path": "tests/A.UnitTests/A.UnitTests.csproj", "kind": "unit",
+     "expected_total": 100, "expected_executed": 100, "expected_skipped": 0, "expected_failed": 0},
+    {"path": "tests/B.UnitTests/B.UnitTests.csproj", "kind": "unit",
+     "expected_total": 10, "expected_executed": 10, "expected_skipped": 0, "expected_failed": 0},
+  ],
+}, open(sys.argv[1], "w"), indent=2)
+PY
+SHA40="d58c8ead96d31ef9a454f6c703f46a273141d1c3"
+
+# (a) sin --pm-sha -> rechazo, no escribe
+mf_a="$tmp/promote-a.json"; gen_branch_mf "$mf_a" "$SHA40" 0 measured
+rc=0; out="$(python3 "$pr_py" --canonical "$promote_canon" --from "$mf_a" --out "$tmp/promote-out-a.json" 2>&1)" || rc=$?
+[ "$rc" -ne 0 ] && [ ! -f "$tmp/promote-out-a.json" ] && ok "promote sin PM_SHA -> rechazo" || bad "promote sin PM_SHA -> rechazo (rc=$rc)"
+
+# (b) medicion dirty (SHA de origen != --pm-sha) sin --trust-dirty -> rechazo
+mf_b="$tmp/promote-b.json"; gen_branch_mf "$mf_b" "otro-sha-pre-merge-000000000000000000" 0 measured
+rc=0; out="$(python3 "$pr_py" --canonical "$promote_canon" --from "$mf_b" --pm-sha "$SHA40" --out "$tmp/promote-out-b.json" 2>&1)" || rc=$?
+echo "$out" | grep -q -- '--trust-dirty' && [ "$rc" -ne 0 ] && [ ! -f "$tmp/promote-out-b.json" ] \
+  && ok "promote dirty sin TRUST_DIRTY -> rechazo" || bad "promote dirty sin TRUST_DIRTY -> rechazo (rc=$rc)"
+
+# (c) integration no measured -> rechazo
+mf_c="$tmp/promote-c.json"; gen_branch_mf "$mf_c" "$SHA40" 0 inherited_from_canonical
+rc=0; python3 "$pr_py" --canonical "$promote_canon" --from "$mf_c" --pm-sha "$SHA40" --out "$tmp/promote-out-c.json" >/dev/null 2>&1 || rc=$?
+[ "$rc" -ne 0 ] && [ ! -f "$tmp/promote-out-c.json" ] && ok "promote integration no measured -> rechazo" || bad "promote integration no measured -> rechazo (rc=$rc)"
+
+# (c2) --evidence roja (un proyecto con failed>0) -> rechazo, aunque el manifiesto de rama diga verde
+mf_c2="$tmp/promote-c2.json"; gen_branch_mf "$mf_c2" "$SHA40" 0 measured
+ev_c2="$tmp/evidence-red"; mkdir -p "$ev_c2"
+python3 - "$ev_c2/result.json" <<'PY'
+import json, sys
+json.dump({
+  "run_id": "run-red", "status": "passed", "runner_exit_code": 0, "git_head": "d58c8ead96d31ef9a454f6c703f46a273141d1c3",
+  "projects": [
+    {"path": "tests/A.UnitTests/A.UnitTests.csproj", "total": 130, "executed": 129, "skipped": 0, "failed": 1, "exit_code": 1},
+    {"path": "tests/B.UnitTests/B.UnitTests.csproj", "total": 10, "executed": 10, "skipped": 0, "failed": 0, "exit_code": 0},
+  ],
+  "integration": {"total": 340, "executed": 338, "skipped": 2, "failed": 0, "exit_code": 0},
+}, open(sys.argv[1], "w"))
+PY
+rc=0; out="$(python3 "$pr_py" --canonical "$promote_canon" --from "$mf_c2" --pm-sha "$SHA40" --evidence "$ev_c2" --out "$tmp/promote-out-c2.json" 2>&1)" || rc=$?
+[ "$rc" -ne 0 ] && [ ! -f "$tmp/promote-out-c2.json" ] && ok "promote con --evidence roja -> rechazo" || bad "promote con --evidence roja -> rechazo (rc=$rc)"
+
+# (c3) M1: --evidence incompleta (falta un proyecto del manifiesto de rama) -> rechazo
+#     Antes del fix, verify_evidence omitia en silencio el proyecto ausente y el promote sellaba
+#     expected_total no medido. Rojo->verde de la ronda r1.
+mf_c3="$tmp/promote-c3.json"; gen_branch_mf "$mf_c3" "$SHA40" 0 measured
+ev_c3="$tmp/evidence-incomplete"; mkdir -p "$ev_c3"
+python3 - "$ev_c3/result.json" <<'PY'
+import json, sys
+# Solo A: B falta a proposito (evidencia incompleta pero "passed" en los presentes).
+json.dump({
+  "run_id": "run-incomplete", "status": "passed", "runner_exit_code": 0,
+  "git_head": "d58c8ead96d31ef9a454f6c703f46a273141d1c3",
+  "projects": [
+    {"path": "tests/A.UnitTests/A.UnitTests.csproj", "total": 130, "executed": 130, "skipped": 0, "failed": 0, "exit_code": 0},
+  ],
+  "integration": {"total": 340, "executed": 338, "skipped": 2, "failed": 0, "exit_code": 0},
+}, open(sys.argv[1], "w"))
+PY
+rc=0; out="$(python3 "$pr_py" --canonical "$promote_canon" --from "$mf_c3" --pm-sha "$SHA40" --evidence "$ev_c3" --out "$tmp/promote-out-c3.json" 2>&1)" || rc=$?
+echo "$out" | grep -q 'no cubre los mismos proyectos' && [ "$rc" -ne 0 ] && [ ! -f "$tmp/promote-out-c3.json" ] \
+  && ok "promote con --evidence incompleta (proyecto ausente) -> rechazo" \
+  || bad "promote con --evidence incompleta (proyecto ausente) -> rechazo (rc=$rc out=$out)"
+
+# (c4) S1: --from = result.json crudo (sin manifiesto de rama) -> camino reconstruct_from_result
+res_c4="$tmp/result-raw.json"
+python3 - "$res_c4" <<'PY'
+import json, sys
+json.dump({
+  "run_id": "run-raw-result", "status": "passed", "runner_exit_code": 0,
+  "git_head": "d58c8ead96d31ef9a454f6c703f46a273141d1c3",
+  "projects": [
+    {"path": "tests/A.UnitTests/A.UnitTests.csproj", "total": 130, "executed": 130, "skipped": 0, "failed": 0, "exit_code": 0},
+    {"path": "tests/B.UnitTests/B.UnitTests.csproj", "total": 10, "executed": 10, "skipped": 0, "failed": 0, "exit_code": 0},
+  ],
+  "integration": {"total": 340, "executed": 338, "skipped": 2, "failed": 0, "exit_code": 0},
+}, open(sys.argv[1], "w"))
+PY
+rc=0; out="$(python3 "$pr_py" --canonical "$promote_canon" --from "$res_c4" --pm-sha "$SHA40" --out "$tmp/promote-out-c4.json" 2>&1)" || rc=$?
+if [ "$rc" -eq 0 ] && [ -f "$tmp/promote-out-c4.json" ] && echo "$out" | grep -q 'evidence_verified=no' \
+  && python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert d["scope"]=="canonical"
+assert d["commit"]=="'"$SHA40"'"
+assert sum(p["expected_total"] for p in d["projects"])==140
+assert d["integration_expected_total"]==340
+assert d["baseline_evidence_id"]=="run-raw-result"
+' "$tmp/promote-out-c4.json"; then
+  ok "promote --from result.json crudo (sin manifiesto de rama) -> ok"
+else
+  bad "promote --from result.json crudo (sin manifiesto de rama) -> ok (rc=$rc out=$out)"
+fi
+
+# (c5) S1 negativo: result.json crudo con proyecto rojo -> rechazo
+res_c5="$tmp/result-raw-red.json"
+python3 - "$res_c5" <<'PY'
+import json, sys
+json.dump({
+  "run_id": "run-raw-red", "status": "failed", "runner_exit_code": 1,
+  "git_head": "d58c8ead96d31ef9a454f6c703f46a273141d1c3",
+  "projects": [
+    {"path": "tests/A.UnitTests/A.UnitTests.csproj", "total": 130, "executed": 129, "skipped": 0, "failed": 1, "exit_code": 1},
+    {"path": "tests/B.UnitTests/B.UnitTests.csproj", "total": 10, "executed": 10, "skipped": 0, "failed": 0, "exit_code": 0},
+  ],
+  "integration": {"total": 340, "executed": 338, "skipped": 2, "failed": 0, "exit_code": 0},
+}, open(sys.argv[1], "w"))
+PY
+rc=0; python3 "$pr_py" --canonical "$promote_canon" --from "$res_c5" --pm-sha "$SHA40" --out "$tmp/promote-out-c5.json" >/dev/null 2>&1 || rc=$?
+[ "$rc" -ne 0 ] && [ ! -f "$tmp/promote-out-c5.json" ] \
+  && ok "promote --from result.json rojo -> rechazo" \
+  || bad "promote --from result.json rojo -> rechazo (rc=$rc)"
+
+# (d) promote feliz a un OUT temporal: NO pisa el canonico real del repo
+#     S2: sin --evidence declara evidence_verified=no + manifest_promote_warn
+before="$(shasum -a 256 "$ROOT/config/pm-gate-manifest.json" | awk '{print $1}')"
+mf_d="$tmp/promote-d.json"; gen_branch_mf "$mf_d" "$SHA40" 0 measured
+rc=0; out="$(python3 "$pr_py" --canonical "$promote_canon" --from "$mf_d" --pm-sha "$SHA40" --out "$tmp/promote-out-d.json" 2>&1)" || rc=$?
+after="$(shasum -a 256 "$ROOT/config/pm-gate-manifest.json" | awk '{print $1}')"
+if [ "$rc" -eq 0 ] && [ "$before" = "$after" ] && echo "$out" | grep -q 'evidence_verified=no' \
+  && echo "$out" | grep -q 'manifest_promote_warn' \
+  && python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert d["scope"]=="canonical"
+assert d["commit"]=="'"$SHA40"'" and d["baseline_pm_sha"]=="'"$SHA40"'"
+assert sum(p["expected_total"] for p in d["projects"])==140
+assert d["integration_expected_total"]==340
+assert "drops_allowed" not in d and "drop_justification" not in d
+' "$tmp/promote-out-d.json"; then ok "promote feliz a OUT temporal no pisa el canonico real"; else bad "promote feliz a OUT temporal no pisa el canonico real (rc=$rc)"; fi
+
+# (d2) S2: con --evidence completa y verde, evidence_verified=yes (sin warn de modo degradado)
+mf_d2="$tmp/promote-d2.json"; gen_branch_mf "$mf_d2" "$SHA40" 0 measured
+ev_d2="$tmp/evidence-green"; mkdir -p "$ev_d2"
+python3 - "$ev_d2/result.json" <<'PY'
+import json, sys
+json.dump({
+  "run_id": "run-green", "status": "passed", "runner_exit_code": 0,
+  "git_head": "d58c8ead96d31ef9a454f6c703f46a273141d1c3",
+  "projects": [
+    {"path": "tests/A.UnitTests/A.UnitTests.csproj", "total": 130, "executed": 130, "skipped": 0, "failed": 0, "exit_code": 0},
+    {"path": "tests/B.UnitTests/B.UnitTests.csproj", "total": 10, "executed": 10, "skipped": 0, "failed": 0, "exit_code": 0},
+  ],
+  "integration": {"total": 340, "executed": 338, "skipped": 2, "failed": 0, "exit_code": 0},
+}, open(sys.argv[1], "w"))
+PY
+rc=0; out="$(python3 "$pr_py" --canonical "$promote_canon" --from "$mf_d2" --pm-sha "$SHA40" --evidence "$ev_d2" --out "$tmp/promote-out-d2.json" 2>&1)" || rc=$?
+if [ "$rc" -eq 0 ] && [ -f "$tmp/promote-out-d2.json" ] && echo "$out" | grep -q 'evidence_verified=yes' \
+  && ! echo "$out" | grep -q 'manifest_promote_warn' \
+  && python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert d["baseline_evidence_id"]=="run-green"
+' "$tmp/promote-out-d2.json"; then
+  ok "promote con --evidence completa -> evidence_verified=yes"
+else
+  bad "promote con --evidence completa -> evidence_verified=yes (rc=$rc out=$out)"
+fi
+
+# (e) caida de conteos vs el canonico ACTUAL sin justificar -> rechazo; con ALLOW_BASELINE_DROP+reason -> ok
+mf_e="$tmp/promote-e.json"; gen_branch_mf "$mf_e" "$SHA40" 0 measured 1
+rc=0; python3 "$pr_py" --canonical "$promote_canon" --from "$mf_e" --pm-sha "$SHA40" --out "$tmp/promote-out-e.json" >/dev/null 2>&1 || rc=$?
+[ "$rc" -ne 0 ] && [ ! -f "$tmp/promote-out-e.json" ] && ok "promote drop no justificado -> rechazo" || bad "promote drop no justificado -> rechazo (rc=$rc)"
+rc=0; python3 "$pr_py" --canonical "$promote_canon" --from "$mf_e" --pm-sha "$SHA40" --out "$tmp/promote-out-e2.json" \
+  --allow-baseline-drop --allow-baseline-drop-reason "retiro deliberado (fixture)" >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 0 ] && [ -f "$tmp/promote-out-e2.json" ] && ok "promote drop con ALLOW_BASELINE_DROP+reason -> ok" || bad "promote drop con ALLOW_BASELINE_DROP+reason -> ok (rc=$rc)"
+
+# (f) caida ya justificada EN el manifiesto de rama (drops_allowed+drop_justification) -> se acepta sin flags extra
+mf_f="$tmp/promote-f.json"
+gen_branch_mf "$mf_f" "$SHA40" 0 measured 1 \
+  '[{"path": "tests/A.UnitTests/A.UnitTests.csproj", "from": 100, "to": 1, "kind": "count_drop"}]' \
+  "baseline canonico rancio, no perdida real de cobertura (fixture)"
+rc=0; python3 "$pr_py" --canonical "$promote_canon" --from "$mf_f" --pm-sha "$SHA40" --out "$tmp/promote-out-f.json" >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 0 ] && [ -f "$tmp/promote-out-f.json" ] && ok "promote drop pre-justificado en manifiesto de rama -> ok sin flags" || bad "promote drop pre-justificado en manifiesto de rama -> ok sin flags (rc=$rc)"
+
+# (g) write.py sigue sin poder escribir en config/ (canal separado, exit 4 -- cubierto arriba en el
+#     caso 10; se re-afirma aqui explicitamente como frontera del promotor)
+rc=0; python3 "$wr_py" "$tmp/canon/pm-gate-manifest.json" "$tmp/res-grow.json" "$ROOT/config/pm-gate-manifest.json" \
+  "$ROOT/config/pm-gate-manifest.json" >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 4 ] && ok "write.py sigue prohibido de escribir config/ (frontera con promote.py)" || bad "write.py sigue prohibido de escribir config/ (frontera con promote.py) (rc=$rc)"
+
+# --- Makefile: verbo pm-gate-manifest-promote, guards y no exige WT ---
+grep -q 'pm-gate-manifest-promote:' "$ROOT/Makefile" && ok "target pm-gate-manifest-promote existe" || bad "target pm-gate-manifest-promote existe"
+grep -q 'pm-gate-manifest-promote exige FROM' "$ROOT/Makefile" && ok "promote exige FROM" || bad "promote exige FROM"
+grep -q 'pm-gate-manifest-promote exige PM_SHA' "$ROOT/Makefile" && ok "promote exige PM_SHA" || bad "promote exige PM_SHA"
+rc=0; out="$(cd "$ROOT" && make pm-gate-manifest-promote 2>&1)" || rc=$?
+echo "$out" | grep -q 'exige FROM' && [ "$rc" -ne 0 ] && ok "make promote sin FROM -> no cero" || bad "make promote sin FROM -> no cero (rc=$rc)"
+rc=0; out="$(cd "$ROOT" && make pm-gate-manifest-promote FROM=x.json 2>&1)" || rc=$?
+echo "$out" | grep -q 'exige PM_SHA' && [ "$rc" -ne 0 ] && ok "make promote sin PM_SHA -> no cero" || bad "make promote sin PM_SHA -> no cero (rc=$rc)"
+
 # --- sintaxis de los scripts nuevos ---
 pysyn() { python3 -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "$1"; }
 pysyn "$cmp_py" && ok "sintaxis coverage-compare" || bad "sintaxis coverage-compare"
 pysyn "$wr_py" && ok "sintaxis manifest-write" || bad "sintaxis manifest-write"
 pysyn "$ROOT/scripts/pm-gate-manifest-scaffold.py" && ok "sintaxis manifest-scaffold" || bad "sintaxis manifest-scaffold"
+pysyn "$pr_py" && ok "sintaxis manifest-promote" || bad "sintaxis manifest-promote"
 cd "$ROOT"
 
 rm -rf "$tmp"

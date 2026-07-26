@@ -24,6 +24,8 @@
 #   [WT obligatorio] make pm-unit WT=<worktree>         # fase unit+architecture en macdata (14 proyectos, assets allowlist, restore/build unicos); sin FILTER
 #   [WT obligatorio] make pm-gate-manifest-regen WT=<worktree>   # manifiesto DE RAMA con conteos reales -> artifacts/gate-manifests/ (nunca config/); ALLOW_DROP=1 REASON='...' si la rama retira pruebas
 #   [WT obligatorio] make pm-gate WT=<worktree> MANIFEST=artifacts/gate-manifests/pm-gate-manifest-<worktree>.json  # gate contra el manifiesto de rama (equivalente: PM_UNIT_MANIFEST_REL=<ruta>)
+#   make pm-gate-manifest-promote FROM=<manifiesto-de-rama-o-result.json> PM_SHA=<sha40-develop-post-merge>  # mueve el CANONICO (config/pm-gate-manifest.json) post-merge de pm; fail-closed (ver README §Manifiesto de conteos); no exige WT (no corre suite)
+#   [...] EVIDENCE=<dir-de-evidencia> TRUST_DIRTY=1 REASON='...'   # medicion pre-commit -> squash (caso normal de un tren); ALLOW_BASELINE_DROP=1 REASON='...' solo si el drop no viene ya justificado en el manifiesto de rama
 #   # Inner-loop con filtro: ejecuta dotnet test directamente en el worktree (no usa pm-test ni es evidencia).
 #   dotnet test <project> --filter 'FullyQualifiedName~RtSync'
 #   make pm-format               # formatea los .cs modificados vs develop (delega a scripts/format.sh in-repo)
@@ -267,7 +269,7 @@ WT_ENV = $(PM_ENV) $(MANIFEST_ENV) WT=$(WT) PM_WT_SLOTS=$(SLOTS) PM_WT_ORACLE=$(
          PM_SHARED_SQL_NETWORK=$(SHAREDSQL_NET) PM_SHARED_SQL_HOST=$(SHAREDSQL_HOST) \
          PM_SHARED_SQL_PORT=$(SHAREDSQL_PORT) PM_SHARED_SQL_PASSWORD='$(SHAREDSQL_PASSWORD)'
 
-.PHONY: pm-run pm-watch pm-migrate pm-seed pm-api pm-api-down pm-test pm-test-clean pm-gate pm-gate-manifest-regen pm-unit pm-format pm-format-check pm-down pm-nuke pm-ps pm-logs pm-port pm-bootstrap-intel \
+.PHONY: pm-run pm-watch pm-migrate pm-seed pm-api pm-api-down pm-test pm-test-clean pm-gate pm-gate-manifest-regen pm-gate-manifest-promote pm-unit pm-format pm-format-check pm-down pm-nuke pm-ps pm-logs pm-port pm-bootstrap-intel \
         wt-up wt-down wt-ls wt-info wt-status wt-gc wt-prune-cache vm-restart-coordinated wt-seed-ln wt-sql wt-nucleos wt-oracle wt-flag wt-health wt-api wt-heartbeat wt-reclaim \
         e2e-backend e2e-backend-down e2e-net-check e2e-up e2e-smoke e2e-playwright e2e-url e2e-down e2e-oracle-counts \
         run-e2e-smoke-golden \
@@ -328,6 +330,20 @@ pm-gate-manifest-regen:
 	$(WT_ENV) PM_GATE_MANIFEST_MODE='$(or $(MODE),gate)' PM_GATE_MANIFEST_FROM='$(FROM)' \
 	  PM_GATE_MANIFEST_OUT='$(OUT)' PM_GATE_MANIFEST_ALLOW_DROP='$(ALLOW_DROP)' \
 	  PM_GATE_MANIFEST_REASON='$(REASON)' ./pm.sh gate-manifest-regen
+# Promueve el manifiesto CANONICO (config/pm-gate-manifest.json) desde un manifiesto de rama YA
+# medido (o un result.json de evidencia) -- canal DISTINTO de pm-gate-manifest-regen (que solo
+# escribe manifiestos de RAMA). No exige WT: opera sobre archivos de evidencia/manifiesto que ya
+# existen en el sidecar, sin correr ninguna suite. Fail-closed en las condiciones de confianza
+# C1-C7 (ver scripts/pm-gate-manifest-promote.py y README §Manifiesto de conteos).
+pm-gate-manifest-promote:
+	@if [ -z "$(FROM)" ]; then echo "pm-gate-manifest-promote exige FROM=<manifiesto-de-rama-o-result.json>" >&2; exit 2; fi
+	@if [ -z "$(PM_SHA)" ]; then echo "pm-gate-manifest-promote exige PM_SHA=<sha40-de-develop-post-merge>" >&2; exit 2; fi
+	python3 scripts/pm-gate-manifest-promote.py \
+	  --canonical config/pm-gate-manifest.json --out '$(or $(OUT),config/pm-gate-manifest.json)' \
+	  --from '$(FROM)' --pm-sha '$(PM_SHA)' \
+	  $(if $(EVIDENCE),--evidence '$(EVIDENCE)',) \
+	  $(if $(filter 1,$(TRUST_DIRTY)),--trust-dirty --reason '$(REASON)',) \
+	  $(if $(filter 1,$(ALLOW_BASELINE_DROP)),--allow-baseline-drop --allow-baseline-drop-reason '$(REASON)',)
 pm-format:       ; $(PM_ENV) ./pm.sh format          # formatea .cs modificados vs develop (delega a scripts/format.sh in-repo)
 pm-format-check: ; $(PM_ENV) ./pm.sh format-check    # gate de formato changed-vs-develop (delega a scripts/format-check.sh)
 pm-gate-wait:    ; $(PM_ENV) ./pm.sh wait-gate    # espera el veredicto del gate leyendo el .rc canonico (LOG=<ruta.log> o el mas reciente)
