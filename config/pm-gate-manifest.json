@@ -3,14 +3,15 @@
   "solution_path": "PL.PM.sln",
   "project_count": 14,
   "integration_project": "tests/PL.PM.IntegrationTests/PL.PM.IntegrationTests.csproj",
-  "integration_expected_total": 334,
-  "integration_expected_executed": 332,
+  "integration_expected_total": 475,
+  "integration_expected_executed": 473,
   "integration_expected_skipped": 2,
   "sdk_image": "mcr.microsoft.com/dotnet/sdk@sha256:ed034a8bf0b24ded0cbbac07e17825d8e9ebfe21e308191d0f7421eaf5ad4664",
   "sdk_platform": "linux/amd64",
   "expected_sdk_version": "10.0.302",
-  "baseline_pm_sha": "1c67ffb9ae575d270153194d51063ec4c3925d04",
-  "baseline_evidence_id": "20260724T092653Z-59758-pm1c67ffb",
+  "baseline_pm_sha": "d58c8ead96d31ef9a454f6c703f46a273141d1c3",
+  "baseline_evidence_id": "regen-20260725T231129Z-59486",
+  "baseline_evidence_dir": "artifacts/test-logs/gate/regen-20260725T231129Z-59486",
   "baseline_unit_warm_min": 2.546,
   "target_unit_incremental_min": 1.5,
   "required_assets": [
@@ -23,8 +24,8 @@
     {
       "path": "tests/PL.PM.ArchitectureTests/PL.PM.ArchitectureTests.csproj",
       "kind": "architecture",
-      "expected_total": 60,
-      "expected_executed": 60,
+      "expected_total": 71,
+      "expected_executed": 71,
       "expected_skipped": 0,
       "expected_failed": 0
     },
@@ -39,8 +40,8 @@
     {
       "path": "tests/PL.PM.Demand.UnitTests/PL.PM.Demand.UnitTests.csproj",
       "kind": "unit",
-      "expected_total": 601,
-      "expected_executed": 601,
+      "expected_total": 762,
+      "expected_executed": 762,
       "expected_skipped": 0,
       "expected_failed": 0
     },
@@ -55,8 +56,8 @@
     {
       "path": "tests/PL.PM.Jobs.UnitTests/PL.PM.Jobs.UnitTests.csproj",
       "kind": "unit",
-      "expected_total": 69,
-      "expected_executed": 69,
+      "expected_total": 73,
+      "expected_executed": 73,
       "expected_skipped": 0,
       "expected_failed": 0
     },
@@ -103,8 +104,8 @@
     {
       "path": "tests/PL.PM.SharedKernel.UnitTests/PL.PM.SharedKernel.UnitTests.csproj",
       "kind": "unit",
-      "expected_total": 27,
-      "expected_executed": 27,
+      "expected_total": 36,
+      "expected_executed": 36,
       "expected_skipped": 0,
       "expected_failed": 0
     },
@@ -127,10 +128,14 @@
     {
       "path": "tests/PL.PM.UserBulkOperations.UnitTests/PL.PM.UserBulkOperations.UnitTests.csproj",
       "kind": "unit",
-      "expected_total": 202,
-      "expected_executed": 202,
+      "expected_total": 201,
+      "expected_executed": 201,
       "expected_skipped": 0,
       "expected_failed": 0
     }
-  ]
+  ],
+  "scope": "canonical",
+  "generated_at": "2026-07-26T01:16:43Z",
+  "generated_by": "make pm-gate-manifest-promote",
+  "commit": "d58c8ead96d31ef9a454f6c703f46a273141d1c3"
 }

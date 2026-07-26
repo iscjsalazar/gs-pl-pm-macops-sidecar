@@ -504,6 +504,60 @@ explícita y el escritor **rechaza** cualquier salida dentro de `config/`. El `r
 registra `manifest_path`, `manifest_is_canonical` y `regen_mode`, y el verde de una corrida de observación
 se sella como `manifest_regen_observed` para que no se confunda con el sello del gate.
 
+### Promover el canónico post-merge de pm
+
+**Causa estructural:** el baseline de conteos (`config/pm-gate-manifest.json`) vive en este repo
+(sidecar) mientras las pruebas que describe viven en `pl-programa-maestro`. Todo PR de pm que mueva
+conteos (altas/bajas de `[Fact]`/`[Theory]`, proyectos de prueba nuevos o retirados) desincroniza el
+canónico hasta que un PR del sidecar lo **promueve**. Sin esa promoción, cada rama de pm que mida esos
+mismos conteos vuelve a chocar con `coverage_manifest_mismatch` contra un baseline rancio y se ve forzada
+a manifiestos de rama o a `ALLOW_DROP` tácticos por una caída que en realidad ya es el nuevo estado real
+de `develop`.
+
+**Cuándo aplica:** justo después de que un tren de pm mergee a `develop` y haya movido conteos (el propio
+tren ya debió promover -o dejar listo- su **manifiesto de rama** antes del PR, sección anterior).
+
+**Comando** (worktree o checkout del sidecar; no exige `WT=`, no corre ninguna suite — opera sobre
+archivos de evidencia/manifiesto que ya existen):
+
+```bash
+# Camino preferido (con re-verificacion independiente):
+make pm-gate-manifest-promote \
+  FROM=artifacts/gate-manifests/pm-gate-manifest-<worktree-pm>.json \
+  PM_SHA=<sha40-de-develop-post-merge> \
+  EVIDENCE=artifacts/test-logs/gate/<run_id>/ \
+  [TRUST_DIRTY=1 REASON='…']   # solo si la medicion de origen fue dirty (ver tabla)
+
+# Camino degradado (sin re-verificacion independiente; solo cuando EVIDENCE no esta
+# disponible): omitir EVIDENCE=. El resumen imprime evidence_verified=no y un aviso
+# manifest_promote_warn en stderr. Preferir siempre el camino con EVIDENCE.
+```
+
+| Perilla | Efecto |
+|---|---|
+| `FROM=<ruta>` | manifiesto de rama (`scope=branch`, escrito por `pm-gate-manifest-regen`) o, directo, un `result.json` de evidencia sellada. |
+| `PM_SHA=<sha40>` | obligatorio; el SHA de `pl-programa-maestro` que aterrizó en `develop` (el merge/squash, nunca el de la rama local). El script no lo adivina. |
+| `EVIDENCE=<dir>` | **recomendado** (camino fuerte). Directorio de evidencia sellada (`result.json`): re-verifica el verde de forma independiente, exige que la evidencia **cubra el mismo conjunto de proyectos** que `FROM` (un proyecto ausente es rechazo, no omisión) y prefiere su `run_id` real. Sin `EVIDENCE=` el promote corre en **modo degradado** (`evidence_verified=no` en el resumen + `manifest_promote_warn` en stderr): confía solo en el auto-reporte de `FROM`. |
+| `TRUST_DIRTY=1 REASON='…'` | obligatorio cuando la medición de origen es dirty o su SHA/`git_head` difiere de `PM_SHA` — el caso **normal** de un tren pre-commit que luego aterriza como squash. `REASON` declara que el contenido medido es el que aterrizó en `PM_SHA`. |
+| `OUT=<ruta>` | destino (default: el propio `config/pm-gate-manifest.json`); los contract tests usan una ruta temporal para no pisar el canónico real durante una corrida de fixture. |
+| `ALLOW_BASELINE_DROP=1 REASON='…'` | perilla **distinta** de `ALLOW_DROP` de rama: solo hace falta si el promote baja conteos respecto del canónico actual y esa caída **no** viene ya documentada en `drops_allowed`/`drop_justification` del propio manifiesto de rama (si ya viene justificada ahí, el promote la incorpora sin pedir el flag de nuevo). |
+
+**Condiciones de confianza (fail-closed; si alguna falla, no escribe nada):** la fuente trae conteos
+completos (proyectos + integración **medida**, nunca heredada); está en verde; con `EVIDENCE=` se
+re-verifica en verde directo contra su `result.json`, con paridad de contenido **y** cobertura del
+mismo conjunto de proyectos (ausencia de un proyecto de la fuente en la evidencia = rechazo); sin
+`EVIDENCE=` el promote es modo degradado y lo declara en el output (`evidence_verified=no`);
+`PM_SHA` es obligatorio y de 40 hex; una medición dirty exige `TRUST_DIRTY`+`REASON`; ninguna
+caída de conteos pasa sin justificación (propia o vía `ALLOW_BASELINE_DROP`); la escritura es
+atómica (`tmp` + `replace`). El guard `coverage_manifest_mismatch` del gate **no se toca** — lo
+único que cambia es que el baseline contra el que compara deja de estar rancio.
+
+`scripts/pm-gate-manifest-write.py` (manifiestos de RAMA) sigue **prohibido** de escribir en `config/`
+(exit 4): `scripts/pm-gate-manifest-promote.py` es el **único** canal que mueve el canónico, y solo lo
+mueve con procedencia fechable —`generated_at` (instante del promote), `commit`/`baseline_pm_sha`
+(el mismo SHA de pm, en ambos campos por compatibilidad con lectores existentes) y
+`baseline_evidence_id`/`baseline_evidence_dir`—, nunca por edición manual.
+
 ## Paralelismo
 
 La unidad de aislamiento de **sesiones** es el **slot** (`make wt-up WT=<worktree>`; ver §Comandos — aprovisionamiento por worktree). `PROJECT`/`OFFSET` queda **solo** para stacks compose manuales del data tier y está **DEPRECADO como ambiente de trabajo**: `make pm-run PROJECT=… OFFSET=…` emite un warning deprecado sin bloquear. Para esos stacks manuales sigue aplicando la regla histórica: cada stack levanta su propio SQL/Oracle/API **y su propio bus** (`5672+OFFSET`); el bus **no** se comparte entre suites concurrentes (las entidades de `Config.json` son fijas y los tests drenan subscriptions, así que dos agentes contra el mismo stack competirían por los mismos mensajes) — un agente = un stack.
