@@ -1654,10 +1654,12 @@ pm_gate_run_integration_physical() {
   wt_require_intel || { pm_unit_phase_end integration_prepare failed 1; return 1; }
 
   # Warm reuse si sano
+  local warm_reused=0
   if [ "${PM_WT_WARM:-1}" = "1" ]; then
     wt_derive "$gate_slot"
     if on_intel "curl -fsS -o /dev/null http://127.0.0.1:$PM_API_PORT/health/live" 2>/dev/null && wt_oracle_running; then
       WT_ORACLE_ACTIVE=1
+      warm_reused=1
       pm_unit_log "WARM slot $gate_slot sano -> reusa aprovisionamiento"
     else
       pm_unit_log "WARM pero slot no sano -> wt-up"
@@ -1679,6 +1681,12 @@ pm_gate_run_integration_physical() {
   local bport pw; bport="$(wt_bridge_port)"
   wt_bridge_up || { pm_unit_phase_end integration_prepare failed 1; return 1; }
   pw="$(wt_shared_sql_password)" || { pm_unit_phase_end integration_prepare failed 1; return 1; }
+  # S1 (T-012/D63): en reuso WARM, el slot "sano" nunca paso por wt_ensure_planning_rcsi -- releer
+  # aqui, fail-closed, antes de migrar/correr la suite bajo un regimen de bloqueo potencialmente
+  # distinto al de Azure SQL dev/prod. Solo lectura: no repara en caliente (ver wt_require_planning_rcsi).
+  if [ "$warm_reused" = "1" ]; then
+    wt_require_planning_rcsi "$pw" || { pm_unit_phase_end integration_prepare failed 1; return 1; }
+  fi
   PM_TEST_SQL_HOST="$m1host"; PM_SQL_HOST_PORT="$bport"; PM_SQL_SA_PASSWORD="$pw"
   PM_SERVICEBUS_HOST="$m1host"; PM_SB_HOST_PORT="$PM_WT_BUS_HOST_PORT"; PM_API_HOST="$m1host"
   pm_ef_migrate "$(pm_planning_connstr)" || { pm_unit_phase_end integration_prepare failed 1; return 1; }

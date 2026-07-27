@@ -497,6 +497,7 @@ assert d["commit"]=="'"$SHA40"'" and d["baseline_pm_sha"]=="'"$SHA40"'"
 assert sum(p["expected_total"] for p in d["projects"])==140
 assert d["integration_expected_total"]==340
 assert "drops_allowed" not in d and "drop_justification" not in d
+assert d["evidence_verified"] is False
 ' "$tmp/promote-out-d.json"; then ok "promote feliz a OUT temporal no pisa el canonico real"; else bad "promote feliz a OUT temporal no pisa el canonico real (rc=$rc)"; fi
 
 # (d2) S2: con --evidence completa y verde, evidence_verified=yes (sin warn de modo degradado)
@@ -521,6 +522,7 @@ if [ "$rc" -eq 0 ] && [ -f "$tmp/promote-out-d2.json" ] && echo "$out" | grep -q
 import json,sys
 d=json.load(open(sys.argv[1]))
 assert d["baseline_evidence_id"]=="run-green"
+assert d["evidence_verified"] is True
 ' "$tmp/promote-out-d2.json"; then
   ok "promote con --evidence completa -> evidence_verified=yes"
 else

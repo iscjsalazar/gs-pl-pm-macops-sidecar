@@ -35,6 +35,11 @@ script NO escribe nada y termina con exit != 0:
      canales).
   C7 el destino se escribe ATOMICO (tmp + replace).
 
+El documento escrito lleva "evidence_verified" (bool, T-012/D41): true cuando el promote corrio
+con --evidence y la re-verificacion independiente (C2) paso; false cuando el promote confio en el
+auto-reporte de --from (modo degradado). El campo siempre esta presente -- ausencia de clave no es
+un valor valido; los lectores/tests lo leen del archivo escrito, no de stdout.
+
 Este script es el UNICO canal autorizado para mover config/pm-gate-manifest.json.
 scripts/pm-gate-manifest-write.py sigue prohibido de tocar config/ (exit 4 en ese script; no se
 relaja aqui ni en ningun otro lado).
@@ -383,6 +388,7 @@ def main(argv=None):
         "generated_at": now_iso,
         "generated_by": "make pm-gate-manifest-promote",
         "commit": args.pm_sha,
+        "evidence_verified": evidence_verified,
     }
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
