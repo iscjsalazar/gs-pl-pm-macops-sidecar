@@ -255,10 +255,23 @@ de bloqueo lector-escritor que el destino real no tiene. El ajuste corre **antes
 slot (el `ALTER DATABASE` de RCSI exige sesión única) y es **idempotente**: sólo entra a `SINGLE_USER` cuando
 el flag está OFF, así que un `wt-up` repetido sobre un slot ya alineado es net-cero. Verificación:
 `make wt-sql WT=<folder> SQL="SELECT is_read_committed_snapshot_on FROM sys.databases WHERE name='pm_planning_wt<N>'"`
-debe devolver `1`. **Gotcha:** `make pm-gate`/`pm-test-clean … WARM=1` reusa el aprovisionamiento del slot si
-la API ya responde sana (ver §Gate vs inner-loop) y por tanto **NO** re-corre `wt-up`/el ensure de RCSI: sobre
-un slot creado antes de este cambio, `WARM=1` no repara el flag por sí solo — hace falta un `wt-up` (sin
-`WARM`) sobre ese slot, o un `wt-down` + `wt-up`, al menos una vez.
+debe devolver `1`. **Gotcha:** sobre un slot creado antes de este cambio, hace falta un `wt-up` (sin `WARM`) o un
+`wt-down` + `wt-up` al menos una vez para alinear RCSI. **Fail-closed en el reuso WARM (T-012):**
+cuando la rama de reuso de `pm_gate_run_integration_physical` se alcanza con `PM_WT_WARM=1`, el gate
+**relee** `is_read_committed_snapshot_on` del slot reusado; si no es `1` (o la lectura falla), **aborta**
+con `exit ≠ 0` y un mensaje que nombra la BD y la remediación. El check es de **solo lectura**: no repara
+en caliente (activar RCSI en la rama warm exigiría `SINGLE_USER`, que cortaría la API viva del slot y
+rompería el propósito del reuso); la reparación sigue siendo el `wt-up` sin `WARM` de arriba.
+**Alcance actual de los targets públicos:** `make pm-gate` / `make pm-test-clean` (con o sin `WARM=1`)
+pasan por el paso 2 de `pm_gate_macdata_run`, que invoca `cmd_wt_up` de forma **incondicional** y por
+tanto re-corre el ensure de RCSI **antes** de la rama warm — hoy esos targets no dejan un slot con
+RCSI OFF llegar al fail-closed de reuso. El guard protege la rama cuando se invoca; el hueco de
+alcanzabilidad por target público es residual de diseño del gate (no se cierra en este cambio).
+
+**Auto-sane de un `SINGLE_USER` colgado.** Si el proceso de `wt-up` muere entre el `SET SINGLE_USER` y el
+`SET MULTI_USER` del ensure de RCSI, la BD queda en `SINGLE_USER` hasta el siguiente `wt-up`: éste reconecta
+contra `master`, relee el flag (sigue `OFF` porque el `ALTER` de RCSI no llegó a correr) y reintenta el batch
+completo. No requiere `ALTER` manual del operador salvo un estado irrecuperable ajeno a este flujo.
 
 **Operación (reglas).** El `health.aspx` comparte pool con la aplicación, así que **no se le hace polling en bucle**:
 eso mata el *idle-timeout* de 20 min que sostiene el presupuesto de RAM del guest. El orden canónico de cierre es
@@ -564,6 +577,11 @@ mismo conjunto de proyectos (ausencia de un proyecto de la fuente en la evidenci
 caída de conteos pasa sin justificación (propia o vía `ALLOW_BASELINE_DROP`); la escritura es
 atómica (`tmp` + `replace`). El guard `coverage_manifest_mismatch` del gate **no se toca** — lo
 único que cambia es que el baseline contra el que compara deja de estar rancio.
+
+**Procedencia persistida (T-012).** El documento escrito lleva `"evidence_verified": true|false` — **siempre
+presente**, nunca ausente ni `null` — coherente con el `evidence_verified=yes|no` que ya imprimía stdout: la
+diferencia es que ahora también queda en el JSON canónico (o de `--out`), así que un lector del archivo (o un
+test) puede confirmar la procedencia de la promoción sin depender de haber capturado el log de la corrida.
 
 `scripts/pm-gate-manifest-write.py` (manifiestos de RAMA) sigue **prohibido** de escribir en `config/`
 (exit 4): `scripts/pm-gate-manifest-promote.py` es el **único** canal que mueve el canónico, y solo lo

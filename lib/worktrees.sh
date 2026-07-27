@@ -655,6 +655,12 @@ _wt_build_api_image() {  # uso: _wt_build_api_image <ctx> <img> <src-sha>
 # de la BD a la que el propio batch esta conectado en modo multi-sesion falla o se bloquea. Idempotente: solo
 # entra a SINGLE_USER cuando el flag esta OFF; reaplicar sobre una BD ya alineada es net-cero (no-op logueado).
 # Fail-closed: si la relectura post-ALTER no confirma ON, aborta sin continuar a wt_up_api/seed.
+# Auto-sane de un SINGLE_USER colgado (T-012/C1): si el batch muere entre el SET SINGLE_USER y el SET
+# MULTI_USER (p.ej. el proceso de wt-up se mata a media ejecucion), la BD queda en SINGLE_USER hasta el
+# siguiente wt-up: esta funcion vuelve a conectar contra 'master' (no requiere sesion previa sobre la BD
+# afectada), relee is_read_committed_snapshot_on = 0 (sigue OFF porque el ALTER de RCSI no llego a correr)
+# y reintenta el batch completo (SINGLE_USER -> RCSI ON -> MULTI_USER) en la siguiente invocacion. No exige
+# ALTER manual del operador salvo un estado irrecuperable ajeno a este flujo (p.ej. la BD dropeada a medias).
 wt_ensure_planning_rcsi() {  # uso: wt_ensure_planning_rcsi <password>
   local pw="$1"
   wt_log "verificando READ_COMMITTED_SNAPSHOT/ALLOW_SNAPSHOT_ISOLATION de '$PM_PLANNING_DB' (paridad Azure SQL dev/prod) ..."
@@ -690,6 +696,24 @@ SQL
     wt_die "RCSI de '$PM_PLANNING_DB' NO quedo ON tras el ALTER (relectura='${rcsi:-<vacio>}'); no se continua a wt_up_api/seed"
     return 1
   fi
+}
+
+# Solo-lectura, fail-closed: la releida que falta en el reuso WARM=1 de pm_gate_run_integration_physical
+# (T-012/D63), donde el slot "sano" (health + Oracle up) se reusa SIN pasar por wt_ensure_planning_rcsi.
+# NUNCA hace ALTER aqui: activar RCSI en caliente exige SINGLE_USER, que corta las conexiones vivas de la
+# API del slot -- eso destruye el proposito del reuso que WARM=1 existe para preservar. Si el flag no esta
+# ON (o la lectura no responde "1"), aborta: el camino frio (wt_ensure_planning_rcsi, via 'make wt-up' o
+# 'make pm-gate' con WARM=0, el default del Makefile) es la unica via de reparacion.
+wt_require_planning_rcsi() {  # uso: wt_require_planning_rcsi <password>
+  local pw="$1"
+  local rcsi
+  rcsi="$(wt_shared_scalar "$pw" "SET NOCOUNT ON; SELECT CAST(is_read_committed_snapshot_on AS int) FROM sys.databases WHERE name = N'$PM_PLANNING_DB'")"
+  if [ "$rcsi" = "1" ]; then
+    wt_log "WARM reuso: RCSI de '$PM_PLANNING_DB' ON (paridad Azure SQL dev/prod confirmada por relectura)"
+    return 0
+  fi
+  wt_die "WARM reuso: RCSI de '$PM_PLANNING_DB' esta OFF (relectura='${rcsi:-<vacio>}') -- el slot reusado NO reproduce el regimen de bloqueo de Azure SQL dev/prod; repara con 'make wt-up WT=<folder>' (o 'make pm-gate WT=<folder>' sin WARM=1, el default) antes de reintentar WARM=1"
+  return 1
 }
 
 # Construye la imagen de la API desde el CODIGO DEL WORKTREE y corre su contenedor unido al SQL compartido
