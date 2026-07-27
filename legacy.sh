@@ -20,6 +20,19 @@ WRAPPER_DIR="${PM_WRAPPER_DIR:-$(_find_root "$HERE" || true)}"
 [ -n "$WRAPPER_DIR" ] || { printf 'ERROR: no se localizo la raiz del proyecto (ancestro con gs-pl-pm-macops-sidecar/); fija PM_WRAPPER_DIR\n' >&2; exit 1; }
 SIDECAR_CENTRAL_DIR="$WRAPPER_DIR/gs-pl-pm-macops-sidecar"
 WT_REGISTRY="${PM_WT_REGISTRY:-$SIDECAR_CENTRAL_DIR/.worktrees/slots.tsv}"   # registro compartido folder->slot
+# Helpers puros del registro de slots (T-015): se reusan wt_pid_dead/wt_is_num/wt_slot_row_by_slot/
+# wt_lease_reclaimable/wt_age_secs y, para slot-claim/slot-release, wt_slot_lookup/wt_slot_assign/
+# wt_slot_release/wt_slot_touch/wt_registry_lock. Se sourcea unicamente lib/worktrees.sh (no lib/common.sh):
+# esas funciones son puras (sin SSH/Docker) y este archivo no ejecuta nada al sourcearse mas alla de defaults
+# de variables (verificado; PM_WT_REGISTRY abajo apunta al MISMO registro que WT_REGISTRY, derivado arriba).
+# NO se reusa wt_reclaim_dead_leases/wt_probe_live_slots (requieren on_intel/remote_docker_ctx de lib/common.sh,
+# fuera del alcance de este driver): un slot-claim con el pool lleno remite a 'make wt-gc FORCE=1' /
+# 'make wt-reclaim WT=<folder>' en vez de reclamar inline.
+PM_WT_REGISTRY="$WT_REGISTRY"
+PM_WT_SLOTS="${PM_WT_SLOTS:-8}"        # tamaño del pool que wt_slot_assign recorre (mismo default que lib/common.sh)
+PM_WT_LEASE_TTL="${PM_WT_LEASE_TTL:-3600}"  # TTL del arrendamiento (mismo default que lib/common.sh); lo consume wt_lease_reclaimable
+# shellcheck source=lib/worktrees.sh
+. "$HERE/lib/worktrees.sh"
 
 # --- Config (defaults; el Makefile traduce vars cortas a estas PM_LEGACY_*) ---
 MACDATA="${PM_LEGACY_MACDATA:-macdata}"                       # alias SSH de la mac Intel
@@ -167,6 +180,115 @@ require_slot(){
   printf '       La via singleton (site pm:8080, arbol C:\\src) esta deprecada (process-e2e-local-slots.md §5) y\n' >&2
   printf '       ademas toma y RETIENE guest-turn; para usarla deliberadamente: make legacy-%s SINGLETON=1\n' "$verb" >&2
   exit 2
+}
+
+# --- Guard de arrendamiento (lease) de SLOT en build/launch/deploy (T-015; S1 de T-013/D80) ------------------
+# Un SLOT numerico por si solo NO prueba que el arbol guest C:\wt<N> sea tuyo: sin este guard, un
+# 'legacy-build SLOT=<N> CLEAN=1' de una sesion podia hacer wipe del arbol de OTRA sesion que ya tenia ese
+# mismo SLOT arrendado en slots.tsv (caso observado: T-013 sobre SLOT=0 vivo de otra sesion). Corre DESPUES de
+# require_slot (SLOT ya resuelto) y ANTES de cualquier stage/wipe/deploy (guest_turn_acquire/stage_build/deploy).
+#
+# Clasificacion (semantica de "duena viva" IDENTICA a wt_lease_reclaimable de lib/worktrees.sh — Hecho #4
+# del analisis T-015 / M1 r1): dueña viva = pid vivo O heartbeat fresco dentro de PM_WT_LEASE_TTL (default 3600 s).
+# Todo verbo del proyecto que escribe slots.tsv (wt-up, wt-heartbeat, e2e-url) es un CLI de un disparo: owner_pid
+# esta casi siempre muerto aunque el arrendamiento siga activo; el latido operativo es el heartbeat, no el pid.
+#   - sin fila para el SLOT                          -> permite (log informativo; ver slot-claim para evitar la carrera)
+#   - fila reclamable (pid muerto Y hb > TTL)        -> permite con AVISO (arrendamiento huerfano; el registro lo retira
+#                                                       wt-reclaim/wt-gc, fuera de este verbo)
+#   - fila con dueña viva y folder == WT             -> permite (folder propio; identidad = columna 1 de slots.tsv, NO el
+#                                                       worktree de FUENTE del legado, que es ortogonal via SRC_LOCAL)
+#   - fila con dueña viva y folder != WT             -> EXIT 3 (fail-closed) salvo override explicito
+#
+# Escape UNICO: LEASE_OVERRIDE=1 + LEASE_OVERRIDE_REASON=<texto no vacio> (make: LEASE_OVERRIDE /
+# LEASE_OVERRIDE_REASON; driver: PM_LEGACY_LEASE_OVERRIDE / PM_LEGACY_LEASE_OVERRIDE_REASON), con log
+# '[LEASE-OVERRIDE]' inequivoco. FORCE=1 (PM_LEGACY_FORCE) NO es este escape y esta funcion no lo lee: FORCE ya
+# significa "rebuild/redeploy aunque health 200" sobre TU slot; sobrecargarlo para "pisa el slot de otra sesion"
+# mezclaria ambos significados y volveria el guard un bypass silencioso en el uso rutinario de FORCE=1 propio.
+LEASE_OVERRIDE="${PM_LEGACY_LEASE_OVERRIDE:-0}"
+LEASE_OVERRIDE_REASON="${PM_LEGACY_LEASE_OVERRIDE_REASON:-}"
+
+require_slot_lease(){
+  local verb="$1"
+  [ -n "$SLOT" ] || return 0   # singleton: fuera de alcance de este guard (arbol C:\src, protegido por guest-turn)
+  if [ "$LEASE_OVERRIDE" = "1" ] && [ -z "$LEASE_OVERRIDE_REASON" ]; then
+    printf 'ERROR: LEASE_OVERRIDE=1 exige LEASE_OVERRIDE_REASON=<texto> (motivo del override).\n' >&2
+    printf '       uso: make legacy-%s SLOT=%s LEASE_OVERRIDE=1 LEASE_OVERRIDE_REASON="<motivo>"\n' "$verb" "$SLOT" >&2
+    exit 2
+  fi
+  local row folder created pid hb
+  row="$(wt_slot_row_by_slot "$SLOT")"
+  if [ -z "$row" ]; then
+    log "lease: slot $SLOT sin fila en $WT_REGISTRY -> permite (para evitar carrera con un wt-up/legacy-slot-claim concurrente, reserva antes con 'make legacy-slot-claim WT=<folder-legacy>')"
+    return 0
+  fi
+  # Fila: folder\tslot\tproject\toffset\tcreated\towner_pid\theartbeat
+  IFS=$'\t' read -r folder _ _ _ created pid hb <<EOF
+$row
+EOF
+  # Reusa wt_lease_reclaimable (misma semántica que wt-reclaim/wt-gc): reclamable <=> pid muerto AND hb > TTL.
+  # Negacion = dueña viva = pid vivo O heartbeat fresco (el caso comun: CLI de un disparo ya terminado).
+  if wt_lease_reclaimable "$pid" "$hb" "$created"; then
+    warn "lease: slot $SLOT arrendado por '$folder' pero es reclamable (pid ${pid:-<ninguno>} muerto y heartbeat ${hb:-<sin hb>} rancio > ${PM_WT_LEASE_TTL}s) -> permite (arrendamiento huerfano; el registro se retira con 'make wt-reclaim WT=$folder' o 'make wt-gc FORCE=1', fuera de este verbo)"
+    return 0
+  fi
+  if [ -n "${WT:-}" ] && [ "$WT" = "$folder" ]; then
+    log "lease: slot $SLOT arrendado por '$folder' (folder propio, WT=$WT) -> permite"
+    return 0
+  fi
+  if [ "$LEASE_OVERRIDE" = "1" ]; then
+    warn "[LEASE-OVERRIDE] slot $SLOT folder=$folder pid=$pid reason='$LEASE_OVERRIDE_REASON' by $(hostname -s 2>/dev/null || echo m1):$$"
+    return 0
+  fi
+  printf 'ERROR: slot %s esta arrendado por la sesion "%s" (pid %s, heartbeat %s; dueña viva = pid vivo o heartbeat fresco dentro de TTL %ss): legacy-%s se ABORTA para no pisar su arbol C:\\wt%s.\n' \
+    "$SLOT" "$folder" "${pid:-<ninguno>}" "${hb:-<sin heartbeat>}" "${PM_WT_LEASE_TTL}" "$verb" "$SLOT" >&2
+  printf '       Si ese folder eres TU: pasa WT=%s para afirmar la identidad del arrendamiento.\n' "$folder" >&2
+  printf '       Para un slot propio en una tarea solo-legado (worktree sin PL.PM.sln): make legacy-slot-claim WT=<tu-folder-legacy>.\n' >&2
+  printf '       Override deliberado (coordinado con la duena viva): LEASE_OVERRIDE=1 LEASE_OVERRIDE_REASON="<motivo>" make legacy-%s SLOT=%s ...\n' "$verb" "$SLOT" >&2
+  exit 3
+}
+
+# --- Claim/release ligero de arrendamiento (solo-legacy, sin PL.PM.sln) --------------------------------------
+# Reusa el POOL de slots.tsv (wt_slot_assign/wt_slot_release/wt_slot_touch de lib/worktrees.sh) SOLO para
+# reservar folder+numero de slot: NO aprovisiona API/Oracle/BD (eso sigue siendo 'wt-up'/'e2e-up'). Exige el
+# marcador de legado (ProgramaMaestroPT.sln) para no consumir una fila del registro COMPARTIDO con una clave que
+# no es un worktree de codigo (mismo criterio que wt_resolve_folder en lib/worktrees.sh). Identidad = WT=<folder>,
+# el mismo nombre que ya resuelve la fuente del legado en _resolve_legacy_src y que exige require_slot_lease.
+slot_claim(){
+  local folder="${WT:-}"
+  [ -n "$folder" ] || { printf 'ERROR: legacy-slot-claim exige WT=<folder-legacy> (worktree con ProgramaMaestroPT.sln bajo worktrees/).\n' >&2; exit 2; }
+  [ -f "$WRAPPER_DIR/worktrees/$folder/ProgramaMaestroPT.sln" ] \
+    || { printf 'ERROR: worktrees/%s no contiene ProgramaMaestroPT.sln; legacy-slot-claim es SOLO para worktrees solo-legado (para pl-programa-maestro usa make wt-up WT=%s).\n' "$folder" "$folder" >&2; exit 2; }
+  local slot
+  slot="$(wt_registry_lock wt_slot_assign "$folder" "")" || slot=""
+  if [ -z "$slot" ]; then
+    printf 'ERROR: sin slots libres (PM_WT_SLOTS=%s). Libera uno con "make wt-gc FORCE=1" (huerfanos/arrendamientos muertos) o "make wt-reclaim WT=<folder>" (uno especifico), y reintenta.\n' "${PM_WT_SLOTS:-8}" >&2
+    exit 1
+  fi
+  wt_registry_lock wt_slot_touch "$folder"
+  log "slot $slot arrendado a '$folder' (SOLO registro: NO aprovisiona API/Oracle/BD; para eso usa wt-up/e2e-up)"
+  printf '   siguiente paso:      make legacy-build SLOT=%s WT=%s\n' "$slot" "$folder"
+  printf '   liberar al terminar: make legacy-slot-release WT=%s\n' "$folder"
+}
+
+slot_release(){
+  local folder="${WT:-}"
+  [ -n "$folder" ] || { printf 'ERROR: legacy-slot-release exige WT=<folder-legacy>.\n' >&2; exit 2; }
+  local slot pid
+  slot="$(wt_slot_lookup "$folder")"
+  if [ -z "$slot" ]; then log "'$folder' no tiene slot arrendado; nada que liberar"; return 0; fi
+  pid="$(wt_slot_row_by_slot "$slot" | awk -F'\t' '{print $6}')"
+  # Espejo de "no robar a una duena viva": otro proceso (mismo folder, otra corrida) sigue vivo -> exige el
+  # mismo override que require_slot_lease, no un segundo mecanismo.
+  if [ "$pid" != "$$" ] && ! wt_pid_dead "$pid" && [ "$LEASE_OVERRIDE" != "1" ]; then
+    printf 'ERROR: el slot %s de "%s" lo sostiene otro proceso vivo (pid %s); si es una liberacion coordinada usa LEASE_OVERRIDE=1 LEASE_OVERRIDE_REASON="<motivo>".\n' "$slot" "$folder" "$pid" >&2
+    exit 3
+  fi
+  wt_registry_lock wt_slot_release "$folder"
+  log "slot $slot liberado ('$folder')"
+  # Desmontaje del site del guest: OPCIONAL, y deliberadamente MANUAL (no automatico aqui): site_down deriva
+  # SITE_NAME/TUNNEL_PORT del SLOT con el que arranco ESTE proceso (top de legacy.sh), no del slot resuelto por
+  # folder; re-invocar el mismo binario con SLOT=<n> explicito evita re-derivar ese estado a mano.
+  log "si 'legacy-build/launch' llego a desplegar el site del slot $slot, retiralo con: PM_LEGACY_SLOT=$slot ./legacy.sh site-down"
 }
 
 # --- Warning de TUNNEL= ad-hoc en legacy-tunnel (no bloquea) -----------------
@@ -469,6 +591,8 @@ legacy.sh <verbo>  (orquesta el lanzamiento del legado; idempotente)
   down          cierra el tunel SSH y libera el turno del guest singleton
   site-down     desmonta el site per-slot del guest (exige SLOT; nunca toca el singleton)
   sites-status  lista los sites 'pm*' del guest cruzados con el registro de slots (marca huerfanos)
+  slot-claim    arrienda un SLOT SOLO en el registro (sin PL.PM.sln; NO aprovisiona API/Oracle/BD); exige WT=<folder-legacy>
+  slot-release  libera el arrendamiento de slot-claim (exige WT=<folder-legacy>)
   turn-status   estado del turno del guest singleton
   turn-heartbeat refresca el heartbeat del turno propio (sesiones largas de uso del site)
   turn-release  libera el turno del guest singleton de ESTA sesion
@@ -477,18 +601,24 @@ Vias:
   singleton (sin SLOT): site 'pm':8080, arbol C:\\src, tunel 18080; serializada por guest-turn.
   per-slot  (SLOT=N):   site 'pm-wt<N>':$SITE_PORT_BASE+N, arbol C:\\wt<N>, tunel $TUNNEL_PORT_BASE+N.
 
+Lease del SLOT (launch/build/deploy): consultan slots.tsv antes de tocar el arbol del guest. Un SLOT arrendado
+por OTRA sesion viva ABORTA (exit 3) salvo folder propio (WT=<folder> = columna 1 de la fila) o override
+explicito LEASE_OVERRIDE=1 LEASE_OVERRIDE_REASON=<motivo> (FORCE=1 NO es este escape). Patron solo-legado (sin
+PL.PM.sln): 'legacy-slot-claim WT=<folder-legacy>' -> anota el SLOT -> 'legacy-build SLOT=<N> WT=<folder-legacy>'
+-> 'legacy-slot-release WT=<folder-legacy>'.
+
 Variables (PM_LEGACY_*): MACDATA WINHOST SLOT SITE_PORT TUNNEL_PORT SQL_PORT ORACLE_PORT DBHOST PROFILE
-                         DATATIER FORCE GUEST_TURN GUEST_LOCK GUEST_LOCK_TIMEOUT
+                         DATATIER FORCE GUEST_TURN GUEST_LOCK GUEST_LOCK_TIMEOUT LEASE_OVERRIDE LEASE_OVERRIDE_REASON
 EOF
 }
 
 case "${1:-}" in
-  launch)   require_slot launch; launch ;;
+  launch)   require_slot launch; require_slot_lease launch; launch ;;
   data-up)  data_up ;;
   vm-up)    vm_up ;;
-  build)    require_slot build; guest_turn_acquire; stage_build; guest_lock_release
+  build)    require_slot build; require_slot_lease build; guest_turn_acquire; stage_build; guest_lock_release
             warn "'build' es solo la COMPUERTA DE COMPILACION del arbol del slot en el guest: si compilo, NO despliega ni re-inyecta el wiring runtime (backendBaseUrl + connection strings), y el site queda con los defaults del repo (backendBaseUrl=\"\"); si se OMITIO por health 200 (sin FORCE=1), el site corre el BINARIO VIEJO. En ambos casos el gateway a pm-api no opera bajo SQL-first: la validacion viva se hace SIEMPRE sobre 'make e2e-up WT=<wt-pm> LEGACYSRC=<path> FORCE=1' (ver process-e2e-local-slots.md D7)." ;;
-  deploy)   require_slot deploy; guest_turn_acquire; deploy; guest_lock_release
+  deploy)   require_slot deploy; require_slot_lease deploy; guest_turn_acquire; deploy; guest_lock_release
             warn "'deploy' publica el binario del slot en IIS pero NO re-inyecta el wiring runtime (backendBaseUrl + connection strings) ni corre la validacion; ademas se OMITE si el site responde health 200 (sin FORCE=1). Valida SIEMPRE sobre 'make e2e-up WT=<wt-pm> LEGACYSRC=<path> FORCE=1' (ver process-e2e-local-slots.md D7)." ;;
   diag)     diag ;;
   diag-logs) diag_logs ;;
@@ -498,6 +628,8 @@ case "${1:-}" in
   down)     tunnel_down; guest_turn_release ;;
   site-down) site_down ;;
   sites-status) sites_status ;;
+  slot-claim)   slot_claim ;;
+  slot-release) slot_release ;;
   turn-status)  [ -x "$GUEST_TURN_SH" ] || die "no se encontro $GUEST_TURN_SH"; "$GUEST_TURN_SH" status ;;
   turn-heartbeat) [ -x "$GUEST_TURN_SH" ] || die "no se encontro $GUEST_TURN_SH"; "$GUEST_TURN_SH" heartbeat ;;
   turn-release) [ -x "$GUEST_TURN_SH" ] || die "no se encontro $GUEST_TURN_SH"; shift; "$GUEST_TURN_SH" release "$@" ;;

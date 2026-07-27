@@ -103,6 +103,12 @@
 #   # Via LEGADA (escape SINGLETON=1, deprecada §5): un solo site/arbol/Web.config -> tomado por 'guest-turn'
 #   #   (una sesion a la vez). Via PER-SLOT (SLOT=N): sites paralelos, sin turno. En ambas, stage->build->deploy
 #   #   lo serializa un lock que vive en macdata (scripts/guest-lock.sh): MSBuild, IIS y los vCPU de la VM son compartidos.
+#   # Lease-guard de SLOT (T-015): legacy-launch/build/deploy consultan slots.tsv ANTES de tocar el arbol del
+#   #   guest; un SLOT arrendado por OTRA sesion viva ABORTA (exit 3) salvo folder propio (WT=<folder> = columna 1
+#   #   de la fila) o LEASE_OVERRIDE=1 LEASE_OVERRIDE_REASON=<motivo> (FORCE=1 NO es este escape: solo rebuild/
+#   #   redeploy de TU slot). Patron solo-legado (worktree sin PL.PM.sln):
+#   [WT obligatorio] make legacy-slot-claim WT=<folder-legacy>    # arrienda SOLO el registro (sin API/Oracle/BD)
+#   [WT obligatorio] make legacy-slot-release WT=<folder-legacy>  # libera el arrendamiento anterior
 #
 # Data tier COMPARTIDO: legacy-data-up lo levanta via pm-run (TARGET=intel). El perfil del legado se
 # controla con LEGACY_PROFILE (default full: requiere Oracle ControlPiso); el de pm con PROFILE (default sql).
@@ -158,12 +164,17 @@ LEGACY_PROFILE?= full
 DATATIER      ?= 1
 FORCE         ?= 0
 MAX           ?= 40
+# Lease-guard de SLOT en build/launch/deploy (T-015): escape UNICO ante una duena viva ajena, distinto de
+# FORCE (que solo significa rebuild/redeploy sobre TU slot). Sin razon, LEASE_OVERRIDE=1 corta en exit 2.
+LEASE_OVERRIDE       ?= 0
+LEASE_OVERRIDE_REASON?=
 
 LEGACY_ENV = PM_LEGACY_MACDATA=$(MACDATA) PM_LEGACY_WINHOST=$(WINHOST) PM_LEGACY_SLOT=$(SLOT) \
              PM_LEGACY_SITE_PORT=$(SITEPORT) PM_LEGACY_TUNNEL_PORT=$(TUNNEL) \
              PM_LEGACY_SQL_PORT=$(SQLPORT) PM_LEGACY_ORACLE_PORT=$(ORACLEPORT) PM_LEGACY_DBHOST=$(DBHOST) \
              PM_LEGACY_PROFILE=$(LEGACY_PROFILE) PM_LEGACY_DATATIER=$(DATATIER) PM_LEGACY_FORCE=$(FORCE) \
              PM_LEGACY_SINGLETON=$(SINGLETON) \
+             PM_LEGACY_LEASE_OVERRIDE=$(LEASE_OVERRIDE) PM_LEGACY_LEASE_OVERRIDE_REASON='$(LEASE_OVERRIDE_REASON)' \
              WT=$(WT) PM_LEGACY_SRC_LOCAL='$(SOLUTION)' PM_WRAPPER_DIR='$(WRAPPER)'
 
 # --- Variables E2E (Opción C: API co-localizada con el data tier en macdata, alcanzable por el guest) ---
@@ -275,6 +286,7 @@ WT_ENV = $(PM_ENV) $(MANIFEST_ENV) WT=$(WT) PM_WT_SLOTS=$(SLOTS) PM_WT_ORACLE=$(
         run-e2e-smoke-golden \
         legacy-launch legacy-data-up legacy-vm-up legacy-build legacy-deploy legacy-diag legacy-diag-logs \
         legacy-tunnel legacy-status legacy-url legacy-down legacy-site-down legacy-sites-status \
+        legacy-slot-claim legacy-slot-release \
         legacy-turn-status legacy-turn-heartbeat legacy-turn-release help
 
 # --- data tier + API ---
@@ -535,6 +547,8 @@ legacy-url:       ; $(LEGACY_ENV) ./legacy.sh url
 legacy-down:      ; $(LEGACY_ENV) ./legacy.sh down
 legacy-site-down:    ; $(LEGACY_ENV) ./legacy.sh site-down
 legacy-sites-status: ; $(LEGACY_ENV) ./legacy.sh sites-status
+legacy-slot-claim:   ; $(LEGACY_ENV) ./legacy.sh slot-claim
+legacy-slot-release: ; $(LEGACY_ENV) ./legacy.sh slot-release
 legacy-turn-status:    ; $(LEGACY_ENV) ./legacy.sh turn-status
 legacy-turn-heartbeat: ; $(LEGACY_ENV) ./legacy.sh turn-heartbeat
 legacy-turn-release:   ; $(LEGACY_ENV) ./legacy.sh turn-release

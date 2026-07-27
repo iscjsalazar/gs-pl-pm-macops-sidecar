@@ -255,6 +255,10 @@ e2e_check_guest_sql(){
 # Lanza el legado EN EL SLOT. SLOT/SITEPORT/TUNNEL/ORACLEPORT/DBHOST viajan como VARIABLES DE MAKE: LEGACY_ENV
 # las expande como prefijo de la linea de comando de la receta, asi que un valor pasado por entorno se pisaria
 # en silencio (todos los frontends acabarian apuntando al Oracle singleton :1521).
+# WT="$WT" (T-015): afirma la identidad del arrendamiento ante el lease-guard de legacy.sh (require_slot_lease).
+# $WT ya es el folder EXACTO que 'wt-up' escribio en slots.tsv para este slot (resuelto arriba por
+# wt_slot_lookup); pasarlo EXPLICITO en vez de confiar en que el sub-make herede WT del entorno evita que un
+# cambio futuro en como se invoca este make (o en la exportacion de WT) rompa e2e-up en silencio bajo el guard.
 e2e_legacy_launch(){  # uso: e2e_legacy_launch [force]
   local force="${1:-$FORCE}"
   PM_LEGACY_BACKEND_URL="$BACKEND_URL" \
@@ -264,7 +268,7 @@ e2e_legacy_launch(){  # uso: e2e_legacy_launch [force]
   PM_LEGACY_SQL_PM_PASS="$E2E_SQL_PW" \
   PM_LEGACY_SQL_READER_USER="$JOBS_READER_USER" \
   PM_LEGACY_SQL_READER_PASS="$JOBS_READER_PASS" \
-  make -C "$BASE_DIR" legacy-launch SOLUTION="$LEGACY_SRC" \
+  make -C "$BASE_DIR" legacy-launch SOLUTION="$LEGACY_SRC" WT="$WT" \
     SLOT="$E2E_SLOT" SITEPORT="$SITEPORT" TUNNEL="$TUNNEL" \
     ORACLEPORT="$E2E_ORACLE_PORT" DBHOST="$PM_GUEST_GATEWAY" FORCE="$force"
 }
