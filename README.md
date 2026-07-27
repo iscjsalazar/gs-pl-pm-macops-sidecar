@@ -103,6 +103,8 @@ ya está arriba (usar `FORCE=1` para forzar rebuild/redeploy).
 | `make legacy-tunnel` / `make legacy-down` | Abre / cierra el túnel SSH M1 → guest (`legacy-down` libera además el turno del guest). |
 | `make legacy-site-down SLOT=<N>` | Desmonta el sitio del slot (site, pool, árbol, raíz, zip, scripts, regla de firewall) y su stage en `macdata`. **Nunca** opera el singleton. |
 | `make legacy-sites-status` | Lista los sitios `pm*` del guest cruzados con el registro de slots; marca huérfanos. |
+| `make legacy-slot-claim WT=<folder-legacy>` | Arrienda un `SLOT` **solo en el registro** (`.worktrees/slots.tsv`): no aprovisiona API/Oracle/BD (eso sigue siendo `wt-up`/`e2e-up`). Exige el marcador de legado (`ProgramaMaestroPT.sln` bajo `worktrees/<folder>`). |
+| `make legacy-slot-release WT=<folder-legacy>` | Libera el arrendamiento anterior (borra la fila del registro); rechaza si otro proceso vivo la sostiene, salvo `LEASE_OVERRIDE=1 LEASE_OVERRIDE_REASON=<motivo>`. |
 | `make legacy-turn-status` / `make legacy-turn-heartbeat` / `make legacy-turn-release` | Estado / refresco / liberación del turno exclusivo del guest singleton. |
 | `make legacy-status` / `make legacy-url` | Estado de cada pieza / URL y puertos de acceso. |
 | `make legacy-diag` / `make legacy-diag-logs` | Habilita log de errores detallado / vuelca errores ASP.NET. |
@@ -136,6 +138,46 @@ En **ambas** vías, la sección `stage → build → deploy` la serializa un loc
 cmdlets de `WebAdministration` concurrentes fallan al *commitear*) y los vCPU de la VM son recursos compartidos por
 todos los sitios. Al vivir en `macdata`, el lock cubre también a sesiones de otras máquinas orquestadoras. Antes de
 reclamar un lock rancio consulta al guest: si hay un MSBuild vivo, **no** lo roba.
+
+### Lease-guard del `SLOT` en `build`/`launch`/`deploy` (T-015)
+
+La vía **per-slot** no necesita `guest-turn`, pero un `SLOT=<N>` numérico por sí solo **no prueba** que el árbol
+`C:\wt<N>` sea tuyo: antes de este guard, `legacy-build SLOT=<N> CLEAN=1` podía hacer *wipe* del árbol de **otra**
+sesión que ya tenía ese mismo `SLOT` arrendado en `.worktrees/slots.tsv` (caso observado: una tarea reusó `SLOT=0`
+vivo de otra sesión). `legacy-launch`/`legacy-build`/`legacy-deploy` ahora consultan el registro **antes** de
+`guest_turn_acquire`/`stage_build`/`deploy` y clasifican el `SLOT` pedido con la **misma** noción de "dueña viva"
+que usan `wt-reclaim`/`wt-gc` vía `wt_lease_reclaimable`: **pid vivo O heartbeat fresco** dentro de
+`PM_WT_LEASE_TTL` (default 3600 s). Un `owner_pid` muerto no basta para clasificar huérfano: los verbos que
+escriben `slots.tsv` (`wt-up`, `wt-heartbeat`, `e2e-url`) son CLI de un disparo — el latido operativo es el
+heartbeat, no el pid.
+
+| Estado de la fila en `slots.tsv` | Resultado |
+| --- | --- |
+| Sin fila para ese `SLOT` | Permite (log informativo; para evitar la carrera con un `wt-up` concurrente, reserva antes con `legacy-slot-claim`). |
+| Fila **reclamable** (pid muerto **y** heartbeat rancio > TTL) | Permite, con **AVISO** de arrendamiento huérfano (el registro lo retira `wt-reclaim`/`wt-gc`, fuera de este verbo). |
+| Fila con dueña **viva** (pid vivo **o** heartbeat fresco) y `WT=<folder>` **igual** al folder de la fila | Permite (folder propio: la identidad es la columna 1 de `slots.tsv`, **no** el worktree de *fuente* del legado, que es ortogonal). |
+| Fila con dueña **viva** y folder **distinto** (o sin `WT=`) | **Aborta, exit 3**, antes de tocar el árbol, salvo el override explícito de abajo. |
+
+**Override único:** `LEASE_OVERRIDE=1 LEASE_OVERRIDE_REASON=<motivo>` (sin motivo no vacío, `LEASE_OVERRIDE=1` corta
+en `exit 2` como mal uso). Deja un log inequívoco `[LEASE-OVERRIDE] slot N folder=<f> pid=<p> reason=<motivo> by
+<host>:<pid>`. **`FORCE=1` NO es este escape**: `FORCE` ya significa "rebuild/redeploy aunque `health` sea 200"
+sobre **tu propio** slot (ver `stage_build`/`deploy` arriba); sobrecargarlo para "pisa el slot de otra sesión"
+mezclaría ambos significados y volvería el guard un *bypass* silencioso en el uso rutinario de `FORCE=1` propio —
+por diseño, `FORCE=1` sin `LEASE_OVERRIDE=1` sigue abortando ante una dueña viva ajena.
+
+**Patrón sancionado para tareas solo-legado** (worktree de `pl-pm-legacy` sin `PL.PM.sln`, que no puede pedir un
+slot por `wt-up`):
+
+```bash
+make legacy-slot-claim WT=<folder-legacy>              # arrienda SOLO el registro (sin API/Oracle/BD); imprime el SLOT
+make legacy-build SLOT=<N> WT=<folder-legacy>           # el guard ve folder propio -> permite
+make legacy-slot-release WT=<folder-legacy>             # libera el arrendamiento al terminar
+```
+
+Para tareas que además necesitan el backend del mismo paquete, el camino sigue siendo `wt-up`/`e2e-up` con el
+worktree **pm** (su folder ya queda en `slots.tsv`; pasar ese mismo `WT=` a `legacy-build`/`legacy-launch` basta).
+Reusar el slot de otra dueña viva **sin** coordinación no es un patrón sancionado: solo el override documentado,
+con razón, para una liberación coordinada explícitamente con esa sesión.
 
 ## Comandos — backend en modo E2E (`e2e-*`, Opción C) — DEPRECADO
 

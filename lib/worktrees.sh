@@ -153,6 +153,16 @@ wt_pid_dead() {  # uso: wt_pid_dead <owner_pid>
   return 0
 }
 
+# Fila completa del registro (folder\tslot\tproject\toffset\tcreated\towner_pid\theartbeat) para un SLOT; vacia si
+# el slot no tiene fila. Lectura best-effort SIN lock, igual criterio que wt_slot_lookup: el registro se escribe
+# por 'mv' atomico, asi que una lectura sin lock nunca ve una escritura a medias (solo puede ver la version
+# anterior o la nueva completa). La reusa el lease-guard de legacy.sh (T-015) para clasificar el arrendamiento
+# de un SLOT sin acoplarse a wt_slot_lookup (que busca por folder, no por slot).
+wt_slot_row_by_slot() {  # uso: wt_slot_row_by_slot <slot>
+  [ -f "$PM_WT_REGISTRY" ] || return 0
+  awk -F'\t' -v s="$1" '$2==s{print; exit}' "$PM_WT_REGISTRY"
+}
+
 # Verdadero si un arrendamiento es reclamable: su proceso dueno murio (kill -0 falla, o no hay pid) Y su heartbeat
 # (o 'created' si la fila es vieja) es mas viejo que PM_WT_LEASE_TTL. Un pid VIVO o un heartbeat FRESCO => NUNCA
 # reclamable (espeja guest-turn: no se roba el turno a una duena viva aunque el heartbeat este rancio). El kill -0
