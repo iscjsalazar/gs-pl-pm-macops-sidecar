@@ -247,6 +247,19 @@ siguiente dueño; la recuperación es re-correr `wt-up … ORACLE=1`.
 quedaron mutados), por nombre y no por `compose down` (que depende del árbol remoto del worktree y se tragaría el
 fallo), y **verifica la ausencia antes de liberar el slot**: si algo sobrevive, el slot no se libera.
 
+**Aislamiento de lectura de `pm_planning_wt<N>` (RCSI).** `wt-up` deja la BD de producto del slot con
+`READ_COMMITTED_SNAPSHOT ON` y `ALLOW_SNAPSHOT_ISOLATION ON`, el mismo régimen medido en Azure SQL dev
+(`plazr-db-nl-ordenes-scus-dev`: `is_read_committed_snapshot_on=True`) y el default de Azure SQL Database en
+general. El motor en caja trae RCSI **OFF** por default, así que sin este paso el arnés reproducía un régimen
+de bloqueo lector-escritor que el destino real no tiene. El ajuste corre **antes** de levantar la API del
+slot (el `ALTER DATABASE` de RCSI exige sesión única) y es **idempotente**: sólo entra a `SINGLE_USER` cuando
+el flag está OFF, así que un `wt-up` repetido sobre un slot ya alineado es net-cero. Verificación:
+`make wt-sql WT=<folder> SQL="SELECT is_read_committed_snapshot_on FROM sys.databases WHERE name='pm_planning_wt<N>'"`
+debe devolver `1`. **Gotcha:** `make pm-gate`/`pm-test-clean … WARM=1` reusa el aprovisionamiento del slot si
+la API ya responde sana (ver §Gate vs inner-loop) y por tanto **NO** re-corre `wt-up`/el ensure de RCSI: sobre
+un slot creado antes de este cambio, `WARM=1` no repara el flag por sí solo — hace falta un `wt-up` (sin
+`WARM`) sobre ese slot, o un `wt-down` + `wt-up`, al menos una vez.
+
 **Operación (reglas).** El `health.aspx` comparte pool con la aplicación, así que **no se le hace polling en bucle**:
 eso mata el *idle-timeout* de 20 min que sostiene el presupuesto de RAM del guest. El orden canónico de cierre es
 `e2e-down` **antes** de `wt-down` (el primero necesita el slot que el segundo libera); si se invierte, `e2e-down`

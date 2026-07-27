@@ -643,6 +643,55 @@ _wt_build_api_image() {  # uso: _wt_build_api_image <ctx> <img> <src-sha>
   wt_die "fallo el build de la imagen de la API del worktree (2 intentos)"; return 1
 }
 
+# Asegura que la BD de producto del slot (pm_planning_wt<N>) corra bajo el mismo regimen de aislamiento de
+# lectura que Azure SQL dev/prod: READ_COMMITTED_SNAPSHOT ON + ALLOW_SNAPSHOT_ISOLATION ON (T-010, D14).
+# Evidencia SELECT-only medida en Azure SQL dev (evidence/azure-sql-dev-rcsi.csv de la tarea):
+# is_read_committed_snapshot_on=True, snapshot_isolation_state_desc=ON en 'plazr-db-nl-ordenes-scus-dev'. El
+# motor en caja trae RCSI OFF por default y el slot se aprovisionaba sin ninguna sentencia RCSI/ASI: el arnes
+# reproducia un regimen de bloqueo lector-escritor que el destino real no tiene. Requiere sesion unica sobre la
+# BD (SINGLE_USER) para el ALTER de RCSI; el llamador (_cmd_wt_up_locked) retira el contenedor de la API del
+# slot ANTES de invocar esta funcion y la corre ANTES de wt_up_api, asi la primera conexion de EF ya opera bajo
+# el regimen correcto. Corre contra 'master' (wt_shared_exec/wt_shared_scalar no pasan -d): un ALTER DATABASE
+# de la BD a la que el propio batch esta conectado en modo multi-sesion falla o se bloquea. Idempotente: solo
+# entra a SINGLE_USER cuando el flag esta OFF; reaplicar sobre una BD ya alineada es net-cero (no-op logueado).
+# Fail-closed: si la relectura post-ALTER no confirma ON, aborta sin continuar a wt_up_api/seed.
+wt_ensure_planning_rcsi() {  # uso: wt_ensure_planning_rcsi <password>
+  local pw="$1"
+  wt_log "verificando READ_COMMITTED_SNAPSHOT/ALLOW_SNAPSHOT_ISOLATION de '$PM_PLANNING_DB' (paridad Azure SQL dev/prod) ..."
+  local sql
+  sql="$(cat <<SQL
+SET NOCOUNT ON;
+IF DB_ID(N'$PM_PLANNING_DB') IS NULL
+  CREATE DATABASE [$PM_PLANNING_DB];
+
+IF EXISTS (
+  SELECT 1 FROM sys.databases
+  WHERE name = N'$PM_PLANNING_DB' AND is_read_committed_snapshot_on = 0
+)
+BEGIN
+  ALTER DATABASE [$PM_PLANNING_DB] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+  ALTER DATABASE [$PM_PLANNING_DB] SET READ_COMMITTED_SNAPSHOT ON WITH ROLLBACK IMMEDIATE;
+  ALTER DATABASE [$PM_PLANNING_DB] SET MULTI_USER;
+END
+
+IF EXISTS (
+  SELECT 1 FROM sys.databases
+  WHERE name = N'$PM_PLANNING_DB' AND snapshot_isolation_state_desc <> N'ON'
+)
+  ALTER DATABASE [$PM_PLANNING_DB] SET ALLOW_SNAPSHOT_ISOLATION ON;
+SQL
+)"
+  wt_shared_exec "$pw" "$sql" || { wt_die "fallo al asegurar RCSI/ASI de '$PM_PLANNING_DB'"; return 1; }
+  local rcsi
+  rcsi="$(wt_shared_scalar "$pw" "SET NOCOUNT ON; SELECT CAST(is_read_committed_snapshot_on AS int) FROM sys.databases WHERE name = N'$PM_PLANNING_DB'")"
+  if [ "$rcsi" = "1" ]; then
+    wt_log "RCSI de '$PM_PLANNING_DB' ON (net-cero si ya estaba asi)"
+  else
+    wt_die "RCSI de '$PM_PLANNING_DB' NO quedo ON tras el ALTER (relectura='${rcsi:-<vacio>}'); no se continua a wt_up_api/seed"
+    return 1
+  fi
+}
+
 # Construye la imagen de la API desde el CODIGO DEL WORKTREE y corre su contenedor unido al SQL compartido
 # y al bus. Connstrings por entorno; aislamiento del bus por prefijo de instancia wt<N>.
 wt_up_api() {  # uso: wt_up_api <password>
@@ -1070,6 +1119,13 @@ _cmd_wt_up_locked() {
   # posee el tooling igual que la referencia LN. Se aplica siempre (independiente de PM_WT_SKIP_PLANNING_SEED, que
   # solo gobierna el seed data-only de planning).
   wt_ensure_nucleos "$pw" || return 1
+
+  # 4.5) RCSI/ASI del slot (T-010, D14): el ALTER DATABASE de RCSI exige sesion unica sobre la BD planning,
+  # asi que el contenedor de la API del slot se retira ANTES (idempotente: puede no existir en un slot frio;
+  # wt_up_api ya hace este mismo 'rm -f' al recrearlo mas abajo). Corre ANTES de wt_up_api para que la primera
+  # conexion de EF (Database.Migrate) ya opere bajo el regimen de aislamiento correcto.
+  on_intel "docker $(remote_docker_ctx) rm -f 'pm-wt${WT_SLOT}-api' >/dev/null 2>&1" || true
+  wt_ensure_planning_rcsi "$pw" || return 1
 
   # 5) per-worktree: API ANTES del seed. La API aplica las migraciones EF al arrancar (entorno
   # IntegrationTest => !Production): crea la BD por-slot y el DDL de todos los schemas. Recien entonces
