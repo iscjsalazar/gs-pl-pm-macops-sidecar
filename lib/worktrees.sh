@@ -18,7 +18,8 @@
 # en el son desechables/reseedables (acoplamiento aceptado).
 
 # Tablas que la ACL LN de PM consulta en su referencia (pm_erpln106): definen la verificacion de completitud.
-WT_LN_TABLES="ttcibd001115 ttxpcf930116 ttxpcf925116 ttibom010116 twhinp100116 ttdsls400116 ttdsls401116 ttirou101116"
+# Incluye la familia 118 (IND/TI): sin ellas el guard declara completa una referencia que aborta el intake en ttirou101118.
+WT_LN_TABLES="ttcibd001115 ttxpcf930116 ttxpcf925116 ttibom010116 twhinp100116 ttdsls400116 ttdsls401116 ttirou101116 ttirou101118 twhinp100118 ttdsls400118 ttdsls401118 ttisfc001118 ttcibd420118"
 
 wt_log() { echo "[wt] $*" >&2; }
 wt_die() { echo "[wt] ERROR: $*" >&2; return 1; }
