@@ -7,6 +7,9 @@ if [ "$(basename "$0")" = docker ]; then
   case "$cmd" in
     image) exit 0 ;;
     run)
+      printf 'RUNARGS' >> "$log"
+      for arg in "$@"; do printf '|%s' "$arg" >> "$log"; done
+      printf '\n' >> "$log"
       name=''; cidfile=''
       while [ "$#" -gt 0 ]; do
         case "$1" in
@@ -110,12 +113,16 @@ winding_matrix_case() {
     e2e_playwright_remote(){
       remote_mode="$1"
       case "$remote_mode" in
+        winding-login-seed) event login-seed; [ "$mode" != login-seed-fail ] ;;
         winding-seed) event seed; [ "$mode" != seed-fail ] ;;
+        winding-login-verify) event login-verify; [ "$mode" != login-verify-fail ] ;;
         winding-test) event test; [ "$mode" != test-fail ] ;;
         winding-teardown) event teardown; [ "$mode" != teardown-fail ] ;;
+        winding-login-teardown) event login-teardown; [ "$mode" != login-teardown-fail ] ;;
       esac
     }
     WT=fixture; PLANTA=RES; WW_TIMEOUT=10; WW_SCENARIO=winding-macro-res
+    WW_LOGIN_SCENARIO=login-four-plants
     PW_SEED_PROJECT=seed.csproj; WW_PROJECT=plant-res; WW_GREP=@winding-macro
     PW_SPEC_REL=features/winding-macro/specs/maquinas-prog-bobinas.spec.ts
     PW_BASE_URL=http://legacy/; PW_API_URL=http://api/
@@ -163,20 +170,131 @@ winding_real_preflight_case() {
   rmdir "$fixture"
 }
 winding_remote_data_case() {
-  local mode="$1" fixture fake_bin suite result log output rc
+  local mode="$1" dotnet_exit="${2:-0}" fixture fake_bin suite result log output rc
   fixture="$(mktemp -d "${TMPDIR:-/tmp}/pm-winding-remote.XXXXXX")"
   fake_bin="$fixture/bin"; suite="$fixture/suite"; result="$suite/.results/run"; log="$fixture/dotnet.log"; output="$fixture/output.log"
   mkdir -p "$fake_bin" "$result"; touch "$suite/seed.csproj" "$log"
   printf '%s\n' '#!/bin/sh' \
-    'printf "planning=%s|oracle=%s|args=%s\\n" "${ConnectionStrings__Planning:+set}" "${ConnectionStrings__CtrlPiso:+set}" "$*" >> "$WINDING_REMOTE_LOG"' \
-    'exit 0' > "$fake_bin/dotnet"
+    'printf "planning=%s|oracle=%s|user=%s|password=%s|args=%s\\n" "${ConnectionStrings__Planning:+set}" "${ConnectionStrings__CtrlPiso:+set}" "${PM_E2E_TEST_USER:+set}" "${PM_E2E_TEST_PASSWORD:+set}" "$*" >> "$WINDING_REMOTE_LOG"' \
+    'exit "${WINDING_REMOTE_DOTNET_EXIT:-0}"' > "$fake_bin/dotnet"
   chmod +x "$fake_bin/dotnet"
-  printf 'planning-secret\0' | WINDING_REMOTE_LOG="$log" /bin/bash "$REMOTE" "$mode" "$suite" "$result" "$fake_bin" \
-    "$mode" '' image 10 winding-macro-res seed.csproj > "$output" 2>&1
+  case "$mode" in
+    winding-login-*)
+      printf 'planning-secret\0login-user\0login-password\0' \
+        | WINDING_REMOTE_LOG="$log" WINDING_REMOTE_DOTNET_EXIT="$dotnet_exit" /bin/bash "$REMOTE" "$mode" "$suite" "$result" "$fake_bin" \
+          "$mode" '' image 10 login-four-plants seed.csproj > "$output" 2>&1
+      ;;
+    *)
+      printf 'planning-secret\0' | WINDING_REMOTE_LOG="$log" WINDING_REMOTE_DOTNET_EXIT="$dotnet_exit" /bin/bash "$REMOTE" "$mode" "$suite" "$result" "$fake_bin" \
+        "$mode" '' image 10 winding-macro-res seed.csproj > "$output" 2>&1
+      ;;
+  esac
   rc=$?
-  printf '%s|%s' "$rc" "$(cat "$log")"
+  printf '%s|%s|output=%s' "$rc" "$(cat "$log")" "$(tr '\n' ';' < "$output")"
   unlink "$fake_bin/dotnet" "$suite/seed.csproj" "$log" "$output" "$result/$mode.log" 2>/dev/null || true
   rmdir "$fake_bin" "$result" "$suite/.results" "$suite" "$fixture" 2>/dev/null || true
+}
+winding_login_transport_case() {
+  local fixture cmd_file payload_file result rc command payload
+  fixture="$(mktemp -d "${TMPDIR:-/tmp}/pm-winding-login-transport.XXXXXX")"
+  cmd_file="$fixture/command"; payload_file="$fixture/payload"
+  result="$(PM_E2E_CONTRACT_SOURCE_ONLY=1 /bin/bash -c '
+    . "$1"
+    cmd_file="$2"; payload_file="$3"
+    ssh(){
+      local last planning user password
+      for last in "$@"; do :; done
+      printf "%s" "$last" > "$cmd_file"
+      IFS= read -r -d "" planning || return 91
+      IFS= read -r -d "" user || return 92
+      IFS= read -r -d "" password || return 93
+      printf "planning=%s|user=%s|password=%s" "${planning:+set}" "${user:+set}" "${password:+set}" > "$payload_file"
+    }
+    PW_REMOTE_ROOT=stage/root; PW_REMOTE_RESULT=stage/root/.results/run; PW_NODE_BIN=/node/bin
+    PM_REMOTE_DOCKER_CONTEXT=""; PW_DOTNET_IMAGE=image; PM_REMOTE_SSH=fixture
+    PW_PLANNING_CS=planning-marker; PW_TEST_USER=user-marker; PW_TEST_PASSWORD=password-marker
+    e2e_playwright_remote winding-login-seed login-seed 10 login-four-plants seed.csproj
+  ' _ "$E2E" "$cmd_file" "$payload_file")"; rc=$?
+  command="$(cat "$cmd_file")"; payload="$(cat "$payload_file")"
+  case "$command" in *user-marker*|*password-marker*) result="$result|cli-leak" ;; *) result="$result|cli-clean" ;; esac
+  printf '%s|%s|%s' "$rc" "$result" "$payload"
+  unlink "$cmd_file"
+  unlink "$payload_file"
+  rmdir "$fixture"
+}
+winding_login_verify_case() {
+  local mode="$1" fixture fake_bin suite result log output rc route payload response_count stale
+  fixture="$(mktemp -d "${TMPDIR:-/tmp}/pm-winding-login-verify.XXXXXX")"
+  fake_bin="$fixture/bin"; suite="$fixture/suite"; result="$suite/.results/run"
+  log="$fixture/curl.log"; output="$fixture/output.log"
+  mkdir -p "$fake_bin" "$result"; : > "$log"
+  printf '%s\n' '#!/bin/sh' \
+    'out=""; url=""; payload_mode="missing"' \
+    'while [ "$#" -gt 0 ]; do' \
+    '  case "$1" in' \
+    '    -o) out="$2"; shift 2 ;;' \
+    '    --data-binary) [ "$2" = @- ] || exit 90; shift 2 ;;' \
+    '    http://*) url="$1"; shift ;;' \
+    '    *) shift ;;' \
+    '  esac' \
+    'done' \
+    'payload="$(cat)"' \
+    'case "$payload" in *\"UserName\":\"user-marker\"*\"Password\":\"password-marker\"*\"Plant\":\"RES\"*) payload_mode=valid ;; esac' \
+    'printf "URL|%s\nPAYLOAD|%s\n" "$url" "$payload_mode" >> "$VERIFY_CURL_LOG"' \
+    'case "$VERIFY_CURL_MODE" in' \
+    '  success) printf "{\"userName\":\"%s\",\"plant\":\"RES\",\"landingPage\":\"CargaProgMaestro.aspx\",\"isGuest\":false,\"administratorRoleCode\":\"ADM\",\"systemRoleCode\":\"SYS\"}" "$PM_REMOTE_TEST_USER" > "$out"; printf 200 ;;' \
+    '  incomplete) printf "{\"userName\":\"%s\",\"plant\":\"RES\",\"landingPage\":\"Login.aspx\",\"isGuest\":false,\"administratorRoleCode\":\"ADM\",\"systemRoleCode\":\"SYS\"}" "$PM_REMOTE_TEST_USER" > "$out"; printf 200 ;;' \
+    '  unauthorized) printf "{}" > "$out"; printf 401 ;;' \
+    'esac' > "$fake_bin/curl"
+  chmod +x "$fake_bin/curl"
+  printf 'user-marker\0password-marker\0' \
+    | TMPDIR="$fixture" VERIFY_CURL_LOG="$log" VERIFY_CURL_MODE="$mode" /bin/bash "$REMOTE" \
+      winding-login-verify "$suite" "$result" "$fake_bin" login-preflight '' image \
+      http://127.0.0.1:5001/ RES > "$output" 2>&1
+  rc=$?
+  route="$(awk -F'|' '$1=="URL"{print $2; exit}' "$log")"
+  payload="$(awk -F'|' '$1=="PAYLOAD"{print $2; exit}' "$log")"
+  response_count="$(find "$fixture" -name 'pm-winding-login-response.*' -type f -print 2>/dev/null | wc -l | tr -d ' ')"
+  if grep -Eq 'user-marker|password-marker' "$log" "$output"; then output_state=leak; else output_state=clean; fi
+  printf '%s|%s|%s|responses=%s|%s|output=%s' "$rc" "$route" "$payload" "$response_count" "$output_state" "$(tr '\n' ';' < "$output")"
+  for stale in "$fixture"/pm-winding-login-response.*; do [ ! -e "$stale" ] || unlink "$stale"; done
+  unlink "$fake_bin/curl" "$log" "$output" "$result/login-preflight.log" 2>/dev/null || true
+  rmdir "$fake_bin" "$result" "$suite/.results" "$suite" "$fixture" 2>/dev/null || true
+}
+winding_invalid_credential_case() {
+  local user="$1" password="$2" fixture events rc
+  fixture="$(mktemp -d "${TMPDIR:-/tmp}/pm-winding-empty-password.XXXXXX")"
+  events="$fixture/events"; : > "$events"
+  PM_E2E_CONTRACT_SOURCE_ONLY=1 /bin/bash -c '
+    . "$1"
+    events="$2"; fixture_user="$3"; fixture_password="$4"
+    event(){ [ ! -s "$events" ] || printf "," >> "$events"; printf "%s" "$1" >> "$events"; }
+    e2e_winding_validate_inputs(){ event validate; }
+    e2e_playwright_credentials(){ event credentials; PW_TEST_USER="$fixture_user"; PW_TEST_PASSWORD="$fixture_password"; }
+    e2e_slot(){ event slot; return 99; }
+    WW_CREDENTIALS_FILE=""; WW_NODE_BIN=""; WW_INSTALL=0; WW_TIMEOUT=10; WW_RETRIES=0
+    cmd_playwright_winding
+  ' _ "$E2E" "$events" "$user" "$password" >/dev/null 2>&1
+  rc=$?
+  printf '%s|%s' "$rc" "$(cat "$events")"
+  unlink "$events"
+  rmdir "$fixture"
+}
+winding_credentials_policy_case() {
+  local policy="$1" mode="$2" fixture credentials result rc
+  fixture="$(mktemp -d "${TMPDIR:-/tmp}/pm-winding-credentials.XXXXXX")"
+  credentials="$fixture/credentials.env"
+  printf '%s\n' 'PM_E2E_TEST_USER=user' 'PM_E2E_TEST_PASSWORD=password' > "$credentials"
+  chmod "$mode" "$credentials"
+  result="$(PM_E2E_CONTRACT_SOURCE_ONLY=1 /bin/bash -c '
+    . "$1"
+    PW_CREDENTIALS_FILE="$2"; unset PM_E2E_TEST_USER PM_E2E_TEST_PASSWORD
+    e2e_playwright_credentials "$3" >/dev/null 2>&1
+    printf "user=%s|password=%s" "${PW_TEST_USER:+set}" "${PW_TEST_PASSWORD:+set}"
+  ' _ "$E2E" "$credentials" "$policy")"; rc=$?
+  unlink "$credentials"
+  rmdir "$fixture"
+  printf '%s|%s' "$rc" "$result"
 }
 legacy_launch_case() {
   PM_E2E_CONTRACT_SOURCE_ONLY=1 /bin/bash -c '
@@ -305,6 +423,26 @@ docker_sim_case() {
   unlink "$fake" "$suite/seed.csproj" "$log" "$output" "$result/seed.log" 2>/dev/null || true
   rmdir "$result" "$suite/.results" "$suite" "$fixture" 2>/dev/null || true
 }
+docker_login_env_case() {
+  local fixture fake suite result log output rc runargs env_ok leak
+  fixture="$(mktemp -d "${TMPDIR:-/tmp}/pm-winding-login-docker.XXXXXX")"
+  fake="$fixture/docker"; suite="$fixture/suite"; result="$suite/.results/run"
+  log="$fixture/docker.log"; output="$fixture/output.log"
+  mkdir -p "$suite" "$result"; touch "$suite/seed.csproj" "$log"
+  ln -s "$ROOT/tests/e2e-playwright-contract.sh" "$fake"
+  printf 'planning-marker\0user-marker\0password-marker\0' \
+    | PM_E2E_REMOTE_TEST_FORCE_DOCKER=1 PM_E2E_REMOTE_TEST_DOCKER_BIN="$fake" \
+      DOCKER_SIM_LOG="$log" DOCKER_SIM_BEHAVIOR=success /bin/bash "$REMOTE" winding-login-seed \
+      "$suite" "$result" '' login-seed '' image 10 login-four-plants seed.csproj > "$output" 2>&1
+  rc=$?
+  runargs="$(awk -F'|' '$1=="RUNARGS"{print; exit}' "$log")"
+  if printf '%s' "$runargs" | grep -Fq '|-e|PM_E2E_TEST_USER' \
+    && printf '%s' "$runargs" | grep -Fq '|-e|PM_E2E_TEST_PASSWORD'; then env_ok=names; else env_ok=missing; fi
+  if grep -Eq 'user-marker|password-marker' "$log" "$output"; then leak=leak; else leak=clean; fi
+  printf '%s|%s|%s' "$rc" "$env_ok" "$leak"
+  unlink "$fake" "$suite/seed.csproj" "$log" "$output" "$result/login-seed.log" 2>/dev/null || true
+  rmdir "$result" "$suite/.results" "$suite" "$fixture" 2>/dev/null || true
+}
 cleanup_child_case() {
   PM_E2E_CONTRACT_SOURCE_ONLY=1 /bin/bash -c '
     . "$1"
@@ -422,6 +560,9 @@ contains "$E2E" 'PWPROJECT' "proyecto se valida"
 contains "$E2E" 'PLANTA invalida' "planta se valida"
 contains "$E2E" 'e2e_winding_assert_replica_off' "winding verifica replica OFF"
 contains "$E2E" 'e2e_winding_backfill_menu' "winding materializa menu por API"
+contains "$E2E" '"login-four-plants"' "winding exige fixture de autoridad login en manifest"
+contains "$E2E" 'e2e_playwright_credentials strict' "winding usa politica estricta de credenciales"
+contains "$E2E" 'normalizado y sin whitespace periferico' "winding rechaza credenciales sin normalizar"
 contains "$E2E" 'playwright-winding' "driver publica verbo winding"
 not_contains "$E2E" 'e2e_playwright_set_flag "$WW_' "winding no usa el mutador de flags"
 
@@ -429,7 +570,11 @@ contains "$REMOTE" 'run_with_watchdog' "runner remoto limita comandos largos"
 contains "$REMOTE" 'npx playwright test "$spec_rel"' "runner remoto ejecuta spec exacto"
 contains "$REMOTE" '--retries "$retries"' "runner remoto aplica retries explicitos"
 contains "$REMOTE" 'winding-seed|winding-teardown)' "runner remoto tiene seed/teardown winding"
+contains "$REMOTE" 'winding-login-seed|winding-login-teardown)' "runner remoto tiene seed/teardown login dirigido"
+contains "$REMOTE" 'winding-login-verify)' "runner remoto verifica autoridad login antes del browser"
 contains "$REMOTE" '--sqlserver-only' "seed winding fuerza SQL-only"
+contains "$REMOTE" '-e PM_E2E_TEST_USER' "fallback Docker hereda usuario por nombre"
+contains "$REMOTE" '-e PM_E2E_TEST_PASSWORD' "fallback Docker hereda password por nombre"
 contains "$REMOTE" 'PM_E2E_SEED_DONE=1 PM_E2E_SKIP_TEARDOWN=1' "Playwright winding no repite seed/teardown global"
 cloud_cli_token='a''z '
 cloud_turn_token='deploy''-turn'
@@ -437,6 +582,7 @@ not_contains "$REMOTE" "$cloud_cli_token" "runner sin Azure CLI"
 not_contains "$E2E" "$cloud_turn_token" "runner no toca deploy Prolec dev"
 contains "$README" 'legacy-launch' "README conserva frontera de deploy local"
 contains "$README" 'Prolec dev' "README distingue Prolec dev"
+contains "$README" 'PWCREDENTIALS=<ruta-externa-modo-600>' "README exige archivo externo modo 600"
 
 quote_rejection="$(PM_E2E_CONTRACT_SOURCE_ONLY=1 /bin/bash -c '
   . "$1"
@@ -447,6 +593,45 @@ quote_rejection="$(PM_E2E_CONTRACT_SOURCE_ONLY=1 /bin/bash -c '
   printf "%s|%s" "$rc" "$ssh_called"
 ' _ "$E2E")"
 [ "$quote_rejection" = '2|0' ] && ok "comilla simple en PWNODEBIN se rechaza antes de SSH" || bad "PWNODEBIN con comilla alcanzo SSH: $quote_rejection"
+
+login_transport="$(winding_login_transport_case)"
+[ "$login_transport" = '0||cli-clean|planning=set|user=set|password=set' ] \
+  && ok "credenciales login viajan por stdin NUL y no por comando SSH" \
+  || bad "transporte login inesperado: $login_transport"
+login_verify="$(winding_login_verify_case success)"
+case "$login_verify" in
+  '0|http://127.0.0.1:5001/api/v1/catalogs/login/authenticate|valid|responses=0|clean|output=[preflight] autoridad SQL de login: READY;'*)
+    ok "preflight login real usa ruta/cuerpo exactos, valida sesion y elimina respuesta" ;;
+  *) bad "preflight login real inesperado: $login_verify" ;;
+esac
+login_verify="$(winding_login_verify_case incomplete)"
+case "$login_verify" in
+  '1|http://127.0.0.1:5001/api/v1/catalogs/login/authenticate|valid|responses=0|clean|output=ERROR [e2e-playwright-remote]: preflight de login devolvio una sesion SQL incompleta;'*)
+    ok "preflight login real rechaza sesion incompleta sin filtrar credenciales" ;;
+  *) bad "preflight login incompleto inesperado: $login_verify" ;;
+esac
+login_verify="$(winding_login_verify_case unauthorized)"
+case "$login_verify" in
+  '1|http://127.0.0.1:5001/api/v1/catalogs/login/authenticate|valid|responses=0|clean|output=ERROR [e2e-playwright-remote]: preflight de login rechazo la autoridad SQL (HTTP 401);'*)
+    ok "preflight login real rechaza HTTP no exitoso sin filtrar credenciales" ;;
+  *) bad "preflight login HTTP inesperado: $login_verify" ;;
+esac
+for credential_case in 'user|' '|password' '   |password' 'user|   ' ' user|password' 'user |password' 'user| password' 'user|password '; do
+  invalid_user="${credential_case%%|*}"; invalid_password="${credential_case#*|}"
+  invalid_credential="$(winding_invalid_credential_case "$invalid_user" "$invalid_password")"
+  [ "$invalid_credential" = '1|validate,credentials' ] \
+    && ok "credencial vacia o con whitespace periferico aborta antes del slot" \
+    || bad "credencial invalida no fallo antes del slot: $invalid_credential"
+done
+[ "$(winding_credentials_policy_case strict 600)" = '0|user=set|password=set' ] \
+  && ok "politica winding strict acepta PWCREDENTIALS modo 600" \
+  || bad "politica winding strict rechazo PWCREDENTIALS modo 600"
+[ "$(winding_credentials_policy_case strict 644)" = '1|' ] \
+  && ok "politica winding strict rechaza PWCREDENTIALS legible por grupo/otros" \
+  || bad "politica winding strict acepto PWCREDENTIALS modo 644"
+[ "$(winding_credentials_policy_case compatible 644)" = '0|user=set|password=set' ] \
+  && ok "politica tnuc02 compatible conserva PWCREDENTIALS historico" \
+  || bad "politica compatible rompio PWCREDENTIALS historico"
 
 lease_cleanup="$(PM_E2E_CONTRACT_SOURCE_ONLY=1 /bin/bash -c '
   . "$1"
@@ -485,6 +670,10 @@ for docker_case in success failure timeout int term; do
     bad "fallback Docker $docker_case incompleto: $docker_result"
   fi
 done
+docker_login="$(docker_login_env_case)"
+[ "$docker_login" = '0|names|clean' ] \
+  && ok "fallback Docker hereda credenciales login por nombre sin valor en argv/log" \
+  || bad "fallback Docker de login filtró u omitió credenciales: $docker_login"
 
 expected_full='flag:off,seed,test:off,flag:on,test:on,teardown,flag:off,collect'
 got="$(matrix_case success)"
@@ -498,7 +687,7 @@ got="$(matrix_case teardown-fail 2>/dev/null)"
 got="$(matrix_case restore-fail 2>/dev/null)"
 [ "$got" = "1|$expected_full" ] && ok "restauracion fallida conserva rojo" || bad "restauracion inesperada: $got"
 
-expected_winding='resolve,flag-check,bind,stage,menu,seed,test,teardown,collect'
+expected_winding='resolve,flag-check,bind,stage,menu,login-seed,seed,login-verify,test,teardown,login-teardown,collect'
 got="$(winding_matrix_case success)"
 [ "$got" = "0|$expected_winding" ] && ok "orden winding flag-read-menu-seed-test-teardown" || bad "orden winding inesperado: $got"
 got="$(winding_matrix_case flag-fail 2>/dev/null)"
@@ -510,24 +699,51 @@ got="$(winding_real_preflight_case)"
 got="$(winding_matrix_case menu-fail 2>/dev/null)"
 [ "$got" = '1|resolve,flag-check,bind,stage,menu,collect' ] && ok "backfill menu fallido aborta antes del seed" || bad "menu winding fail-open: $got"
 got="$(winding_matrix_case seed-fail 2>/dev/null)"
-[ "$got" = '1|resolve,flag-check,bind,stage,menu,seed,teardown,collect' ] && ok "seed winding parcial entra a teardown" || bad "seed winding inesperado: $got"
+[ "$got" = '1|resolve,flag-check,bind,stage,menu,login-seed,seed,teardown,login-teardown,collect' ] && ok "seed winding parcial entra a ambos teardown" || bad "seed winding inesperado: $got"
+got="$(winding_matrix_case login-seed-fail 2>/dev/null)"
+[ "$got" = '1|resolve,flag-check,bind,stage,menu,login-seed,login-teardown,collect' ] && ok "seed login parcial entra sólo a su teardown" || bad "seed login inesperado: $got"
 got="$(winding_matrix_case test-fail 2>/dev/null)"
 [ "$got" = "1|$expected_winding" ] && ok "test winding fallido conserva rojo y limpia" || bad "test winding inesperado: $got"
+got="$(winding_matrix_case login-verify-fail 2>/dev/null)"
+[ "$got" = '1|resolve,flag-check,bind,stage,menu,login-seed,seed,login-verify,teardown,login-teardown,collect' ] && ok "preflight login fallido aborta browser y limpia ambos seeds" || bad "preflight login inesperado: $got"
 got="$(winding_matrix_case teardown-fail 2>/dev/null)"
 [ "$got" = "1|$expected_winding" ] && ok "teardown winding fallido conserva rojo" || bad "teardown winding inesperado: $got"
+got="$(winding_matrix_case login-teardown-fail 2>/dev/null)"
+[ "$got" = "1|$expected_winding" ] && ok "teardown login fallido conserva rojo" || bad "teardown login inesperado: $got"
 
 got="$(winding_remote_data_case winding-seed)"
-if [ "$got" = '0|planning=set|oracle=|args=run --no-build --project seed.csproj -- --scenario winding-macro-res --sqlserver-only' ]; then
+if [ "$got" = '0|planning=set|oracle=|user=|password=|args=run --no-build --project seed.csproj -- --scenario winding-macro-res --sqlserver-only|output=' ]; then
   ok "seed remoto winding transmite solo Planning y fuerza sqlserver-only"
 else
   bad "seed remoto winding inesperado: $got"
 fi
 got="$(winding_remote_data_case winding-teardown)"
-if [ "$got" = '0|planning=set|oracle=|args=run --no-build --project seed.csproj -- --scenario winding-macro-res --sqlserver-only --teardown' ]; then
+if [ "$got" = '0|planning=set|oracle=|user=|password=|args=run --no-build --project seed.csproj -- --scenario winding-macro-res --sqlserver-only --teardown|output=' ]; then
   ok "teardown remoto winding transmite solo Planning"
 else
   bad "teardown remoto winding inesperado: $got"
 fi
+got="$(winding_remote_data_case winding-login-seed)"
+case "$got" in
+  '0|planning=set|oracle=|user=set|password=set|args=run --no-build --project seed.csproj -- --scenario login-four-plants --sqlserver-only|output=[seed] autoridad SQL de login: seed OK;'*)
+    ok "seed remoto login usa Planning y credenciales sólo por entorno" ;;
+  *) bad "seed remoto login inesperado: $got" ;;
+esac
+case "$got" in *login-user*|*login-password*) bad "seed remoto login filtró credenciales a args/log" ;; *) ok "seed remoto login no registra credenciales" ;; esac
+got="$(winding_remote_data_case winding-login-teardown)"
+case "$got" in
+  '0|planning=set|oracle=|user=set|password=set|args=run --no-build --project seed.csproj -- --scenario login-four-plants --sqlserver-only --teardown|output=[seed] autoridad SQL de login: teardown OK;'*)
+    ok "teardown remoto login es SQL-only y dirigido" ;;
+  *) bad "teardown remoto login inesperado: $got" ;;
+esac
+case "$got" in *login-user*|*login-password*) bad "teardown remoto login filtró credenciales a args/log" ;; *) ok "teardown remoto login no registra credenciales" ;; esac
+got="$(winding_remote_data_case winding-login-seed 9)"
+case "$got" in
+  1\|planning=set\|oracle=\|user=set\|password=set\|args=*'login-four-plants --sqlserver-only|output=ERROR [e2e-playwright-remote]: fallo el seed SQL-only de la autoridad de login;'*)
+    ok "fallo de seed login conserva error genérico sin credenciales" ;;
+  *) bad "fallo remoto login inesperado: $got" ;;
+esac
+case "$got" in *login-user*|*login-password*) bad "fallo de seed login filtró credenciales" ;; *) ok "fallo de seed login no registra credenciales" ;; esac
 
 [ "$(legacy_launch_case default)" = 'inherited=unset|args=FORCE=1' ] \
   && ok "e2e_legacy_launch no inyecta data tier por defecto" \

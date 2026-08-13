@@ -430,13 +430,22 @@ make e2e-playwright \
 seed, teardown y evidencia bajo `artifacts/playwright-winding/`. Antes de stagear o desplegar el frontend,
 consulta `machines-oracle-replica/RES` y exige una única fila en estado `OFF`; la ausencia, duplicidad, estado
 `ON` o lectura fallida abortan sin modificar el flag. Después invoca el endpoint idempotente de backfill del
-menú, siembra sólo `winding-macro-res` con `--sqlserver-only`, ejecuta el spec exacto y siempre intenta su
-teardown. `PM_E2E_SEED_DONE=1` y `PM_E2E_SKIP_TEARDOWN=1` impiden que Playwright procese el manifest completo.
+menú, siembra `login-four-plants` y después `winding-macro-res` con `--sqlserver-only`, ejecuta el spec exacto y
+siempre intenta ambos teardown en orden inverso. Las credenciales de login viajan al seeder únicamente por
+`stdin` delimitado por NUL y variables de entorno; no forman parte de argumentos ni evidencia.
+`PM_E2E_SEED_DONE=1` y `PM_E2E_SKIP_TEARDOWN=1` impiden que Playwright procese el manifest completo.
+El usuario y el password deben ser no vacíos, no contener sólo whitespace y no llevar whitespace periférico.
+Cuando provienen de `PWCREDENTIALS`, el archivo debe negar todo acceso de grupo/otros; el carril no habilita
+bypass ni modifica flags de Login. Antes del browser, una
+autenticación contra el endpoint SQL-only valida identidad, bloqueo, módulo, membresía y parámetros/landing; el
+request y la respuesta no se conservan. El teardown de login es dirigido al fixture y la base efímera se retira
+al ejecutar `e2e-down`.
 
 ```bash
 make e2e-playwright-winding \
   WT=<wt-pm> SOLUTION=<misma-ruta-wt-pm> \
-  LEGACYSRC=<ruta-absoluta-wt-legacy>
+  LEGACYSRC=<ruta-absoluta-wt-legacy> \
+  PWCREDENTIALS=<ruta-externa-modo-600>
 ```
 
 **Aislamiento del camino OFF.** `e2e-up` siempre enciende el Oracle del slot y le apunta el `conStringOracle` del

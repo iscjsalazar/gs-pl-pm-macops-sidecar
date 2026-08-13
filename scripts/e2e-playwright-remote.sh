@@ -38,6 +38,7 @@ DOTNET_CONTAINER_CIDFILE=''
 DOTNET_CONTAINER_SEQ=0
 ACTIVE_CMD_PID=''
 ACTIVE_WATCHDOG_PID=''
+LOGIN_RESPONSE_FILE=''
 
 # Watchdog central (lib/watchdog.sh). En stage remoto vive junto a este script; en local, en ../lib.
 _SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -59,6 +60,9 @@ flush_log(){
   local rc=$?
   trap - EXIT
   docker_cleanup_container || rc=1
+  if [ -n "$LOGIN_RESPONSE_FILE" ] && [ -e "$LOGIN_RESPONSE_FILE" ]; then
+    unlink "$LOGIN_RESPONSE_FILE" 2>/dev/null || rc=1
+  fi
   cat "$LOG_FILE" >&3
   exit "$rc"
 }
@@ -137,6 +141,8 @@ run_dotnet(){
     -e DOTNET_CLI_TELEMETRY_OPTOUT=1 -e DOTNET_NOLOGO=1 -e DOTNET_ROLL_FORWARD=Major)
   if [ "${ConnectionStrings__Planning+x}" = x ]; then docker_run+=(-e ConnectionStrings__Planning); fi
   if [ "${ConnectionStrings__CtrlPiso+x}" = x ]; then docker_run+=(-e ConnectionStrings__CtrlPiso); fi
+  if [ "${PM_E2E_TEST_USER+x}" = x ]; then docker_run+=(-e PM_E2E_TEST_USER); fi
+  if [ "${PM_E2E_TEST_PASSWORD+x}" = x ]; then docker_run+=(-e PM_E2E_TEST_PASSWORD); fi
   docker_run+=(-v "$SUITE_ROOT:/work" -w /work "$DOTNET_IMAGE" dotnet)
   run_with_watchdog "$timeout_s" "${docker_run[@]}" "$@" || rc=$?
   docker_cleanup_container || rc=1
@@ -155,6 +161,11 @@ read_planning_secret(){
 read_login_secrets(){
   IFS= read -r -d '' PM_REMOTE_TEST_USER || die "payload usuario incompleto"
   IFS= read -r -d '' PM_REMOTE_TEST_PASSWORD || die "payload password incompleto"
+}
+
+read_winding_login_secrets(){
+  read_planning_secret
+  read_login_secrets
 }
 
 cd "$SUITE_ROOT"
@@ -202,6 +213,63 @@ case "$MODE" in
     args=(--scenario "$scenario" --sqlserver-only)
     [ "$MODE" = winding-seed ] || args+=(--teardown)
     run_dotnet "$timeout_s" run --no-build --project "$seed_project" -- "${args[@]}"
+    ;;
+  winding-login-seed|winding-login-teardown)
+    ensure_dotnet_runner || die "dotnet nativo ausente y la imagen '$DOTNET_IMAGE' no esta cacheada"
+    read_winding_login_secrets
+    timeout_s="${8:-900}"; scenario="${9:-}"; seed_project="${10:-}"
+    [ "$scenario" = login-four-plants ] || die "escenario remoto de login debe ser login-four-plants"
+    [ -f "$seed_project" ] || die "proyecto seeder inexistente"
+    export ConnectionStrings__Planning="$PM_REMOTE_PLANNING_CS"
+    export PM_E2E_TEST_USER="$PM_REMOTE_TEST_USER" PM_E2E_TEST_PASSWORD="$PM_REMOTE_TEST_PASSWORD"
+    args=(--scenario "$scenario" --sqlserver-only)
+    [ "$MODE" = winding-login-seed ] || args+=(--teardown)
+    # El seeder informa el usuario en stdout y en algunos errores. El carril conserva sólo el veredicto para
+    # impedir que las credenciales transmitidas formen parte del log o de la evidencia.
+    if run_dotnet "$timeout_s" run --no-build --project "$seed_project" -- "${args[@]}" >/dev/null 2>&1; then
+      printf '[seed] autoridad SQL de login: %s OK\n' "${MODE#winding-login-}"
+    else
+      die "fallo el ${MODE#winding-login-} SQL-only de la autoridad de login"
+    fi
+    ;;
+  winding-login-verify)
+    require_node; command -v curl >/dev/null 2>&1 || die "curl ausente en macdata"
+    read_login_secrets
+    api_url="${8:-}"; plant="${9:-}"
+    [ "$plant" = RES ] || die "planta de verificacion de login inesperada"
+    case "$api_url" in http://127.0.0.1:*'/') : ;; *) die "API URL de verificacion de login invalida" ;; esac
+    export PM_REMOTE_TEST_USER PM_REMOTE_TEST_PASSWORD PM_REMOTE_LOGIN_PLANT="$plant"
+    response_file="$(mktemp "${TMPDIR:-/tmp}/pm-winding-login-response.XXXXXX")" \
+      || die "no se creo respuesta temporal de login"
+    LOGIN_RESPONSE_FILE="$response_file"
+    chmod 600 "$response_file"
+    http_code="$({
+      node --input-type=module -e \
+        'process.stdout.write(JSON.stringify({UserName:process.env.PM_REMOTE_TEST_USER,Password:process.env.PM_REMOTE_TEST_PASSWORD,Plant:process.env.PM_REMOTE_LOGIN_PLANT}))' \
+        | curl -sS --max-time 60 -o "$response_file" -w '%{http_code}' -H 'Content-Type: application/json' \
+          -X POST --data-binary @- "${api_url}api/v1/catalogs/login/authenticate"
+    } 2>/dev/null)" || { unlink "$response_file"; die "fallo el transporte del preflight de login"; }
+    if [ "$http_code" != 200 ]; then
+      unlink "$response_file"
+      die "preflight de login rechazo la autoridad SQL (HTTP $http_code)"
+    fi
+    if ! PM_REMOTE_LOGIN_RESPONSE="$response_file" node --input-type=module -e '
+      import fs from "node:fs";
+      const body = JSON.parse(fs.readFileSync(process.env.PM_REMOTE_LOGIN_RESPONSE, "utf8"));
+      const ok = body?.userName === process.env.PM_REMOTE_TEST_USER
+        && body?.plant === "RES"
+        && body?.landingPage === "CargaProgMaestro.aspx"
+        && body?.isGuest === false
+        && typeof body?.administratorRoleCode === "string" && body.administratorRoleCode.length > 0
+        && typeof body?.systemRoleCode === "string" && body.systemRoleCode.length > 0;
+      process.exit(ok ? 0 : 1);
+    ' >/dev/null 2>&1; then
+      unlink "$response_file"
+      die "preflight de login devolvio una sesion SQL incompleta"
+    fi
+    unlink "$response_file"
+    LOGIN_RESPONSE_FILE=''
+    printf '[preflight] autoridad SQL de login: READY\n'
     ;;
   test)
     require_node; read_login_secrets

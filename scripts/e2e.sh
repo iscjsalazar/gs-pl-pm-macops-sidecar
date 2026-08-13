@@ -580,6 +580,8 @@ PW_CLEANUP_ARMED=0
 PW_CLEANUP_RUNNING=0
 PW_SEED_ATTEMPTED=0
 PW_FLAG_TOUCHED=0
+WW_LOGIN_SCENARIO=login-four-plants
+WW_LOGIN_SEED_ATTEMPTED=0
 
 e2e_playwright_validate_inputs(){
   local wt_abs specs spec_count expected_project credentials_abs suite_abs public_value
@@ -640,7 +642,8 @@ e2e_playwright_unquote(){
 }
 
 e2e_playwright_credentials(){
-  local user_set=0 pass_set=0 file line key value perms perm_value
+  local policy="${1:-compatible}" user_set=0 pass_set=0 file line key value perms perm_value
+  case "$policy" in compatible|strict) : ;; *) edie "politica de credenciales invalida" ;; esac
   PW_TEST_USER=''; PW_TEST_PASSWORD=''
   if [ "${PM_E2E_TEST_USER+x}" = x ]; then PW_TEST_USER="$PM_E2E_TEST_USER"; user_set=1; fi
   if [ "${PM_E2E_TEST_PASSWORD+x}" = x ]; then PW_TEST_PASSWORD="$PM_E2E_TEST_PASSWORD"; pass_set=1; fi
@@ -649,11 +652,17 @@ e2e_playwright_credentials(){
   if { [ "$user_set" -eq 0 ] || [ "$pass_set" -eq 0 ]; } && [ -f "$file" ]; then
     perms="$(stat -f '%Lp' "$file" 2>/dev/null || true)"
     case "$perms" in
-      ''|*[!0-7]*) ewarn "no se verificaron permisos de '$file'" ;;
+      ''|*[!0-7]*)
+        [ "$policy" != strict ] || edie "PWCREDENTIALS strict no pudo verificar permisos"
+        ewarn "no se verificaron permisos de '$file'"
+        ;;
       *)
         perm_value=$((8#$perms))
         [ $((perm_value & 022)) -eq 0 ] || edie "PWCREDENTIALS permite escritura de grupo/otros (modo $perms)"
-        [ $((perm_value & 077)) -eq 0 ] || ewarn "PWCREDENTIALS es legible por grupo/otros (modo $perms; recomendado 600)"
+        if [ $((perm_value & 077)) -ne 0 ]; then
+          [ "$policy" != strict ] || edie "PWCREDENTIALS strict exige modo sin acceso de grupo/otros"
+          ewarn "PWCREDENTIALS es legible por grupo/otros (modo $perms; recomendado 600)"
+        fi
         ;;
     esac
     while IFS= read -r line || [ -n "$line" ]; do
@@ -668,6 +677,14 @@ e2e_playwright_credentials(){
   fi
   [ "$user_set" -eq 1 ] && [ -n "$PW_TEST_USER" ] || edie "falta PM_E2E_TEST_USER"
   [ "$pass_set" -eq 1 ] || edie "falta PM_E2E_TEST_PASSWORD (puede definirse vacio para el slot local)"
+}
+
+e2e_winding_require_normalized_credential(){
+  local name="$1" value="$2"
+  [ -n "$value" ] || edie "e2e-playwright-winding exige $name no vacio; no usa bypass ni flags de login"
+  case "$value" in
+    [[:space:]]*|*[[:space:]]) edie "e2e-playwright-winding exige $name normalizado y sin whitespace periferico" ;;
+  esac
 }
 
 e2e_playwright_set_flag(){
@@ -695,7 +712,11 @@ e2e_playwright_remote(){
     winding-seed|winding-teardown)
       printf '%s\0' "$PW_PLANNING_CS" | ssh -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$PM_REMOTE_SSH" "$cmd"
       ;;
-    test|winding-test)
+    winding-login-seed|winding-login-teardown)
+      printf '%s\0%s\0%s\0' "$PW_PLANNING_CS" "$PW_TEST_USER" "$PW_TEST_PASSWORD" \
+        | ssh -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$PM_REMOTE_SSH" "$cmd"
+      ;;
+    test|winding-test|winding-login-verify)
       printf '%s\0%s\0' "$PW_TEST_USER" "$PW_TEST_PASSWORD" | ssh -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$PM_REMOTE_SSH" "$cmd"
       ;;
     *) ewarn "modo remoto desconocido: '$mode'"; return 2 ;;
@@ -915,6 +936,8 @@ e2e_winding_validate_inputs(){
   [ -f "$LEGACY_SRC/tests/e2e/seed-data/scenarios.manifest.json" ] || edie "falta scenarios.manifest.json"
   grep -Fq '"winding-macro-res"' "$LEGACY_SRC/tests/e2e/seed-data/scenarios.manifest.json" \
     || edie "winding-macro-res no esta activo en scenarios.manifest.json"
+  grep -Fq '"login-four-plants"' "$LEGACY_SRC/tests/e2e/seed-data/scenarios.manifest.json" \
+    || edie "login-four-plants no esta activo en scenarios.manifest.json"
   specs="$(find "$LEGACY_SRC/tests/e2e/features" -path '*/specs/maquinas-prog-bobinas.spec.ts' -type f -print 2>/dev/null)"
   spec_count="$(printf '%s\n' "$specs" | grep -c .)"
   [ "$spec_count" -eq 1 ] || edie "se esperaba un unico maquinas-prog-bobinas.spec.ts y se encontraron $spec_count"
@@ -1020,6 +1043,10 @@ e2e_winding_cleanup(){
     e2e_playwright_remote winding-teardown teardown "$WW_TIMEOUT" "$WW_SCENARIO" "$PW_SEED_PROJECT" \
       || { ewarn "fallo el teardown SQL-only de winding"; rc=1; }
   fi
+  if [ "$WW_LOGIN_SEED_ATTEMPTED" = 1 ]; then
+    e2e_playwright_remote winding-login-teardown login-teardown "$WW_TIMEOUT" "$WW_LOGIN_SCENARIO" "$PW_SEED_PROJECT" \
+      || { ewarn "fallo el teardown SQL-only de login"; rc=1; }
+  fi
   wt_registry_lock wt_slot_touch "$WT" || rc=1
   e2e_playwright_collect || { ewarn "fallo la descarga de evidencia"; rc=1; }
   WW_CLEANUP_ARMED=0; WW_CLEANUP_RUNNING=0
@@ -1052,14 +1079,25 @@ _cmd_playwright_winding_locked(){
 
   e2e_winding_backfill_menu || rc=1
   if [ "$rc" -eq 0 ]; then
-    WW_SEED_ATTEMPTED=1
-    if ! e2e_playwright_remote winding-seed seed "$WW_TIMEOUT" "$WW_SCENARIO" "$PW_SEED_PROJECT"; then
-      ewarn "fallo el seed SQL-only; no se ejecuta navegador y se entra a cleanup"
+    WW_LOGIN_SEED_ATTEMPTED=1
+    if ! e2e_playwright_remote winding-login-seed login-seed "$WW_TIMEOUT" "$WW_LOGIN_SCENARIO" "$PW_SEED_PROJECT"; then
+      ewarn "fallo el seed SQL-only de login; no se ejecuta winding ni navegador y se entra a cleanup"
       rc=1
     else
-      e2e_playwright_remote winding-test test "$WW_PROJECT" "$WW_GREP" "$PW_SPEC_REL" \
-        "$PW_BASE_URL" "$PW_API_URL" "$PLANTA" "$WW_TIMEOUT" "$WW_RETRIES" || test_rc=$?
-      if [ "$test_rc" -ne 0 ]; then ewarn "sub-run winding fallo (exit=$test_rc)"; rc=1; fi
+      WW_SEED_ATTEMPTED=1
+      if ! e2e_playwright_remote winding-seed seed "$WW_TIMEOUT" "$WW_SCENARIO" "$PW_SEED_PROJECT"; then
+        ewarn "fallo el seed SQL-only de winding; no se ejecuta navegador y se entra a cleanup"
+        rc=1
+      else
+        if ! e2e_playwright_remote winding-login-verify login-preflight "$PW_API_URL" "$PLANTA"; then
+          ewarn "fallo el preflight de autoridad SQL; no se ejecuta navegador y se entra a cleanup"
+          rc=1
+        else
+          e2e_playwright_remote winding-test test "$WW_PROJECT" "$WW_GREP" "$PW_SPEC_REL" \
+            "$PW_BASE_URL" "$PW_API_URL" "$PLANTA" "$WW_TIMEOUT" "$WW_RETRIES" || test_rc=$?
+          if [ "$test_rc" -ne 0 ]; then ewarn "sub-run winding fallo (exit=$test_rc)"; rc=1; fi
+        fi
+      fi
     fi
   fi
   e2e_winding_cleanup || cleanup_rc=$?
@@ -1072,7 +1110,9 @@ _cmd_playwright_winding_locked(){
 cmd_playwright_winding(){
   umask 077
   e2e_winding_validate_inputs
-  PW_CREDENTIALS_FILE="$WW_CREDENTIALS_FILE"; e2e_playwright_credentials
+  PW_CREDENTIALS_FILE="$WW_CREDENTIALS_FILE"; e2e_playwright_credentials strict
+  e2e_winding_require_normalized_credential PM_E2E_TEST_USER "$PW_TEST_USER"
+  e2e_winding_require_normalized_credential PM_E2E_TEST_PASSWORD "$PW_TEST_PASSWORD"
   PW_NODE_BIN="$WW_NODE_BIN"; PW_INSTALL="$WW_INSTALL"; PW_TIMEOUT="$WW_TIMEOUT"; PW_RETRIES="$WW_RETRIES"
   PW_SCENARIO="$WW_SCENARIO"
   e2e_slot
