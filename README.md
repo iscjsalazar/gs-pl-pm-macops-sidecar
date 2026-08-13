@@ -434,7 +434,8 @@ menú, siembra `login-four-plants` y después `winding-macro-res` con `--sqlserv
 siempre intenta ambos teardown en orden inverso. Las credenciales de login viajan al seeder únicamente por
 `stdin` delimitado por NUL y variables de entorno; no forman parte de argumentos ni evidencia.
 `PM_E2E_SEED_DONE=1` y `PM_E2E_SKIP_TEARDOWN=1` impiden que Playwright procese el manifest completo.
-El usuario y el password deben ser no vacíos, no contener sólo whitespace y no llevar whitespace periférico.
+El usuario y el password deben ser no vacíos, no contener sólo whitespace, no llevar whitespace periférico
+y respetar los `MaxLength` de `Login.aspx`: 8 caracteres para el usuario y 20 para el password.
 Cuando provienen de `PWCREDENTIALS`, el archivo debe negar todo acceso de grupo/otros; el carril no habilita
 bypass ni modifica flags de Login. Antes del browser, una
 autenticación contra el endpoint SQL-only valida identidad, bloqueo, módulo, membresía y parámetros/landing; el

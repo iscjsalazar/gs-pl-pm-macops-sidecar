@@ -623,6 +623,18 @@ for credential_case in 'user|' '|password' '   |password' 'user|   ' ' user|pass
     && ok "credencial vacia o con whitespace periferico aborta antes del slot" \
     || bad "credencial invalida no fallo antes del slot: $invalid_credential"
 done
+boundary_credential="$(winding_invalid_credential_case 'usr12345' '01234567890123456789')"
+[ "$boundary_credential" = '99|validate,credentials,slot' ] \
+  && ok "credenciales en limites WebForms 8/20 alcanzan resolucion de slot" \
+  || bad "credenciales 8/20 no alcanzaron slot: $boundary_credential"
+boundary_credential="$(winding_invalid_credential_case 'user12345' '01234567890123456789')"
+[ "$boundary_credential" = '1|validate,credentials' ] \
+  && ok "usuario de 9 caracteres aborta antes del slot" \
+  || bad "usuario de 9 caracteres no fallo antes del slot: $boundary_credential"
+boundary_credential="$(winding_invalid_credential_case 'usr12345' '012345678901234567890')"
+[ "$boundary_credential" = '1|validate,credentials' ] \
+  && ok "password de 21 caracteres aborta antes del slot" \
+  || bad "password de 21 caracteres no fallo antes del slot: $boundary_credential"
 [ "$(winding_credentials_policy_case strict 600)" = '0|user=set|password=set' ] \
   && ok "politica winding strict acepta PWCREDENTIALS modo 600" \
   || bad "politica winding strict rechazo PWCREDENTIALS modo 600"

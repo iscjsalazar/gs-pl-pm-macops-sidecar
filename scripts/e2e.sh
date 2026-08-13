@@ -680,11 +680,13 @@ e2e_playwright_credentials(){
 }
 
 e2e_winding_require_normalized_credential(){
-  local name="$1" value="$2"
+  local name="$1" value="$2" max_length="$3"
   [ -n "$value" ] || edie "e2e-playwright-winding exige $name no vacio; no usa bypass ni flags de login"
   case "$value" in
     [[:space:]]*|*[[:space:]]) edie "e2e-playwright-winding exige $name normalizado y sin whitespace periferico" ;;
   esac
+  [ "${#value}" -le "$max_length" ] \
+    || edie "e2e-playwright-winding exige $name de hasta $max_length caracteres por el contrato de Login.aspx"
 }
 
 e2e_playwright_set_flag(){
@@ -1111,8 +1113,8 @@ cmd_playwright_winding(){
   umask 077
   e2e_winding_validate_inputs
   PW_CREDENTIALS_FILE="$WW_CREDENTIALS_FILE"; e2e_playwright_credentials strict
-  e2e_winding_require_normalized_credential PM_E2E_TEST_USER "$PW_TEST_USER"
-  e2e_winding_require_normalized_credential PM_E2E_TEST_PASSWORD "$PW_TEST_PASSWORD"
+  e2e_winding_require_normalized_credential PM_E2E_TEST_USER "$PW_TEST_USER" 8
+  e2e_winding_require_normalized_credential PM_E2E_TEST_PASSWORD "$PW_TEST_PASSWORD" 20
   PW_NODE_BIN="$WW_NODE_BIN"; PW_INSTALL="$WW_INSTALL"; PW_TIMEOUT="$WW_TIMEOUT"; PW_RETRIES="$WW_RETRIES"
   PW_SCENARIO="$WW_SCENARIO"
   e2e_slot
