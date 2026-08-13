@@ -19,6 +19,7 @@
 #   make e2e-up    WT=<folder> LEGACYSRC=<path>   # data tier + backend(slot) + Oracle(slot) + puente SQL + legacy(+inyeccion) + flag ON + smoke
 #   make e2e-smoke WT=<folder>                    # solo el smoke funcional (asume e2e-up ya dejo todo arriba)
 #   make e2e-playwright WT=<folder> LEGACYSRC=<path>  # focal tnuc02, OFF/ON, seed y teardown por slot
+#   make e2e-playwright-winding WT=<folder> LEGACYSRC=<path>  # focal @winding-macro, SQL-only y sin mutar flags
 #   make e2e-url   WT=<folder>                    # reimprime el recuadro de acceso del slot (re-levanta el tunel si murio)
 #   make e2e-down  WT=<folder>                    # baja tunel + site + API + Oracle del slot + puente (singletons intactos)
 #   make e2e-down  WT=<folder> ... PM_E2E_KEEP_FRONT=1   # conserva el site del legado (re-usar con FORCE=1)
@@ -72,6 +73,18 @@ PW_TIMEOUT="${PM_E2E_PW_TIMEOUT:-900}"
 PW_RETRIES="${PM_E2E_PW_RETRIES:-0}"
 PW_WARM="${PM_E2E_PW_WARM:-0}"
 PW_DOTNET_IMAGE="${PM_E2E_PW_DOTNET_IMAGE:-mcr.microsoft.com/dotnet/sdk:10.0}"
+
+# Runner focal de devanado. Usa nombres propios para mantener cerrado el contrato tnuc02 anterior.
+WW_SCENARIO="${PM_E2E_WINDING_SCENARIO:-winding-macro-res}"
+WW_GREP="${PM_E2E_WINDING_GREP:-@winding-macro}"
+WW_PROJECT="${PM_E2E_WINDING_PROJECT:-plant-res}"
+WW_FLAG_KEY="${PM_E2E_WINDING_FLAG_KEY:-machines-oracle-replica}"
+WW_CREDENTIALS_FILE="${PM_E2E_WINDING_CREDENTIALS_FILE:-}"
+WW_NODE_BIN="${PM_E2E_WINDING_NODE_BIN:-}"
+WW_INSTALL="${PM_E2E_WINDING_INSTALL:-0}"
+WW_TIMEOUT="${PM_E2E_WINDING_TIMEOUT:-900}"
+WW_RETRIES="${PM_E2E_WINDING_RETRIES:-0}"
+WW_WARM="${PM_E2E_WINDING_WARM:-1}"
 
 VDIR="ProgramaMaestroLN"
 # Componentes WCF de la pantalla ValidacionParidad (260701-2323): disparo async + poll de estado + reporte.
@@ -259,8 +272,9 @@ e2e_check_guest_sql(){
 # $WT ya es el folder EXACTO que 'wt-up' escribio en slots.tsv para este slot (resuelto arriba por
 # wt_slot_lookup); pasarlo EXPLICITO en vez de confiar en que el sub-make herede WT del entorno evita que un
 # cambio futuro en como se invoca este make (o en la exportacion de WT) rompa e2e-up en silencio bajo el guard.
-e2e_legacy_launch(){  # uso: e2e_legacy_launch [force]
-  local force="${1:-$FORCE}"
+e2e_legacy_launch(){  # uso: e2e_legacy_launch [force] [datatier]
+  local force="${1:-$FORCE}" datatier="${2-}"
+  case "$datatier" in ''|0|1) : ;; *) ewarn "datatier debe ser 0|1"; return 2 ;; esac
   PM_LEGACY_BACKEND_URL="$BACKEND_URL" \
   PM_LEGACY_SQL_PM_HOST="$SQL_PM_HOST" \
   PM_LEGACY_SQL_PM_DB="$PM_PLANNING_DB" \
@@ -270,7 +284,8 @@ e2e_legacy_launch(){  # uso: e2e_legacy_launch [force]
   PM_LEGACY_SQL_READER_PASS="$JOBS_READER_PASS" \
   make -C "$BASE_DIR" legacy-launch SOLUTION="$LEGACY_SRC" WT="$WT" \
     SLOT="$E2E_SLOT" SITEPORT="$SITEPORT" TUNNEL="$TUNNEL" \
-    ORACLEPORT="$E2E_ORACLE_PORT" DBHOST="$PM_GUEST_GATEWAY" FORCE="$force"
+    ORACLEPORT="$E2E_ORACLE_PORT" DBHOST="$PM_GUEST_GATEWAY" FORCE="$force" \
+    ${datatier:+DATATIER="$datatier"}
 }
 
 # --- feature flag y ordenes (contra el SQL compartido, BD del slot) ---
@@ -677,7 +692,10 @@ e2e_playwright_remote(){
     seed|teardown)
       printf '%s\0%s\0' "$PW_PLANNING_CS" "$PW_CTRLPISO_CS" | ssh -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$PM_REMOTE_SSH" "$cmd"
       ;;
-    test)
+    winding-seed|winding-teardown)
+      printf '%s\0' "$PW_PLANNING_CS" | ssh -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$PM_REMOTE_SSH" "$cmd"
+      ;;
+    test|winding-test)
       printf '%s\0%s\0' "$PW_TEST_USER" "$PW_TEST_PASSWORD" | ssh -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$PM_REMOTE_SSH" "$cmd"
       ;;
     *) ewarn "modo remoto desconocido: '$mode'"; return 2 ;;
@@ -825,6 +843,260 @@ cmd_playwright(){
   return "$rc"
 }
 
+# --- runner focal winding-macro por slot ---
+
+WW_CLEANUP_ARMED=0
+WW_CLEANUP_RUNNING=0
+WW_SEED_ATTEMPTED=0
+WW_REPLICA_FLAG_STATE=unchecked
+WW_MENU_BACKFILL_STATE=not-run
+
+e2e_winding_resolve_legacy_src(){
+  local input="$1" worktrees_abs resolved repo_top common_raw common_abs legacy_common
+  [ -n "$input" ] || { ewarn "e2e-playwright-winding exige LEGACYSRC=<ruta-absoluta-worktree-legacy>"; return 1; }
+  case "$input" in /*) : ;; *) ewarn "LEGACYSRC debe ser ruta absoluta: '$input'"; return 1 ;; esac
+  case "/$input/" in *'/../'*) ewarn "LEGACYSRC no admite componentes '..': '$input'"; return 1 ;; esac
+  worktrees_abs="$(cd "$WRAPPER_DIR/worktrees" 2>/dev/null && pwd -P)" \
+    || { ewarn "no se resolvio el directorio de worktrees"; return 1; }
+  pm_path_contains_symlink "$input" && { ewarn "LEGACYSRC no admite symlinks: '$input'"; return 1; }
+  resolved="$(cd "$input" 2>/dev/null && pwd -P)" \
+    || { ewarn "LEGACYSRC no existe o no es directorio: '$input'"; return 1; }
+  [ "$(dirname "$resolved")" = "$worktrees_abs" ] \
+    || { ewarn "LEGACYSRC debe ser un worktree directo bajo '$worktrees_abs': '$input'"; return 1; }
+  [ -f "$resolved/ProgramaMaestroPT.sln" ] \
+    || { ewarn "LEGACYSRC '$resolved' no contiene ProgramaMaestroPT.sln"; return 1; }
+  repo_top="$(git -C "$resolved" rev-parse --show-toplevel 2>/dev/null)" \
+    || { ewarn "LEGACYSRC no es un checkout Git: '$resolved'"; return 1; }
+  repo_top="$(cd "$repo_top" 2>/dev/null && pwd -P)" || return 1
+  [ "$repo_top" = "$resolved" ] \
+    || { ewarn "LEGACYSRC no es la raiz del worktree Git: '$resolved'"; return 1; }
+  common_raw="$(git -C "$resolved" rev-parse --git-common-dir 2>/dev/null)" \
+    || { ewarn "LEGACYSRC no expone git-common-dir"; return 1; }
+  case "$common_raw" in
+    /*) common_abs="$(cd "$common_raw" 2>/dev/null && pwd -P)" ;;
+    *) common_abs="$(cd "$resolved/$common_raw" 2>/dev/null && pwd -P)" ;;
+  esac || { ewarn "git-common-dir de LEGACYSRC no se pudo canonicalizar"; return 1; }
+  legacy_common="$(cd "$WRAPPER_DIR/pl-pm-legacy/.git" 2>/dev/null && pwd -P)" \
+    || { ewarn "no se resolvio el repositorio central pl-pm-legacy"; return 1; }
+  [ "$common_abs" = "$legacy_common" ] \
+    || { ewarn "LEGACYSRC pertenece a otro repositorio Git: '$resolved'"; return 1; }
+  printf '%s' "$resolved"
+}
+
+e2e_winding_validate_inputs(){
+  local specs spec_count expected_project credentials_abs suite_abs public_value
+  [ -n "$WT" ] || edie "e2e-playwright-winding exige WT=<worktree-pm>"
+  pm_resolve_worktree_dir "$WT" >/dev/null || edie "WT invalido: '$WT'"
+  LEGACY_SRC="$(e2e_winding_resolve_legacy_src "$LEGACY_SRC")" || edie "LEGACYSRC no es un worktree legacy valido"
+  [ -f "$LEGACY_SRC/tests/e2e/package-lock.json" ] || edie "LEGACYSRC no contiene tests/e2e/package-lock.json"
+  [ -f "$LEGACY_SRC/tests/e2e/playwright.config.ts" ] || edie "LEGACYSRC no contiene tests/e2e/playwright.config.ts"
+  [ -f "$LEGACY_SRC/tests/e2e/$PW_SEED_PROJECT" ] || edie "LEGACYSRC no contiene el seeder $PW_SEED_PROJECT"
+
+  [ "$WW_SCENARIO" = winding-macro-res ] || edie "WWSCENARIO debe ser winding-macro-res"
+  [ "$WW_GREP" = @winding-macro ] || edie "WWGREP debe ser @winding-macro"
+  [ "$WW_PROJECT" = plant-res ] || edie "WWPROJECT debe ser plant-res"
+  [ "$WW_FLAG_KEY" = machines-oracle-replica ] || edie "WWFLAGKEY debe ser machines-oracle-replica"
+  case "$PLANTA" in RES) : ;; *) edie "PLANTA invalida: '$PLANTA' (winding exige RES)" ;; esac
+  expected_project="plant-$(printf '%s' "$PLANTA" | tr '[:upper:]' '[:lower:]')"
+  [ "$WW_PROJECT" = "$expected_project" ] || edie "WWPROJECT '$WW_PROJECT' diverge de PLANTA=$PLANTA"
+  case "$WW_INSTALL" in 0|1) : ;; *) edie "PWINSTALL debe ser 0|1" ;; esac
+  case "$WW_WARM" in 0|1) : ;; *) edie "WWWARM debe ser 0|1" ;; esac
+  case "$WW_TIMEOUT" in ''|*[!0-9]*) edie "PWTIMEOUT debe ser entero positivo" ;; esac
+  [ "$WW_TIMEOUT" -gt 0 ] || edie "PWTIMEOUT debe ser entero positivo mayor que cero"
+  case "$WW_RETRIES" in ''|*[!0-9]*) edie "PWRETRIES debe ser entero >=0" ;; esac
+  for public_value in "$WW_NODE_BIN" "$PM_REMOTE_DOCKER_CONTEXT" "$PW_DOTNET_IMAGE"; do
+    case "$public_value" in
+      *"'"*|*$'\n'*|*$'\r'*) edie "PWNODEBIN/contexto/imagen no admiten comilla simple ni saltos de linea" ;;
+    esac
+  done
+
+  [ -f "$LEGACY_SRC/tests/e2e/seed-data/data/winding-macro-res.json" ] \
+    || edie "no existe seed-data/data/winding-macro-res.json"
+  [ -f "$LEGACY_SRC/tests/e2e/seed-data/scenarios.manifest.json" ] || edie "falta scenarios.manifest.json"
+  grep -Fq '"winding-macro-res"' "$LEGACY_SRC/tests/e2e/seed-data/scenarios.manifest.json" \
+    || edie "winding-macro-res no esta activo en scenarios.manifest.json"
+  specs="$(find "$LEGACY_SRC/tests/e2e/features" -path '*/specs/maquinas-prog-bobinas.spec.ts' -type f -print 2>/dev/null)"
+  spec_count="$(printf '%s\n' "$specs" | grep -c .)"
+  [ "$spec_count" -eq 1 ] || edie "se esperaba un unico maquinas-prog-bobinas.spec.ts y se encontraron $spec_count"
+  PW_SPEC_REL="${specs#$LEGACY_SRC/tests/e2e/}"
+  grep -Fq '@winding-macro' "$specs" || edie "el spec no contiene @winding-macro"
+  grep -Fq '@plant-res' "$specs" || edie "el spec no contiene @plant-res"
+
+  if [ -n "$WW_CREDENTIALS_FILE" ]; then
+    [ -f "$WW_CREDENTIALS_FILE" ] || edie "PWCREDENTIALS no existe: '$WW_CREDENTIALS_FILE'"
+    credentials_abs="$(cd "$(dirname "$WW_CREDENTIALS_FILE")" && pwd -P)/$(basename "$WW_CREDENTIALS_FILE")"
+    suite_abs="$(cd "$LEGACY_SRC/tests/e2e" && pwd -P)"
+    case "$credentials_abs" in "$suite_abs"/*) edie "PWCREDENTIALS no puede vivir dentro del arbol stageado" ;; esac
+  fi
+}
+
+# Resuelve el slot y lee la BD sin renovar el lease, levantar puentes, stagear archivos ni desplegar el frontend.
+e2e_winding_resolve_slot(){
+  local requested_site="$SITEPORT" requested_tunnel="$TUNNEL" expected_sql db_exists api_port
+  e2e_slot
+  [ -z "$requested_site" ] || [ "$requested_site" = "$WT_SITE_PORT" ] || { ewarn "SITEPORT no pertenece al slot"; return 1; }
+  [ -z "$requested_tunnel" ] || [ "$requested_tunnel" = "$WT_TUNNEL_PORT" ] || { ewarn "TUNNEL no pertenece al slot"; return 1; }
+  SITEPORT="$WT_SITE_PORT"; TUNNEL="$WT_TUNNEL_PORT"
+  # legacy-launch exige un valor de wiring heredado, pero este carril no consulta ni levanta Oracle.
+  E2E_ORACLE_PORT="$(( PM_WT_ORACLE_PORT_BASE + E2E_SLOT ))"; api_port="$(e2e_api_port)"
+  BACKEND_URL="http://${PM_GUEST_GATEWAY}:${api_port}"
+  expected_sql="${PM_GUEST_GATEWAY},${BRIDGE_PORT}"
+  [ -z "$SQL_PM_HOST_OVERRIDE" ] || [ "$SQL_PM_HOST_OVERRIDE" = "$expected_sql" ] || { ewarn "SQLPMHOST diverge del puente canonico"; return 1; }
+  SQL_PM_HOST="$expected_sql"
+  E2E_SQL_PW="$(wt_shared_sql_password)" || return 1
+  db_exists="$(wt_shared_scalar "$E2E_SQL_PW" "SET NOCOUNT ON; SELECT CASE WHEN DB_ID(N'$PM_PLANNING_DB') IS NULL THEN 0 ELSE 1 END;")"
+  [ "$db_exists" = 1 ] || { ewarn "no existe la BD exacta $PM_PLANNING_DB"; return 1; }
+  PW_PLANNING_CS="$(PM_TEST_SQL_HOST=127.0.0.1 PM_SQL_HOST_PORT="$PM_SHARED_SQL_PUBLISHED" PM_SQL_SA_PASSWORD="$E2E_SQL_PW" pm_planning_connstr)"
+  PW_BASE_URL="http://${PM_GUEST_WINHOST}:${SITEPORT}/$VDIR/"
+  PW_API_URL="http://127.0.0.1:${api_port}/"
+  PW_REMOTE_ROOT="pm-e2e-suite/wt${E2E_SLOT}"
+  PW_REMOTE_RESULT="$PW_REMOTE_ROOT/.results/$PW_RUN_ID"
+}
+
+# Las operaciones que renuevan estado operativo ocurren solo después de comprobar el flag OFF.
+e2e_winding_bind_slot(){
+  local api_port; api_port="$(e2e_api_port)"
+  wt_registry_lock wt_slot_touch "$WT" || return 1
+  e2e_bridge_up || return 1
+  wt_shared_sql_check || return 1
+  on_intel "curl -fsS -o /dev/null --max-time 8 'http://127.0.0.1:$api_port/health/live'" || return 1
+}
+
+e2e_winding_wiring_matches(){
+  local w="$1" ok=0 dep_backend dep_pm dep_pm_server
+  dep_backend="$(printf '%s\n' "$w" | sed -n 's/^backendBaseUrl=//p' | head -1)"
+  dep_pm="$(printf '%s\n' "$w" | sed -n 's/^ConStrPm=//p' | head -1)"
+  dep_pm_server="$(e2e_conn_field "$dep_pm" Server)"
+  [ "$dep_backend" = "$BACKEND_URL" ] || { ewarn "      backendBaseUrl desplegado='$dep_backend' esperado='$BACKEND_URL'"; ok=1; }
+  [ "$dep_pm_server" = "$SQL_PM_HOST" ] || { ewarn "      ConStrPm Server desplegado='$dep_pm_server' esperado='$SQL_PM_HOST'"; ok=1; }
+  case "$dep_pm" in
+    *"Initial Catalog=$PM_PLANNING_DB;"*) : ;;
+    *) ewarn "      ConStrPm no apunta a 'Initial Catalog=$PM_PLANNING_DB'"; ok=1 ;;
+  esac
+  return "$ok"
+}
+
+e2e_winding_prepare_front(){
+  local wiring site_url="http://${PM_GUEST_WINHOST}:${SITEPORT}/$VDIR/Login.aspx"
+  if [ "$WW_WARM" = 1 ]; then
+    ewarn "WWWARM=1: recompila/despliega LEGACYSRC al IIS local del slot bajo guest-lock; no es deploy Prolec dev"
+    e2e_legacy_launch 1 0 || return 1
+  fi
+  wiring="$(e2e_deployed_wiring)"
+  e2e_winding_wiring_matches "$wiring" || { ewarn "wiring winding divergente"; return 1; }
+  e2e_check_guest_sql || return 1
+  on_intel "curl -fsS -o /dev/null --max-time 15 '$site_url'" \
+    || { ewarn "el Login.aspx del slot no responde"; return 1; }
+}
+
+# La ausencia, duplicidad o estado ON se consideran desconocidos/inseguros. Esta función nunca escribe el flag.
+e2e_winding_assert_replica_off(){
+  local state sql
+  sql="SET NOCOUNT ON; SELECT CASE WHEN COUNT_BIG(*)=0 THEN N'MISSING' WHEN COUNT_BIG(*)>1 THEN N'DUPLICATE' WHEN MAX(CONVERT(int,[IsEnabled]))=0 THEN N'OFF' ELSE N'ON' END FROM [$PM_PLANNING_DB].[FeatureManagement].[FeatureFlags] WHERE [Key]=N'$WW_FLAG_KEY' AND [Plant]=N'$PLANTA';"
+  state="$(wt_shared_scalar "$E2E_SQL_PW" "$sql")"
+  WW_REPLICA_FLAG_STATE="${state:-UNREADABLE}"
+  [ -z "${WW_REPLICA_STATE_FILE:-}" ] || printf '%s\n' "$WW_REPLICA_FLAG_STATE" > "$WW_REPLICA_STATE_FILE"
+  [ "$state" = OFF ] || { ewarn "$WW_FLAG_KEY/$PLANTA debe existir una vez y estar OFF; estado=$WW_REPLICA_FLAG_STATE (no se modifico)"; return 1; }
+  elog "$WW_FLAG_KEY/$PLANTA verificado OFF (solo lectura)"
+}
+
+e2e_winding_backfill_menu(){
+  local response_file="$PW_REMOTE_RESULT/navigation-menu-backfill.json" count
+  on_intel "curl -fsS --max-time 120 -H 'Content-Type: application/json' -X POST --data '{\"plant\":\"RES\"}' '${PW_API_URL}api/v1/parity/catalog-backfill/navigation-menus/runs' > '$(wt_esc "$response_file")'" \
+    || { WW_MENU_BACKFILL_STATE=failed; printf '%s\n' "$WW_MENU_BACKFILL_STATE" > "$WW_MENU_STATE_FILE"; ewarn "fallo POST del backfill de menu"; return 1; }
+  count="$(wt_shared_scalar "$E2E_SQL_PW" "SET NOCOUNT ON; SELECT COUNT_BIG(*) FROM [$PM_PLANNING_DB].[Catalogs].[NavigationMenuItems] WHERE [Plant]=N'RES' AND [Page]=N'UserBulkOperations/MaquinasProgBobinas.aspx' AND [IsActive]=1;")"
+  [ "$count" = 1 ] || { WW_MENU_BACKFILL_STATE="invalid-count:${count:-unreadable}"; printf '%s\n' "$WW_MENU_BACKFILL_STATE" > "$WW_MENU_STATE_FILE"; ewarn "el backfill no dejo una hoja winding unica y activa"; return 1; }
+  WW_MENU_BACKFILL_STATE=ready
+  printf '%s\n' "$WW_MENU_BACKFILL_STATE" > "$WW_MENU_STATE_FILE"
+  elog "menu SQL-first RES materializado y verificado"
+}
+
+e2e_winding_cleanup(){
+  [ "$WW_CLEANUP_ARMED" = 1 ] || return 0
+  [ "$WW_CLEANUP_RUNNING" = 0 ] || return 1
+  WW_CLEANUP_RUNNING=1
+  local rc=0
+  if [ "$WW_SEED_ATTEMPTED" = 1 ]; then
+    e2e_playwright_remote winding-teardown teardown "$WW_TIMEOUT" "$WW_SCENARIO" "$PW_SEED_PROJECT" \
+      || { ewarn "fallo el teardown SQL-only de winding"; rc=1; }
+  fi
+  wt_registry_lock wt_slot_touch "$WT" || rc=1
+  e2e_playwright_collect || { ewarn "fallo la descarga de evidencia"; rc=1; }
+  WW_CLEANUP_ARMED=0; WW_CLEANUP_RUNNING=0
+  return "$rc"
+}
+
+e2e_winding_exit_cleanup(){
+  [ "$WW_CLEANUP_ARMED" = 1 ] || return 0
+  ewarn "salida inesperada: teardown winding best-effort"
+  e2e_winding_cleanup || true
+}
+
+e2e_winding_signal(){
+  ewarn "senal recibida: teardown winding best-effort"
+  e2e_winding_cleanup || true
+  wt_lock_release_all
+  exit 130
+}
+
+_cmd_playwright_winding_locked(){
+  local rc=0 test_rc=0 cleanup_rc=0
+  e2e_winding_resolve_slot || return 1
+  e2e_winding_assert_replica_off || return 1
+  e2e_winding_bind_slot || return 1
+  e2e_playwright_stage || return 1
+  e2e_winding_prepare_front || return 1
+  WW_CLEANUP_ARMED=1
+  trap 'e2e_winding_exit_cleanup' EXIT
+  trap 'e2e_winding_signal' INT TERM
+
+  e2e_winding_backfill_menu || rc=1
+  if [ "$rc" -eq 0 ]; then
+    WW_SEED_ATTEMPTED=1
+    if ! e2e_playwright_remote winding-seed seed "$WW_TIMEOUT" "$WW_SCENARIO" "$PW_SEED_PROJECT"; then
+      ewarn "fallo el seed SQL-only; no se ejecuta navegador y se entra a cleanup"
+      rc=1
+    else
+      e2e_playwright_remote winding-test test "$WW_PROJECT" "$WW_GREP" "$PW_SPEC_REL" \
+        "$PW_BASE_URL" "$PW_API_URL" "$PLANTA" "$WW_TIMEOUT" "$WW_RETRIES" || test_rc=$?
+      if [ "$test_rc" -ne 0 ]; then ewarn "sub-run winding fallo (exit=$test_rc)"; rc=1; fi
+    fi
+  fi
+  e2e_winding_cleanup || cleanup_rc=$?
+  [ "$cleanup_rc" -eq 0 ] || rc=1
+  trap - EXIT
+  trap 'wt_lock_release_all' INT TERM
+  return "$rc"
+}
+
+cmd_playwright_winding(){
+  umask 077
+  e2e_winding_validate_inputs
+  PW_CREDENTIALS_FILE="$WW_CREDENTIALS_FILE"; e2e_playwright_credentials
+  PW_NODE_BIN="$WW_NODE_BIN"; PW_INSTALL="$WW_INSTALL"; PW_TIMEOUT="$WW_TIMEOUT"; PW_RETRIES="$WW_RETRIES"
+  PW_SCENARIO="$WW_SCENARIO"
+  e2e_slot
+  PW_RUN_ID="playwright-winding-$(date -u +%Y%m%dT%H%M%SZ)-wt${E2E_SLOT}-$$"
+  PW_LOCAL_RESULT_DIR="$BASE_DIR/artifacts/playwright-winding/$PW_RUN_ID"
+  mkdir -p "$PW_LOCAL_RESULT_DIR"
+  local logf="$PW_LOCAL_RESULT_DIR/orchestrator.log" rcf="$PW_LOCAL_RESULT_DIR/result.rc" rc=0
+  WW_REPLICA_STATE_FILE="$PW_LOCAL_RESULT_DIR/replica-flag.state"
+  WW_MENU_STATE_FILE="$PW_LOCAL_RESULT_DIR/menu-backfill.state"
+  printf 'unchecked\n' > "$WW_REPLICA_STATE_FILE"
+  printf 'not-run\n' > "$WW_MENU_STATE_FILE"
+  printf 'running\n' > "$rcf"
+  wt_lock "playwright-wt${E2E_SLOT}" _cmd_playwright_winding_locked 2>&1 | tee "$logf"
+  rc="${PIPESTATUS[0]}"
+  printf '%s\n' "$rc" > "$rcf"
+  WW_REPLICA_FLAG_STATE="$(tr -d '\r\n' < "$WW_REPLICA_STATE_FILE")"
+  WW_MENU_BACKFILL_STATE="$(tr -d '\r\n' < "$WW_MENU_STATE_FILE")"
+  printf 'scenario=%s\nspec=%s\nproject=%s\ngrep=%s\nreplica_flag=%s/%s:%s\nmenu_backfill=%s\nexit=%s\n' \
+    "$WW_SCENARIO" "$PW_SPEC_REL" "$WW_PROJECT" "$WW_GREP" "$WW_FLAG_KEY" "$PLANTA" \
+    "$WW_REPLICA_FLAG_STATE" "$WW_MENU_BACKFILL_STATE" "$rc" > "$PW_LOCAL_RESULT_DIR/summary.txt"
+  elog "e2e-playwright-winding EXIT=$rc evidencia=$PW_LOCAL_RESULT_DIR"
+  return "$rc"
+}
+
 # Orden canonico: e2e-down ANTES de wt-down. El slot se resuelve al INICIO (antes de que wt-down lo libere)
 # y de forma TOLERANTE: si ya no hay slot (orden invertido), se degrada con warn y se ejecuta la limpieza
 # posible en vez de abortar. Rescate manual: make legacy-site-down SLOT=<N>.
@@ -941,8 +1213,9 @@ case "$VERB" in
   up)            cmd_up ;;
   smoke)         cmd_smoke ;;
   playwright)    cmd_playwright ;;
+  playwright-winding) cmd_playwright_winding ;;
   url)           cmd_url ;;
   down)          cmd_down ;;
   oracle-counts) cmd_oracle_counts ;;
-  *) echo "uso: $0 {up|smoke|playwright|url|down|oracle-counts}  (WT=<folder> LEGACYSRC=<path>)"; exit 2 ;;
+  *) echo "uso: $0 {up|smoke|playwright|playwright-winding|url|down|oracle-counts}  (WT=<folder> LEGACYSRC=<path>)"; exit 2 ;;
 esac

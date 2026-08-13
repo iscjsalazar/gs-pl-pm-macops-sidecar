@@ -94,6 +94,200 @@ matrix_case() {
     printf "%s|%s" "$rc" "$events"
   ' _ "$E2E" "$1"
 }
+winding_matrix_case() {
+  PM_E2E_CONTRACT_SOURCE_ONLY=1 /bin/bash -c '
+    . "$1"
+    mode="$2"; events=""
+    event(){ if [ -n "$events" ]; then events="$events,$1"; else events="$1"; fi; }
+    e2e_winding_resolve_slot(){ event resolve; return 0; }
+    e2e_winding_bind_slot(){ event bind; return 0; }
+    e2e_playwright_stage(){ event stage; return 0; }
+    e2e_winding_prepare_front(){ return 0; }
+    e2e_winding_assert_replica_off(){ event flag-check; [ "$mode" != flag-fail ]; }
+    e2e_winding_backfill_menu(){ event menu; [ "$mode" != menu-fail ]; }
+    wt_registry_lock(){ return 0; }
+    e2e_playwright_collect(){ event collect; return 0; }
+    e2e_playwright_remote(){
+      remote_mode="$1"
+      case "$remote_mode" in
+        winding-seed) event seed; [ "$mode" != seed-fail ] ;;
+        winding-test) event test; [ "$mode" != test-fail ] ;;
+        winding-teardown) event teardown; [ "$mode" != teardown-fail ] ;;
+      esac
+    }
+    WT=fixture; PLANTA=RES; WW_TIMEOUT=10; WW_SCENARIO=winding-macro-res
+    PW_SEED_PROJECT=seed.csproj; WW_PROJECT=plant-res; WW_GREP=@winding-macro
+    PW_SPEC_REL=features/winding-macro/specs/maquinas-prog-bobinas.spec.ts
+    PW_BASE_URL=http://legacy/; PW_API_URL=http://api/
+    _cmd_playwright_winding_locked; rc=$?
+    printf "%s|%s" "$rc" "$events"
+  ' _ "$E2E" "$1"
+}
+winding_real_preflight_case() {
+  local fixture event_file result
+  fixture="$(mktemp -d "${TMPDIR:-/tmp}/pm-winding-preflight.XXXXXX")"
+  event_file="$fixture/events"; : > "$event_file"
+  result="$(PM_E2E_CONTRACT_SOURCE_ONLY=1 /bin/bash -c '
+    . "$1"
+    event_file="$2"
+    event(){ [ ! -s "$event_file" ] || printf "," >> "$event_file"; printf "%s" "$1" >> "$event_file"; }
+    e2e_slot(){
+      event slot
+      E2E_SLOT=1; WT_SITE_PORT=8101; WT_TUNNEL_PORT=18101
+      PM_WT_ORACLE_PORT_BASE=15210; PM_PLANNING_DB=pm_planning_wt1
+    }
+    e2e_api_port(){ event api-port; printf 5001; }
+    wt_shared_sql_password(){ event password; printf pw; }
+    wt_shared_scalar(){
+      case "$2" in
+        *"DB_ID"*) event db-query; printf 1 ;;
+        *"FeatureManagement"*) event flag-query; printf ON ;;
+        *) event unexpected-query; return 1 ;;
+      esac
+    }
+    pm_planning_connstr(){ event connstr; printf fake-planning-cs; }
+    wt_registry_lock(){ event touch; return 0; }
+    e2e_bridge_up(){ event bridge; return 0; }
+    wt_shared_sql_check(){ event sql-check; return 0; }
+    on_intel(){ event health; return 0; }
+    e2e_playwright_stage(){ event stage; return 0; }
+    WT=fixture; SITEPORT=""; TUNNEL=""; SQL_PM_HOST_OVERRIDE=""
+    PM_GUEST_GATEWAY=172.16.128.1; PM_GUEST_WINHOST=172.16.128.129
+    BRIDGE_PORT=60211; PM_SHARED_SQL_PUBLISHED=14333; PW_RUN_ID=fixture
+    PLANTA=RES; WW_FLAG_KEY=machines-oracle-replica; WW_REPLICA_STATE_FILE=""
+    _cmd_playwright_winding_locked >/dev/null 2>&1; rc=$?
+    printf "%s" "$rc"
+  ' _ "$E2E" "$event_file")"
+  printf '%s|%s' "$result" "$(cat "$event_file")"
+  unlink "$event_file"
+  rmdir "$fixture"
+}
+winding_remote_data_case() {
+  local mode="$1" fixture fake_bin suite result log output rc
+  fixture="$(mktemp -d "${TMPDIR:-/tmp}/pm-winding-remote.XXXXXX")"
+  fake_bin="$fixture/bin"; suite="$fixture/suite"; result="$suite/.results/run"; log="$fixture/dotnet.log"; output="$fixture/output.log"
+  mkdir -p "$fake_bin" "$result"; touch "$suite/seed.csproj" "$log"
+  printf '%s\n' '#!/bin/sh' \
+    'printf "planning=%s|oracle=%s|args=%s\\n" "${ConnectionStrings__Planning:+set}" "${ConnectionStrings__CtrlPiso:+set}" "$*" >> "$WINDING_REMOTE_LOG"' \
+    'exit 0' > "$fake_bin/dotnet"
+  chmod +x "$fake_bin/dotnet"
+  printf 'planning-secret\0' | WINDING_REMOTE_LOG="$log" /bin/bash "$REMOTE" "$mode" "$suite" "$result" "$fake_bin" \
+    "$mode" '' image 10 winding-macro-res seed.csproj > "$output" 2>&1
+  rc=$?
+  printf '%s|%s' "$rc" "$(cat "$log")"
+  unlink "$fake_bin/dotnet" "$suite/seed.csproj" "$log" "$output" "$result/$mode.log" 2>/dev/null || true
+  rmdir "$fake_bin" "$result" "$suite/.results" "$suite" "$fixture" 2>/dev/null || true
+}
+legacy_launch_case() {
+  PM_E2E_CONTRACT_SOURCE_ONLY=1 /bin/bash -c '
+    . "$1"
+    make(){
+      local arg values=""
+      for arg in "$@"; do
+        case "$arg" in FORCE=*|DATATIER=*) values="${values}${values:+,}$arg" ;; esac
+      done
+      printf "inherited=%s|args=%s" "${DATATIER-unset}" "$values"
+    }
+    BASE_DIR=/sidecar; LEGACY_SRC=/legacy; WT=fixture; E2E_SLOT=1
+    SITEPORT=8101; TUNNEL=18101; E2E_ORACLE_PORT=15211
+    PM_GUEST_GATEWAY=172.16.128.1; BACKEND_URL=http://api/
+    SQL_PM_HOST=172.16.128.1,60211; PM_PLANNING_DB=pm_planning_wt1
+    E2E_SQL_PW=pw; JOBS_READER_USER=reader; JOBS_READER_PASS=reader-pw
+    unset DATATIER
+    case "$2" in
+      default) e2e_legacy_launch 1 ;;
+      inherited) DATATIER=0; export DATATIER; e2e_legacy_launch 1 ;;
+      *) e2e_legacy_launch 1 "$2" ;;
+    esac
+  ' _ "$E2E" "$1"
+}
+winding_legacy_src_case() {
+  local mode="$1" fixture legacy fake foreign outside candidate kind result rc
+  fixture="$(mktemp -d "${TMPDIR:-/tmp}/pm-winding-paths.XXXXXX")"
+  fixture="$(cd "$fixture" && pwd -P)"
+  mkdir -p "$fixture/gs-pl-pm-macops-sidecar" "$fixture/pl-pm-legacy/.git" \
+    "$fixture/foreign-repo/.git" "$fixture/worktrees/legacy" "$fixture/worktrees/fake" \
+    "$fixture/worktrees/foreign"
+  legacy="$fixture/worktrees/legacy"
+  fake="$fixture/worktrees/fake"; foreign="$fixture/worktrees/foreign"
+  touch "$legacy/ProgramaMaestroPT.sln" "$fake/ProgramaMaestroPT.sln" "$foreign/ProgramaMaestroPT.sln"
+  case "$mode" in
+    valid) candidate="$legacy"; kind=legacy ;;
+    fake) candidate="$fake"; kind=fake ;;
+    foreign) candidate="$foreign"; kind=foreign ;;
+    dotdot) candidate="$legacy/../legacy"; kind=legacy ;;
+    symlink)
+      outside="${fixture}-legacy-link"; ln -s "$legacy" "$outside"
+      candidate="$outside"; kind=legacy
+      ;;
+  esac
+  result="$(PM_WRAPPER_DIR="$fixture" PM_E2E_CONTRACT_SOURCE_ONLY=1 /bin/bash -c '
+    . "$1"
+    fixture="$3"; kind="$4"
+    git(){
+      local repo="$2" operation="$4"
+      [ "$1" = -C ] && [ "$3" = rev-parse ] || return 128
+      case "$kind:$operation" in
+        legacy:--show-toplevel) printf "%s" "$repo" ;;
+        legacy:--git-common-dir) printf "%s" "$fixture/pl-pm-legacy/.git" ;;
+        foreign:--show-toplevel) printf "%s" "$repo" ;;
+        foreign:--git-common-dir) printf "%s" "$fixture/foreign-repo/.git" ;;
+        *) return 128 ;;
+      esac
+    }
+    e2e_winding_resolve_legacy_src "$2"
+  ' _ "$E2E" "$candidate" "$fixture" "$kind" 2>/dev/null)"; rc=$?
+  [ "$mode" != symlink ] || unlink "$outside"
+  unlink "$legacy/ProgramaMaestroPT.sln"
+  unlink "$fake/ProgramaMaestroPT.sln"
+  unlink "$foreign/ProgramaMaestroPT.sln"
+  rmdir "$legacy" "$fake" "$foreign" "$fixture/worktrees" "$fixture/pl-pm-legacy/.git" \
+    "$fixture/pl-pm-legacy" "$fixture/foreign-repo/.git" "$fixture/foreign-repo" \
+    "$fixture/gs-pl-pm-macops-sidecar" "$fixture"
+  printf '%s|%s' "$rc" "$result"
+}
+winding_flag_real_case() {
+  local state="$1" fixture query rc observed
+  fixture="$(mktemp -d "${TMPDIR:-/tmp}/pm-winding-flag.XXXXXX")"
+  query="$fixture/query"
+  observed="$(PM_E2E_CONTRACT_SOURCE_ONLY=1 /bin/bash -c '
+    . "$1"
+    fixture_state="$2"; query="$3"; mutators=0
+    wt_shared_scalar(){ printf "%s" "$2" > "$query"; [ "$fixture_state" != ERROR ] || return 1; printf "%s" "$fixture_state"; }
+    e2e_playwright_set_flag(){ mutators=$((mutators + 1)); return 99; }
+    E2E_SQL_PW=pw; PM_PLANNING_DB=pm_planning_wt1; WW_FLAG_KEY=machines-oracle-replica; PLANTA=RES
+    WW_REPLICA_FLAG_STATE=unchecked; WW_REPLICA_STATE_FILE=""
+    e2e_winding_assert_replica_off >/dev/null 2>&1; rc=$?
+    printf "%s|%s|%s" "$rc" "$WW_REPLICA_FLAG_STATE" "$mutators"
+  ' _ "$E2E" "$state" "$query")"
+  rc=$?
+  printf '%s|%s|%s' "$rc" "$observed" "$(cat "$query" 2>/dev/null)"
+  unlink "$query" 2>/dev/null || true
+  rmdir "$fixture"
+}
+winding_menu_real_case() {
+  local mode="$1" fixture transport sql state observed rc
+  fixture="$(mktemp -d "${TMPDIR:-/tmp}/pm-winding-menu.XXXXXX")"
+  transport="$fixture/transport"; sql="$fixture/sql"; state="$fixture/state"
+  : > "$transport"; : > "$sql"
+  observed="$(PM_E2E_CONTRACT_SOURCE_ONLY=1 /bin/bash -c '
+    . "$1"
+    mode="$2"; transport="$3"; sql="$4"
+    on_intel(){ printf "%s" "$1" > "$transport"; [ "$mode" != POST_ERROR ]; }
+    wt_shared_scalar(){ printf "%s" "$2" > "$sql"; [ "$mode" != SQL_ERROR ] || return 1; printf "%s" "$mode"; }
+    PW_REMOTE_RESULT=remote/results; PW_API_URL=http://api/; WW_MENU_STATE_FILE="$5"
+    E2E_SQL_PW=pw; PM_PLANNING_DB=pm_planning_wt1
+    WW_MENU_BACKFILL_STATE=not-run
+    e2e_winding_backfill_menu >/dev/null 2>&1; rc=$?
+    printf "%s|%s" "$rc" "$WW_MENU_BACKFILL_STATE"
+  ' _ "$E2E" "$mode" "$transport" "$sql" "$state")"
+  rc=$?
+  printf '%s|%s|%s|%s' "$rc" "$observed" "$(cat "$transport")" "$(cat "$sql")"
+  unlink "$transport" 2>/dev/null || true
+  unlink "$sql" 2>/dev/null || true
+  unlink "$state" 2>/dev/null || true
+  rmdir "$fixture"
+}
 docker_sim_case() {
   local behavior="$1" fixture fake suite result log output rc name stop_name rm_name cid_count
   fixture="$(mktemp -d "${TMPDIR:-/tmp}/pm-i13-docker.XXXXXX")"
@@ -204,6 +398,10 @@ contains "$MAKEFILE" 'PWGREP      ?= @nucleos-full' "tag focal exacto"
 contains "$MAKEFILE" 'PWPROJECT   ?= plant-res' "proyecto focal exacto"
 contains "$MAKEFILE" 'PWFLAGKEY   ?= subordinate-nucleos-backend' "flag focal exacto"
 contains "$MAKEFILE" 'PWSTATEENV  ?= PM_E2E_NUCLEOS_FLAG_STATE' "variable de estado exacta"
+contains "$MAKEFILE" 'e2e-playwright-winding:' "target aditivo winding"
+contains "$MAKEFILE" 'WWSCENARIO  ?= winding-macro-res' "scenario winding exacto"
+contains "$MAKEFILE" 'WWGREP      ?= @winding-macro' "tag winding exacto"
+contains "$MAKEFILE" 'WWFLAGKEY   ?= machines-oracle-replica' "flag replica winding exacto"
 
 contains "$E2E" 'e2e_playwright_validate_inputs' "validacion local previa del runner"
 contains "$E2E" 'PW_SCENARIO="${PM_E2E_PW_SCENARIO:-tnuc02}"' "runner conserva tnuc02"
@@ -222,10 +420,17 @@ contains "$E2E" 'PWRETRIES debe ser entero >=0' "retries falla cerrado"
 contains "$E2E" 'PWTIMEOUT debe ser entero positivo' "timeout falla cerrado"
 contains "$E2E" 'PWPROJECT' "proyecto se valida"
 contains "$E2E" 'PLANTA invalida' "planta se valida"
+contains "$E2E" 'e2e_winding_assert_replica_off' "winding verifica replica OFF"
+contains "$E2E" 'e2e_winding_backfill_menu' "winding materializa menu por API"
+contains "$E2E" 'playwright-winding' "driver publica verbo winding"
+not_contains "$E2E" 'e2e_playwright_set_flag "$WW_' "winding no usa el mutador de flags"
 
 contains "$REMOTE" 'run_with_watchdog' "runner remoto limita comandos largos"
 contains "$REMOTE" 'npx playwright test "$spec_rel"' "runner remoto ejecuta spec exacto"
 contains "$REMOTE" '--retries "$retries"' "runner remoto aplica retries explicitos"
+contains "$REMOTE" 'winding-seed|winding-teardown)' "runner remoto tiene seed/teardown winding"
+contains "$REMOTE" '--sqlserver-only' "seed winding fuerza SQL-only"
+contains "$REMOTE" 'PM_E2E_SEED_DONE=1 PM_E2E_SKIP_TEARDOWN=1' "Playwright winding no repite seed/teardown global"
 cloud_cli_token='a''z '
 cloud_turn_token='deploy''-turn'
 not_contains "$REMOTE" "$cloud_cli_token" "runner sin Azure CLI"
@@ -292,6 +497,111 @@ got="$(matrix_case teardown-fail 2>/dev/null)"
 [ "$got" = "1|$expected_full" ] && ok "teardown fallido conserva rojo" || bad "teardown inesperado: $got"
 got="$(matrix_case restore-fail 2>/dev/null)"
 [ "$got" = "1|$expected_full" ] && ok "restauracion fallida conserva rojo" || bad "restauracion inesperada: $got"
+
+expected_winding='resolve,flag-check,bind,stage,menu,seed,test,teardown,collect'
+got="$(winding_matrix_case success)"
+[ "$got" = "0|$expected_winding" ] && ok "orden winding flag-read-menu-seed-test-teardown" || bad "orden winding inesperado: $got"
+got="$(winding_matrix_case flag-fail 2>/dev/null)"
+[ "$got" = '1|resolve,flag-check' ] && ok "flag winding no OFF aborta antes de bind, stage o mutacion" || bad "flag winding fail-open: $got"
+got="$(winding_real_preflight_case)"
+[ "$got" = '1|slot,api-port,password,db-query,connstr,flag-query' ] \
+  && ok "preflight real rechaza flag ON tras lookup read-only y antes de touch/bridge/stage" \
+  || bad "preflight real altero el orden fail-closed: $got"
+got="$(winding_matrix_case menu-fail 2>/dev/null)"
+[ "$got" = '1|resolve,flag-check,bind,stage,menu,collect' ] && ok "backfill menu fallido aborta antes del seed" || bad "menu winding fail-open: $got"
+got="$(winding_matrix_case seed-fail 2>/dev/null)"
+[ "$got" = '1|resolve,flag-check,bind,stage,menu,seed,teardown,collect' ] && ok "seed winding parcial entra a teardown" || bad "seed winding inesperado: $got"
+got="$(winding_matrix_case test-fail 2>/dev/null)"
+[ "$got" = "1|$expected_winding" ] && ok "test winding fallido conserva rojo y limpia" || bad "test winding inesperado: $got"
+got="$(winding_matrix_case teardown-fail 2>/dev/null)"
+[ "$got" = "1|$expected_winding" ] && ok "teardown winding fallido conserva rojo" || bad "teardown winding inesperado: $got"
+
+got="$(winding_remote_data_case winding-seed)"
+if [ "$got" = '0|planning=set|oracle=|args=run --no-build --project seed.csproj -- --scenario winding-macro-res --sqlserver-only' ]; then
+  ok "seed remoto winding transmite solo Planning y fuerza sqlserver-only"
+else
+  bad "seed remoto winding inesperado: $got"
+fi
+got="$(winding_remote_data_case winding-teardown)"
+if [ "$got" = '0|planning=set|oracle=|args=run --no-build --project seed.csproj -- --scenario winding-macro-res --sqlserver-only --teardown' ]; then
+  ok "teardown remoto winding transmite solo Planning"
+else
+  bad "teardown remoto winding inesperado: $got"
+fi
+
+[ "$(legacy_launch_case default)" = 'inherited=unset|args=FORCE=1' ] \
+  && ok "e2e_legacy_launch no inyecta data tier por defecto" \
+  || bad "e2e_legacy_launch altero el default heredable del data tier"
+[ "$(legacy_launch_case inherited)" = 'inherited=0|args=FORCE=1' ] \
+  && ok "e2e_legacy_launch conserva DATATIER=0 heredado sin override" \
+  || bad "e2e_legacy_launch piso DATATIER=0 heredado"
+[ "$(legacy_launch_case 0)" = 'inherited=unset|args=FORCE=1,DATATIER=0' ] \
+  && ok "winding puede desplegar legado sin aprovisionar Oracle" \
+  || bad "e2e_legacy_launch no propago DATATIER=0"
+invalid_launch="$(legacy_launch_case 2 2>/dev/null)"; invalid_launch_rc=$?
+[ "$invalid_launch_rc" = 2 ] && [ -z "$invalid_launch" ] \
+  && ok "e2e_legacy_launch rechaza datatier fuera de 0|1 antes del submake" \
+  || bad "e2e_legacy_launch acepto datatier invalido: rc=$invalid_launch_rc output=$invalid_launch"
+got="$(winding_legacy_src_case valid)"
+case "$got" in
+  0\|*/worktrees/legacy) ok "LEGACYSRC winding acepta worktree directo canonicalizado" ;;
+  *) bad "LEGACYSRC winding rechazo worktree valido: $got" ;;
+esac
+[ "$(winding_legacy_src_case dotdot)" = '1|' ] \
+  && ok "LEGACYSRC winding rechaza componente .." \
+  || bad "LEGACYSRC winding acepto componente .."
+[ "$(winding_legacy_src_case symlink)" = '1|' ] \
+  && ok "LEGACYSRC winding rechaza symlink" \
+  || bad "LEGACYSRC winding acepto symlink"
+[ "$(winding_legacy_src_case fake)" = '1|' ] \
+  && ok "LEGACYSRC winding rechaza directorio falso con marker" \
+  || bad "LEGACYSRC winding acepto directorio sin identidad Git"
+[ "$(winding_legacy_src_case foreign)" = '1|' ] \
+  && ok "LEGACYSRC winding rechaza worktree de repo ajeno" \
+  || bad "LEGACYSRC winding acepto git-common-dir ajeno"
+
+got="$(winding_flag_real_case OFF)"
+flag_query="${got#*|*|*|*|}"
+case "$got" in 0\|0\|OFF\|0\|*) ok "flag real acepta solo OFF sin invocar mutador" ;; *) bad "flag real OFF inesperado: $got" ;; esac
+case "$flag_query" in
+  *"SELECT CASE"*"[Key]=N'machines-oracle-replica'"*"[Plant]=N'RES'"*) ok "flag real consulta clave/planta exactas" ;;
+  *) bad "flag real emitio SELECT inesperado" ;;
+esac
+case "$flag_query" in *INSERT*|*UPDATE*|*DELETE*|*MERGE*) bad "flag real contiene mutacion SQL" ;; *) ok "flag real es SELECT-only" ;; esac
+for flag_state in MISSING DUPLICATE ON; do
+  got="$(winding_flag_real_case "$flag_state")"
+  case "$got" in 0\|1\|"$flag_state"\|0\|*) ok "flag real rechaza $flag_state" ;; *) bad "flag real $flag_state inesperado: $got" ;; esac
+done
+got="$(winding_flag_real_case ERROR)"
+case "$got" in 0\|1\|UNREADABLE\|0\|*) ok "flag real rechaza error de lectura" ;; *) bad "flag real error inesperado: $got" ;; esac
+
+got="$(winding_menu_real_case 1)"
+menu_payload="${got#*|*|*|}"
+menu_transport="${menu_payload%%|*}"
+menu_sql="${menu_payload#*|}"
+case "$got" in 0\|0\|ready\|*) ok "backfill real acepta una hoja activa" ;; *) bad "backfill real count=1 inesperado: $got" ;; esac
+case "$menu_transport" in
+  *"-X POST"*"--data '{\"plant\":\"RES\"}'"*"api/v1/parity/catalog-backfill/navigation-menus/runs"*) ok "backfill real usa POST, body y ruta exactos" ;;
+  *) bad "backfill real emitio transporte inesperado" ;;
+esac
+case "$menu_sql" in
+  *"SELECT COUNT_BIG(*)"*"[Catalogs].[NavigationMenuItems]"*"[Plant]=N'RES'"*"[Page]=N'UserBulkOperations/MaquinasProgBobinas.aspx'"*"[IsActive]=1"*)
+    ok "backfill real verifica por SELECT la hoja RES exacta y activa"
+    ;;
+  *) bad "backfill real emitio verificacion SQL inesperada" ;;
+esac
+case "$menu_sql" in
+  *INSERT*|*UPDATE*|*DELETE*|*MERGE*) bad "verificacion del backfill contiene mutacion SQL" ;;
+  *) ok "verificacion del backfill es SELECT-only" ;;
+esac
+for menu_count in 0 2; do
+  got="$(winding_menu_real_case "$menu_count")"
+  case "$got" in 0\|1\|invalid-count:"$menu_count"\|*) ok "backfill real rechaza count=$menu_count" ;; *) bad "backfill real count=$menu_count inesperado: $got" ;; esac
+done
+got="$(winding_menu_real_case SQL_ERROR)"
+case "$got" in 0\|1\|invalid-count:unreadable\|*) ok "backfill real rechaza error SQL" ;; *) bad "backfill real error SQL inesperado: $got" ;; esac
+got="$(winding_menu_real_case POST_ERROR)"
+case "$got" in 0\|1\|failed\|*\|) ok "backfill real rechaza error HTTP antes del conteo" ;; *) bad "backfill real error HTTP inesperado: $got" ;; esac
 
 # =============================================================================
 # T-002 — smoke golden fail-closed (matriz C01-C20 + checks estaticos)

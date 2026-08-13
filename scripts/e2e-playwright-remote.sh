@@ -135,9 +135,8 @@ run_dotnet(){
   docker_run=("${DOCKER_CMD[@]}" run --name "$DOTNET_CONTAINER_NAME" --cidfile "$DOTNET_CONTAINER_CIDFILE" --network host --user "$uid:$gid" \
     -e HOME=/tmp -e DOTNET_CLI_HOME=/tmp -e NUGET_PACKAGES=/tmp/.nuget/packages \
     -e DOTNET_CLI_TELEMETRY_OPTOUT=1 -e DOTNET_NOLOGO=1 -e DOTNET_ROLL_FORWARD=Major)
-  if [ "${ConnectionStrings__Planning+x}" = x ]; then
-    docker_run+=(-e ConnectionStrings__Planning -e ConnectionStrings__CtrlPiso)
-  fi
+  if [ "${ConnectionStrings__Planning+x}" = x ]; then docker_run+=(-e ConnectionStrings__Planning); fi
+  if [ "${ConnectionStrings__CtrlPiso+x}" = x ]; then docker_run+=(-e ConnectionStrings__CtrlPiso); fi
   docker_run+=(-v "$SUITE_ROOT:/work" -w /work "$DOTNET_IMAGE" dotnet)
   run_with_watchdog "$timeout_s" "${docker_run[@]}" "$@" || rc=$?
   docker_cleanup_container || rc=1
@@ -147,6 +146,10 @@ run_dotnet(){
 read_data_secrets(){
   IFS= read -r -d '' PM_REMOTE_PLANNING_CS || die "payload SQL incompleto"
   IFS= read -r -d '' PM_REMOTE_CTRLPISO_CS || die "payload Oracle incompleto"
+}
+
+read_planning_secret(){
+  IFS= read -r -d '' PM_REMOTE_PLANNING_CS || die "payload SQL incompleto"
 }
 
 read_login_secrets(){
@@ -189,6 +192,17 @@ case "$MODE" in
     [ "$MODE" = seed ] || args+=(--teardown)
     run_dotnet "$timeout_s" run --no-build --project "$seed_project" -- "${args[@]}"
     ;;
+  winding-seed|winding-teardown)
+    ensure_dotnet_runner || die "dotnet nativo ausente y la imagen '$DOTNET_IMAGE' no esta cacheada"
+    read_planning_secret
+    timeout_s="${8:-900}"; scenario="${9:-}"; seed_project="${10:-}"
+    [ "$scenario" = winding-macro-res ] || die "escenario remoto debe ser winding-macro-res"
+    [ -f "$seed_project" ] || die "proyecto seeder inexistente"
+    export ConnectionStrings__Planning="$PM_REMOTE_PLANNING_CS"
+    args=(--scenario "$scenario" --sqlserver-only)
+    [ "$MODE" = winding-seed ] || args+=(--teardown)
+    run_dotnet "$timeout_s" run --no-build --project "$seed_project" -- "${args[@]}"
+    ;;
   test)
     require_node; read_login_secrets
     state="${8:-}"; state_env="${9:-}"; project="${10:-}"; grep_expr="${11:-}"; spec_rel="${12:-}"
@@ -208,6 +222,27 @@ case "$MODE" in
     export "$state_env=$state"
     export PLAYWRIGHT_OUTPUT_DIR="$RESULT_ROOT/$state-test-results"
     export PLAYWRIGHT_HTML_OUTPUT_DIR="$RESULT_ROOT/$state-playwright-report"
+    run_with_watchdog "$timeout_s" npx playwright test "$spec_rel" --project "$project" --grep "$grep_expr" --retries "$retries"
+    ;;
+  winding-test)
+    require_node; read_login_secrets
+    project="${8:-}"; grep_expr="${9:-}"; spec_rel="${10:-}"; base_url="${11:-}"; api_url="${12:-}"
+    plant="${13:-}"; timeout_s="${14:-900}"; retries="${15:-0}"
+    [ "$project" = plant-res ] || die "project winding inesperado"
+    [ "$grep_expr" = @winding-macro ] || die "grep winding inesperado"
+    [ "$spec_rel" != "${spec_rel#features/}" ] || die "spec fuera de features/"
+    case "$spec_rel" in /*|../*|*/../*|*/..) die "ruta de spec invalida" ;; esac
+    case "$spec_rel" in */specs/maquinas-prog-bobinas.spec.ts) : ;; *) die "spec debe ser maquinas-prog-bobinas.spec.ts" ;; esac
+    [ -f "$spec_rel" ] || die "spec exacto inexistente"
+    [ "$plant" = RES ] || die "planta inesperada"
+    valid_uint "$timeout_s" && [ "$timeout_s" -gt 0 ] || die "timeout invalido"
+    valid_uint "$retries" || die "retries invalido"
+    export PM_E2E_PROFILE=macdata PM_E2E_BASE_URL="$base_url" PM_E2E_API_URL="$api_url"
+    export PM_E2E_PLANTA="$plant" PM_E2E_TEST_USER="$PM_REMOTE_TEST_USER" PM_E2E_TEST_PASSWORD="$PM_REMOTE_TEST_PASSWORD"
+    export PM_E2E_SEED_DONE=1 PM_E2E_SKIP_TEARDOWN=1
+    export PM_E2E_OUTPUT_DIR="$RESULT_ROOT/winding-test-results"
+    export PM_E2E_RESULTS_FILE="$RESULT_ROOT/winding-results.json"
+    export PLAYWRIGHT_HTML_OUTPUT_DIR="$RESULT_ROOT/winding-playwright-report"
     run_with_watchdog "$timeout_s" npx playwright test "$spec_rel" --project "$project" --grep "$grep_expr" --retries "$retries"
     ;;
   *) die "modo desconocido '$MODE'" ;;
