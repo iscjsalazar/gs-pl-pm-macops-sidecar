@@ -378,6 +378,7 @@ discrimina ON por `MensajeTecnico` y OFF por la ausencia de órdenes nuevas (rob
 | `make e2e-up ... FORCE=1` | Re-deploya el legado (re-inyecta el wiring; necesario si el slot se reutiliza o se conservó el sitio). |
 | `make e2e-smoke WT=<wt-pm>` | Solo el smoke funcional; dispara contra el **sitio del slot** (`8100+N`). Asume `e2e-up` ya dejó todo arriba. |
 | `make e2e-playwright WT=<wt-pm> LEGACYSRC=<legacy-develop>` | Runner focal de Núcleos: escenario `tnuc02`, tag `@nucleos-full`, proyecto `plant-res`, flag `subordinate-nucleos-backend` y estado `PM_E2E_NUCLEOS_FLAG_STATE`; ejecuta la matriz OFF/ON y deja evidencia por slot. |
+| `make e2e-playwright-winding WT=<wt-pm> LEGACYSRC=<wt-legacy>` | Runner focal de devanado: escenario SQL-only `winding-macro-res`, tag `@winding-macro` y proyecto `plant-res`; verifica `machines-oracle-replica/RES=OFF`, materializa el menú por API y nunca modifica el flag. |
 | `make e2e-url WT=<wt-pm>` | Reimprime el **recuadro de acceso del slot** (URL del site y del túnel) y **re-levanta el túnel si murió**. Asume el ambiente ya arriba. |
 | `make e2e-down WT=<wt-pm>` | Baja el túnel y el **sitio del slot**, y luego API + Oracle + BD del slot (`wt-down`). El puente y los demás singletons quedan intactos. |
 | `make e2e-down ... PM_E2E_KEEP_FRONT=1` | Conserva el sitio del legado (reusarlo exige `FORCE=1` en el siguiente `e2e-up`). |
@@ -421,6 +422,31 @@ make e2e-playwright \
   WT=<wt-pm> SOLUTION=<misma-ruta-wt-pm> LEGACYSRC=<ruta-absoluta-wt-legacy> \
   PWSCENARIO=tnuc02 PWGREP=@nucleos-full PWPROJECT=plant-res \
   PWFLAGKEY=subordinate-nucleos-backend PWSTATEENV=PM_E2E_NUCLEOS_FLAG_STATE
+```
+
+### Runner focal Playwright de devanado
+
+`e2e-playwright-winding` comparte el lock del slot con el runner de Núcleos, pero conserva su propio contrato,
+seed, teardown y evidencia bajo `artifacts/playwright-winding/`. Antes de stagear o desplegar el frontend,
+consulta `machines-oracle-replica/RES` y exige una única fila en estado `OFF`; la ausencia, duplicidad, estado
+`ON` o lectura fallida abortan sin modificar el flag. Después invoca el endpoint idempotente de backfill del
+menú, siembra `login-four-plants` y después `winding-macro-res` con `--sqlserver-only`, ejecuta el spec exacto y
+siempre intenta ambos teardown en orden inverso. Las credenciales de login viajan al seeder únicamente por
+`stdin` delimitado por NUL y variables de entorno; no forman parte de argumentos ni evidencia.
+`PM_E2E_SEED_DONE=1` y `PM_E2E_SKIP_TEARDOWN=1` impiden que Playwright procese el manifest completo.
+El usuario y el password deben ser no vacíos, no contener sólo whitespace, no llevar whitespace periférico
+y respetar los `MaxLength` de `Login.aspx`: 8 caracteres para el usuario y 20 para el password.
+Cuando provienen de `PWCREDENTIALS`, el archivo debe negar todo acceso de grupo/otros; el carril no habilita
+bypass ni modifica flags de Login. Antes del browser, una
+autenticación contra el endpoint SQL-only valida identidad, bloqueo, módulo, membresía y parámetros/landing; el
+request y la respuesta no se conservan. El teardown de login es dirigido al fixture y la base efímera se retira
+al ejecutar `e2e-down`.
+
+```bash
+make e2e-playwright-winding \
+  WT=<wt-pm> SOLUTION=<misma-ruta-wt-pm> \
+  LEGACYSRC=<ruta-absoluta-wt-legacy> \
+  PWCREDENTIALS=<ruta-externa-modo-600>
 ```
 
 **Aislamiento del camino OFF.** `e2e-up` siempre enciende el Oracle del slot y le apunta el `conStringOracle` del
