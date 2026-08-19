@@ -289,8 +289,11 @@ wt_shared_query() {
   local ctx; ctx="$(remote_docker_ctx)"
   printf '%s' "$sql" | on_intel "docker $ctx run --rm -i --network '$PM_SHARED_SQL_NETWORK' -e SAPW='$(wt_esc "$pw")' --entrypoint /bin/bash '$PM_SQLTOOLS_IMAGE' -c '/opt/mssql-tools18/bin/sqlcmd -S \"$PM_SHARED_SQL_HOST,$PM_SHARED_SQL_PORT\" -U sa -P \"\$SAPW\" -C $flags -i /dev/stdin'"
 }
-# Escalar (sin encabezado): retorna el valor trimmeado.
-wt_shared_scalar() { wt_shared_query "$1" "$2" "-h -1 -W" 2>/dev/null | tr -d ' \r\n'; }
+# Escalar (sin encabezado): retorna el valor trimmeado. El 3er argumento OPCIONAL son flags extra de
+# sqlcmd, mismo contrato que wt_shared_query; el uso previsto es '-d <db>', que fija la BD del lote sin
+# un 'USE [db]' cuyo informativo "Changed database context to '<db>'." viaja por stdout y el trim
+# concatenaria con el escalar. Omitirlo deja el comportamiento identico al previo.
+wt_shared_scalar() { wt_shared_query "$1" "$2" "-h -1 -W${3:+ $3}" 2>/dev/null | tr -d ' \r\n'; }
 # DDL/idempotente: corta en error (-b).
 wt_shared_exec()   { wt_shared_query "$1" "$2" "-b"; }
 
@@ -1727,7 +1730,7 @@ cmd_wt_flag() {
   key_esc="$(printf '%s' "$PM_WT_FLAG_KEY" | sed "s/'/''/g")"
   plant_esc="$(printf '%s' "$plant" | sed "s/'/''/g")"
   sql="$(cat <<SQL
-SET NOCOUNT ON; USE [$PM_PLANNING_DB];
+SET NOCOUNT ON;
 IF OBJECT_ID(N'FeatureManagement.FeatureFlags') IS NULL BEGIN SELECT N'no-table'; RETURN; END
 DECLARE @outcome nvarchar(16);
 IF NOT EXISTS (SELECT 1 FROM FeatureManagement.FeatureFlags WHERE [Key]=N'$key_esc' AND [Plant]=N'$plant_esc')
@@ -1749,7 +1752,9 @@ END
 SELECT @outcome;
 SQL
 )"
-  out="$(wt_shared_scalar "$pw" "$sql")"
+  if ! out="$(wt_shared_scalar "$pw" "$sql" "-d $PM_PLANNING_DB")"; then
+    wt_die "flag '$PM_WT_FLAG_KEY'/$plant: el transporte al SQL compartido fallo (BD $PM_PLANNING_DB)"; return 1
+  fi
   case "$out" in
     no-table)
       wt_die "la BD del slot no tiene el esquema de FeatureManagement: corre make wt-up WT=... primero"; return 1 ;;
@@ -1759,7 +1764,9 @@ SQL
     *)
       wt_die "flag '$PM_WT_FLAG_KEY'/$plant: resultado inesperado '${out:-<vacio>}'"; return 1 ;;
   esac
-  observed="$(wt_shared_scalar "$pw" "SET NOCOUNT ON; USE [$PM_PLANNING_DB]; SELECT CAST(IsEnabled AS int) FROM FeatureManagement.FeatureFlags WHERE [Key]=N'$key_esc' AND [Plant]=N'$plant_esc'")"
+  if ! observed="$(wt_shared_scalar "$pw" "SET NOCOUNT ON; SELECT CAST(IsEnabled AS int) FROM FeatureManagement.FeatureFlags WHERE [Key]=N'$key_esc' AND [Plant]=N'$plant_esc'" "-d $PM_PLANNING_DB")"; then
+    wt_die "flag '$PM_WT_FLAG_KEY'/$plant: el transporte al SQL compartido fallo (BD $PM_PLANNING_DB)"; return 1
+  fi
   if [ "$observed" != "$v" ]; then
     wt_die "flag '$PM_WT_FLAG_KEY'/$plant: IsEnabled observado='${observed:-<vacio>}' no coincide con el pedido $v"; return 1
   fi
