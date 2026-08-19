@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Contratos hermeticos de la perilla login-skip-password del slot (T-101): no abre SSH, Docker, macdata
-# ni un slot real. Lee e2e/Dockerfile, lib/worktrees.sh y Makefile como texto. Cada asercion nombra el
-# defecto que atrapa (analisis.md §5.2 A1-A14).
+# ni un slot real. Lee e2e/Dockerfile, lib/worktrees.sh y Makefile como texto, y ejecuta cmd_wt_flag /
+# normalizaciones con dependencias simuladas. Cada asercion nombra el defecto que atrapa
+# (analisis.md §5.2 A1-A14; ronda 2 endurece A4/A6-A9/A11-A14 y agrega A15).
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 WT="$ROOT/lib/worktrees.sh"
@@ -17,6 +18,135 @@ bad() { fail=$((fail + 1)); printf 'FAIL: %s\n' "$*" >&2; }
 BUILD_BODY="$(sed -n '/^_wt_build_api_image() {/,/^}/p' "$WT")"
 UP_BODY="$(sed -n '/^wt_up_api() {/,/^}/p' "$WT")"
 FLAG_BODY="$(sed -n '/^cmd_wt_flag() {/,/^}/p' "$WT")"
+
+hget() { printf '%s\n' "$1" | tr ' ' '\n' | sed -n "s/^$2=//p" | head -1; }
+
+# Extrae el case de normalizacion de la perilla (A11) y el de la etiqueta leida (A9).
+CAP_CASE="$(printf '%s\n' "$UP_BODY" | awk '
+  /PM_WT_LOGIN_SKIP_CAPABILITY/ { interested=1 }
+  interested && /case / { collecting=1 }
+  collecting { print }
+  collecting && /esac/ { exit }
+')"
+IMG_CAP_CASE="$(printf '%s\n' "$UP_BODY" | awk '
+  /case "\$img_cap"/ { collecting=1 }
+  collecting { print }
+  collecting && /esac/ { exit }
+')"
+WT_ENV_BLOCK="$(awk '
+  /^WT_ENV[[:space:]]*=/ { collecting=1 }
+  collecting { print }
+  collecting && $0 !~ /\\[[:space:]]*$/ { exit }
+' "$MK")"
+
+# Ejecuta el case de PM_WT_LOGIN_SKIP_CAPABILITY aislado. Imprime RC= CAP=.
+run_cap_norm() {
+  (
+    PM_WT_LOGIN_SKIP_CAPABILITY="$1"
+    cap=""
+    wt_die() { :; }
+    _go() { eval "$CAP_CASE"; }
+    _go
+    printf 'RC=%s CAP=%s\n' "$?" "${cap-}"
+  )
+}
+
+# Ejecuta el case de img_cap aislado. Imprime el valor normalizado.
+run_img_cap_norm() {
+  (
+    img_cap="$1"
+    eval "$IMG_CAP_CASE"
+    printf '%s' "$img_cap"
+  )
+}
+
+# Ejecuta cmd_wt_flag N veces con wt_shared_scalar simulado (sin SQL real).
+# $1=create $2=state $3=start_rows $4=times $5=reread|__stored__
+# El estado vive en archivos: out="$(wt_shared_scalar ...)" corre en un subshell y
+# perderia incrementos en variables. Interpreta el lote interpolado: IF 1=1 + INSERT
+# crea; ELSE @outcome decide la ausencia; IF NOT EXISTS evita el segundo INSERT.
+harness_flag_repeat() {
+  (
+    create="$1"
+    state="$2"
+    start_rows="$3"
+    times="$4"
+    reread="${5:-__stored__}"
+    died=0
+    last_rc=0
+    hdir="$(mktemp -d "${TMPDIR:-/tmp}/wt-login-skip-h.XXXXXX")"
+    trap 'rm -rf "$hdir"' EXIT
+    printf '%s' "0" > "$hdir/inserts"
+    printf '%s' "$start_rows" > "$hdir/rows"
+    if [ "$start_rows" -gt 0 ]; then
+      printf '%s' "1" > "$hdir/enabled"
+    else
+      printf '%s' "" > "$hdir/enabled"
+    fi
+    eval "$FLAG_BODY"
+    wt_require_intel() { return 0; }
+    _wt_bind_slot() { PM_PLANNING_DB="pm_planning_wt0"; return 0; }
+    wt_shared_sql_password() { printf '%s' "pw"; return 0; }
+    wt_shared_sql_check() { return 0; }
+    wt_log() { :; }
+    wt_die() { died=1; printf 'DIE:%s\n' "$*" >> "$hdir/die.log"; return 1; }
+    requested_v=0
+    case "$state" in on|ON|1|true|TRUE) requested_v=1 ;; esac
+    wt_shared_scalar() {
+      local sql="$2" else_out rows inserts create_on has_insert has_not_exists
+      rows="$(cat "$hdir/rows")"
+      inserts="$(cat "$hdir/inserts")"
+      if printf '%s' "$sql" | grep -q 'CAST(IsEnabled AS int)'; then
+        if [ "$reread" != "__stored__" ]; then
+          printf '%s' "$reread"
+        else
+          cat "$hdir/enabled"
+        fi
+        return 0
+      fi
+      create_on=0
+      has_insert=0
+      has_not_exists=0
+      printf '%s' "$sql" | grep -qE 'IF[[:space:]]+"?1"?[[:space:]]*=[[:space:]]*"?1"?' && create_on=1
+      printf '%s' "$sql" | grep -q 'INSERT INTO FeatureManagement.FeatureFlags' && has_insert=1
+      printf '%s' "$sql" | grep -q 'IF NOT EXISTS' && has_not_exists=1
+      else_out="$(printf '%s' "$sql" | sed -n "s/.*ELSE SET @outcome = N'\\([^']*\\)'.*/\\1/p" | head -1)"
+      if [ "$rows" -eq 0 ]; then
+        if [ "$create_on" -eq 1 ] && [ "$has_insert" -eq 1 ]; then
+          printf '%s' "$((inserts + 1))" > "$hdir/inserts"
+          printf '%s' "1" > "$hdir/rows"
+          printf '%s' "$requested_v" > "$hdir/enabled"
+          printf '%s' "created"
+        else
+          printf '%s' "${else_out:-absent}"
+        fi
+      else
+        if [ "$has_not_exists" -eq 0 ] && [ "$create_on" -eq 1 ] && [ "$has_insert" -eq 1 ]; then
+          printf '%s' "$((inserts + 1))" > "$hdir/inserts"
+          printf '%s' "$requested_v" > "$hdir/enabled"
+          printf '%s' "created"
+        else
+          printf '%s' "$requested_v" > "$hdir/enabled"
+          printf '%s' "updated"
+        fi
+      fi
+      return 0
+    }
+    PM_WT_FLAG_KEY="login-skip-password"
+    PM_WT_FLAG_STATE="$state"
+    PM_WT_FLAG_CREATE="$create"
+    PM_WT_FLAG_PLANT="TRI"
+    PM_PLANNING_DB="pm_planning_wt0"
+    n=0
+    while [ "$n" -lt "$times" ]; do
+      cmd_wt_flag
+      last_rc=$?
+      n=$((n + 1))
+    done
+    printf 'RC=%s INSERTS=%s ROWS=%s DIED=%s CALLS=%s\n' \
+      "$last_rc" "$(cat "$hdir/inserts")" "$(cat "$hdir/rows")" "$died" "$n"
+  )
+}
 
 # --- A1 ---
 # Defecto: alguien cambia el default a true (o lo omite, dejandolo vacio): TODO slot de TODA sesion
@@ -46,15 +176,21 @@ else
   bad "A3 el valor pasado al -p: es el ARG, no un literal 1/0"
 fi
 
-# --- A4 ---
+# --- A4 (M1) ---
 # Defecto: la propiedad se renombra en la solucion o MSBuild la ignora: la imagen queda etiquetada
-# true con un artefacto sin gate. Es el sintoma indistinguible, materializado.
+# true con un artefacto sin gate. Exige COMPARAR $found contra el ARG y cortar si no coinciden.
+# Mutante: retirar e2e/Dockerfile:24-25 (busqueda sin comparacion) deja A4 en verde.
 if grep -q 'LoginSkipPasswordTestCapabilityMarker' "$DF" \
-  && grep -q 'LOGIN_SKIP_PASSWORD_TEST_CAPABILITY' "$DF" \
-  && grep -qE 'grep[[:space:]]+-qa[[:space:]]+.LoginSkipPasswordTestCapabilityMarker' "$DF"; then
-  ok "A4 Dockerfile verifica el marcador del artefacto contra el ARG"
+  && grep -qE 'grep[[:space:]]+-qa[[:space:]]+.LoginSkipPasswordTestCapabilityMarker' "$DF" \
+  && grep -qE '\[ "\$found" = "\$LOGIN_SKIP_PASSWORD_TEST_CAPABILITY" \]' "$DF" \
+  && awk '
+      /\[ "\$found" = "\$LOGIN_SKIP_PASSWORD_TEST_CAPABILITY" \]/ { seen=1 }
+      seen && /exit[[:space:]]+1/ { ok=1 }
+      END { exit(ok ? 0 : 1) }
+    ' "$DF"; then
+  ok "A4 Dockerfile compara el marcador del artefacto contra el ARG y corta si no coincide"
 else
-  bad "A4 Dockerfile verifica el marcador del artefacto contra el ARG"
+  bad "A4 Dockerfile compara el marcador del artefacto contra el ARG y corta si no coincide"
 fi
 
 # --- A5 ---
@@ -65,52 +201,59 @@ else
   bad "A5 _wt_build_api_image estampa --label org.pm.login-skip-password-capability"
 fi
 
-# --- A6 ---
-# Defecto: estampar solo en true rompe la invalidacion true -> false: la imagen capacidad-true se
-# reusa cuando se pide false (D16 / F-10).
+# --- A6 (M2) ---
+# Defecto: estampar solo en true rompe la invalidacion true -> false (D16 / F-10).
+# END decide el rc: un exit 1 intra-regla ya no lo pisa un END { exit 0 }.
 if printf '%s\n' "$BUILD_BODY" | grep -q -- '--label org.pm.login-skip-password-capability' \
   && ! printf '%s\n' "$BUILD_BODY" | grep -qE '\[ "\$cap" = "?true"? \].*login-skip-password-capability' \
   && printf '%s\n' "$BUILD_BODY" | awk '
       /\[ "\$cap" = "?true"? \]/ { gated=1 }
       /^[[:space:]]*fi[[:space:]]*$/ { gated=0 }
-      /org.pm.login-skip-password-capability/ { if (gated) exit 1 }
-      END { exit 0 }
+      /org.pm.login-skip-password-capability/ { if (gated) bad=1 }
+      END { exit(bad ? 1 : 0) }
     '; then
   ok "A6 la etiqueta se estampa SIEMPRE, tambien cuando la capacidad es false"
 else
   bad "A6 la etiqueta se estampa SIEMPRE, tambien cuando la capacidad es false"
 fi
 
-# --- A7 ---
+# --- A7 (M4) ---
 # Defecto: la etiqueta dice true y el build publica sin la capacidad: etiqueta mentirosa.
-if printf '%s\n' "$BUILD_BODY" | grep -q -- '--build-arg LOGIN_SKIP_PASSWORD_TEST_CAPABILITY'; then
-  ok "A7 _wt_build_api_image pasa --build-arg LOGIN_SKIP_PASSWORD_TEST_CAPABILITY"
+# Exige el valor normalizado $cap, no un literal true.
+if printf '%s\n' "$BUILD_BODY" | grep -q -- "--build-arg LOGIN_SKIP_PASSWORD_TEST_CAPABILITY='\$cap'"; then
+  ok "A7 _wt_build_api_image pasa --build-arg LOGIN_SKIP_PASSWORD_TEST_CAPABILITY='\$cap'"
 else
-  bad "A7 _wt_build_api_image pasa --build-arg LOGIN_SKIP_PASSWORD_TEST_CAPABILITY"
+  bad "A7 _wt_build_api_image pasa --build-arg LOGIN_SKIP_PASSWORD_TEST_CAPABILITY='\$cap'"
 fi
 
-# --- A8 ---
-# Defecto: EL RIESGO DOMINANTE. La perilla cambia, el SHA no, el build se salta y el slot conserva
-# la imagen anterior. Reverso F-10: un slot liberado con la capacidad encendida se la hereda a otra
-# sesion, que ademas recibe la fila IsEnabled=1 de e2e-up.
+# --- A8 (M3) ---
+# Defecto: EL RIESGO DOMINANTE. La perilla cambia, el SHA no, el build se salta.
+# Exige img_cap = cap en el mismo if que org.pm.src-sha; [ -n "$img_cap" ] no basta.
 SKIP_IF="$(printf '%s\n' "$UP_BODY" | grep -B1 'do_build=0' | grep 'if \[')"
 if [ -n "$SKIP_IF" ] \
   && printf '%s\n' "$SKIP_IF" | grep -q 'img_sha' \
   && printf '%s\n' "$SKIP_IF" | grep -q 'src_sha' \
-  && printf '%s\n' "$SKIP_IF" | grep -q 'img_cap'; then
-  ok "A8 do_build=0 exige org.pm.src-sha Y la etiqueta de capacidad en el mismo if"
+  && printf '%s\n' "$SKIP_IF" | grep -qE '\[ "\$img_cap" = "\$cap" \]'; then
+  ok "A8 do_build=0 exige img_sha=src_sha Y img_cap=cap en el mismo if"
 else
-  bad "A8 do_build=0 exige org.pm.src-sha Y la etiqueta de capacidad en el mismo if"
+  bad "A8 do_build=0 exige img_sha=src_sha Y img_cap=cap en el mismo if"
 fi
 
-# --- A9 ---
-# Defecto: toda imagen previa a este cambio se declararia «desconocida» y forzaria un rebuild de
-# varios minutos en cada slot vivo; o peor, se compararia como igual a true.
-if printf '%s\n' "$UP_BODY" | grep -qE "''\|'<no value>'|'<no value>'\|''" \
-  && printf '%s\n' "$UP_BODY" | grep -q 'img_cap=false'; then
-  ok "A9 la lectura de la etiqueta normaliza vacio y <no value> a false"
+# --- A9 (S2) ---
+# Defecto: un *) img_cap=false oculta una etiqueta corrupta y degrada el gate de reuso.
+# Solo '' y <no value> convergen a false; cualquier otro valor se conserva.
+img_empty="$(run_img_cap_norm '')"
+img_noval="$(run_img_cap_norm '<no value>')"
+img_true="$(run_img_cap_norm 'true')"
+img_unknown="$(run_img_cap_norm 'garbage')"
+if [ -n "$IMG_CAP_CASE" ] \
+  && [ "$img_empty" = "false" ] \
+  && [ "$img_noval" = "false" ] \
+  && [ "$img_true" = "true" ] \
+  && [ "$img_unknown" = "garbage" ]; then
+  ok "A9 vacio y <no value> -> false; un valor desconocido NO se coerce a false"
 else
-  bad "A9 la lectura de la etiqueta normaliza vacio y <no value> a false"
+  bad "A9 vacio y <no value> -> false; un valor desconocido NO se coerce a false (empty=${img_empty:-?} noval=${img_noval:-?} true=${img_true:-?} unk=${img_unknown:-?})"
 fi
 
 # --- A10 ---
@@ -122,57 +265,74 @@ else
   bad "A10 default apagado: \${PM_WT_LOGIN_SKIP_CAPABILITY:-0} y LOGINSKIP ?= 0"
 fi
 
-# --- A11 ---
-# Defecto: LOGINSKIP=yes se trata como apagado sin decir nada: el tester ve «login rechazado»
-# sin una sola pista.
-CAP_CASE="$(printf '%s\n' "$UP_BODY" | awk '
-  /PM_WT_LOGIN_SKIP_CAPABILITY/ { interested=1 }
-  interested && /case / { collecting=1 }
-  collecting { print }
-  collecting && /esac/ { exit }
-')"
+# --- A11 (M5) ---
+# Defecto: LOGINSKIP=yes se trata como apagado sin decir nada.
+# El case aislado con valor no reconocido debe devolver rc 2 (no 1 ni 0).
+cap_yes="$(run_cap_norm yes)"
+cap_yes_rc="$(hget "$cap_yes" RC)"
+cap_off="$(run_cap_norm 0)"
+cap_on="$(run_cap_norm 1)"
 if [ -n "$CAP_CASE" ] \
-  && printf '%s\n' "$CAP_CASE" | grep -qE '^\s*\*\)' \
-  && printf '%s\n' "$CAP_CASE" | grep -q 'wt_die'; then
-  ok "A11 un valor no reconocido de la perilla aborta con wt_die (no se coerce)"
+  && [ "$cap_yes_rc" = "2" ] \
+  && [ "$(hget "$cap_off" CAP)" = "false" ] \
+  && [ "$(hget "$cap_on" CAP)" = "true" ]; then
+  ok "A11 valor no reconocido de la perilla aborta con rc 2 (0->false, 1->true)"
 else
-  bad "A11 un valor no reconocido de la perilla aborta con wt_die (no se coerce)"
+  bad "A11 valor no reconocido de la perilla aborta con rc 2 (yes=$cap_yes off=$cap_off on=$cap_on)"
 fi
 
-# --- A12 ---
-# Defecto: la perilla existe en lib/ pero es inalcanzable desde el punto de entrada sancionado (make).
-if grep -q 'PM_WT_LOGIN_SKIP_CAPABILITY=$(LOGINSKIP)' "$MK" \
-  && grep -q 'PM_WT_FLAG_CREATE=$(CREATE)' "$MK"; then
-  ok "A12 WT_ENV propaga PM_WT_LOGIN_SKIP_CAPABILITY y PM_WT_FLAG_CREATE"
+# --- A12 (S1) ---
+# Defecto: las cadenas existen en un comentario o receta no ejecutada, pero WT_ENV deja de
+# propagarlas. La asercion se ancla al bloque WT_ENV (continuaciones con barra).
+if [ -n "$WT_ENV_BLOCK" ] \
+  && printf '%s\n' "$WT_ENV_BLOCK" | grep -q 'PM_WT_LOGIN_SKIP_CAPABILITY=$(LOGINSKIP)' \
+  && printf '%s\n' "$WT_ENV_BLOCK" | grep -q 'PM_WT_FLAG_CREATE=$(CREATE)'; then
+  ok "A12 bloque WT_ENV propaga PM_WT_LOGIN_SKIP_CAPABILITY y PM_WT_FLAG_CREATE"
 else
-  bad "A12 WT_ENV propaga PM_WT_LOGIN_SKIP_CAPABILITY y PM_WT_FLAG_CREATE"
+  bad "A12 bloque WT_ENV propaga PM_WT_LOGIN_SKIP_CAPABILITY y PM_WT_FLAG_CREATE"
 fi
 
-# --- A13 ---
-# Defecto: (a) el verbo crea filas en silencio y rompe el criterio «sin CREATE, la fila ausente
-# sigue fallando»; (b) repetir el comando choca contra la PK ([Key],[Plant]).
-nexists_line="$(printf '%s\n' "$FLAG_BODY" | grep -n 'IF NOT EXISTS' | head -1 | cut -d: -f1)"
-insert_line="$(printf '%s\n' "$FLAG_BODY" | grep -n 'INSERT INTO FeatureManagement.FeatureFlags' | head -1 | cut -d: -f1)"
-create_line="$(printf '%s\n' "$FLAG_BODY" | grep -nE 'IF[[:space:]]+\$create[[:space:]]*=[[:space:]]*1' | head -1 | cut -d: -f1)"
-if [ -n "${nexists_line:-}" ] && [ -n "${insert_line:-}" ] && [ -n "${create_line:-}" ] \
-  && [ "$nexists_line" -lt "$insert_line" ] && [ "$create_line" -lt "$insert_line" ]; then
-  ok "A13 INSERT esta bajo CREATE y bajo IF NOT EXISTS"
+# --- A13 (M6) ---
+# Defecto: (a) sin CREATE, fila ausente deja de fallar; (b) CREATE=1 repetido inserta de nuevo.
+# Arnes: CREATE=0 + ausente + relectura que coincidiria -> rc=1 e INSERTS=0.
+#         CREATE=1 dos veces sobre tabla vacia -> rc=0 e INSERTS=1.
+a13_absent="$(harness_flag_repeat 0 on 0 1 1)"
+a13_create="$(harness_flag_repeat 1 on 0 2 __stored__)"
+a13_abs_rc="$(hget "$a13_absent" RC)"
+a13_abs_ins="$(hget "$a13_absent" INSERTS)"
+a13_abs_died="$(hget "$a13_absent" DIED)"
+a13_cr_rc="$(hget "$a13_create" RC)"
+a13_cr_ins="$(hget "$a13_create" INSERTS)"
+if [ "$a13_abs_rc" != "0" ] && [ "$a13_abs_ins" = "0" ] && [ "$a13_abs_died" = "1" ] \
+  && [ "$a13_cr_rc" = "0" ] && [ "$a13_cr_ins" = "1" ]; then
+  ok "A13 CREATE=0 ausente -> rc!=0 sin INSERT; CREATE=1 x2 -> una sola insercion"
 else
-  bad "A13 INSERT esta bajo CREATE y bajo IF NOT EXISTS (nexists=${nexists_line:-?} create=${create_line:-?} insert=${insert_line:-?})"
+  bad "A13 CREATE=0 ausente -> rc!=0 sin INSERT; CREATE=1 x2 -> una sola insercion (absent=$a13_absent create=$a13_create)"
 fi
 
-# --- A14 ---
-# Defecto: (a) un PLANT con apostrofo rompe el lote; wt_shared_scalar devuelve vacio y se reporta
-# «el flag no existe» — diagnostico falso. (b) sin relectura, el verbo termina en 0 aunque la
-# escritura no haya aterrizado, y el criterio de cierre 1 se acredita con un exito falso.
+# --- A14 (M7) ---
+# Defecto: (a) PLANT crudo rompe el lote; (b) sin relectura el verbo reporta exito falso.
+# plant_esc + N'$plant_esc' siguen en el texto; el arnes dispara wt_die si observed != v.
+a14="$(harness_flag_repeat 0 on 1 1 0)"
+a14_rc="$(hget "$a14" RC)"
+a14_died="$(hget "$a14" DIED)"
 if printf '%s\n' "$FLAG_BODY" | grep -q 'plant_esc=' \
   && printf '%s\n' "$FLAG_BODY" | grep -q "N'\$plant_esc'" \
   && ! printf '%s\n' "$FLAG_BODY" | grep -qE "N'\$plant'" \
-  && printf '%s\n' "$FLAG_BODY" | grep -q 'CAST(IsEnabled AS int)' \
-  && printf '%s\n' "$FLAG_BODY" | grep -q 'wt_die'; then
-  ok "A14 cmd_wt_flag escapa PLANT (plant_esc) y relee el estado con wt_die si no coincide"
+  && [ "$a14_rc" != "0" ] && [ "$a14_died" = "1" ]; then
+  ok "A14 cmd_wt_flag escapa PLANT y la relectura discrepante dispara wt_die (rc!=0)"
 else
-  bad "A14 cmd_wt_flag escapa PLANT (plant_esc) y relee el estado con wt_die si no coincide"
+  bad "A14 cmd_wt_flag escapa PLANT y la relectura discrepante dispara wt_die (rc!=0) (h=$a14)"
+fi
+
+# --- A15 (S3) ---
+# Defecto: CREATE=yes se coerce a 0 o 1 en silencio. El diseño exige rc 2.
+a15="$(harness_flag_repeat yes on 0 1 __stored__)"
+a15_rc="$(hget "$a15" RC)"
+if [ "$a15_rc" = "2" ]; then
+  ok "A15 CREATE=yes aborta con rc 2 (no se coerce a 0 ni a 1)"
+else
+  bad "A15 CREATE=yes aborta con rc 2 (no se coerce a 0 ni a 1) (h=$a15)"
 fi
 
 echo "----"
