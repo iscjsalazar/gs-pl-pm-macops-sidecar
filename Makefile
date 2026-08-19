@@ -64,6 +64,7 @@
 # Aprovisionamiento aislado por worktree (wt-*; SQL compartido de nvoslabs + bus PM-owned, en macdata):
 #   [WT obligatorio] make wt-up WT=<folder>                    # aprovisiona el entorno del worktree (slot, seed, API); intel-only
 #   [WT obligatorio] make wt-up WT=<folder> ORACLE=1           # + Oracle ControlPiso propio del slot (lazy; la via e2e-up lo enciende)
+#   [WT obligatorio] make wt-up WT=<folder> LOGINSKIP=1        # compila la API del slot CON la capacidad test-only login-skip-password (default 0; fuerza rebuild de la imagen del slot)
 #   [WT obligatorio] make wt-up WT=<folder> SOLUTION=<path>    # fuerza la raiz de la solucion del worktree (build de la API)
 #   [WT obligatorio] make wt-down WT=<folder>                  # baja API + Oracle + BD del worktree; libera el slot (singletons intactos)
 #   [WT obligatorio] make wt-info WT=<folder>                  # imprime la derivacion COMPLETA del slot ("que slot es mio")
@@ -74,7 +75,7 @@
 #   [WT obligatorio] make wt-sql WT=<folder> SQL="SELECT ..." [SCALAR=1] [LN=1]   # SQL contra la BD planning (o LN del slot si LN=1)
 #   [WT obligatorio] make wt-nucleos WT=<folder> SQL="SELECT ..." [SCALAR=1]      # SQL contra la BD Nucleos del slot (pm_nucleos_wt<N>, cores.*)
 #   [WT obligatorio] make wt-oracle WT=<folder> SQL="select ..."          # SQL contra el Oracle del slot (requiere ORACLE=1)
-#   [WT obligatorio] make wt-flag WT=<folder> KEY=<flag> STATE=on|off [PLANT=RES]   # fija un feature flag en la BD del slot
+#   [WT obligatorio] make wt-flag WT=<folder> KEY=<flag> STATE=on|off [PLANT=RES] [CREATE=1]   # CREATE=1 crea la fila si no existe (idempotente); sin CREATE=1 una fila ausente falla
 #   [WT obligatorio] make wt-health WT=<folder>                           # verifica /health/live del API del slot + 3 URLs
 #   [WT obligatorio] make wt-api WT=<folder> ROUTE=/api/v1/... [METHOD=] [BODY=|BODYFILE=] [JOB=1]   # curl al API del slot
 #   [WT obligatorio] make wt-heartbeat WT=<folder>                        # refresca el arrendamiento del slot (holds largos)
@@ -255,6 +256,8 @@ LN          ?= 0
 KEY         ?=
 STATE       ?=
 PLANT       ?= RES
+LOGINSKIP   ?= 0
+CREATE      ?= 0
 WARM        ?= 0
 HARD        ?= 0
 # wt-api (curl generico al API del slot): la perilla del path es ROUTE (NUNCA PATH: clobbea $PATH del recipe).
@@ -284,6 +287,7 @@ WT_ENV = $(PM_ENV) $(MANIFEST_ENV) WT=$(WT) PM_WT_SLOTS=$(SLOTS) PM_WT_ORACLE=$(
          PM_WT_SQL_SCALAR=$(SCALAR) PM_WT_SQL_LN=$(LN) PM_WT_WARM=$(WARM) PM_WT_PRUNE_HARD=$(HARD) \
          PM_VM_RESTART_CONFIRM=$(CONFIRM) PM_VM_RESTART_ACK_LIVE=$(ACK_LIVE) \
          PM_WT_FLAG_KEY='$(KEY)' PM_WT_FLAG_STATE=$(STATE) PM_WT_FLAG_PLANT=$(PLANT) \
+         PM_WT_LOGIN_SKIP_CAPABILITY=$(LOGINSKIP) PM_WT_FLAG_CREATE=$(CREATE) \
          PM_WT_API_PATH='$(ROUTE)' PM_WT_API_METHOD='$(METHOD)' PM_WT_API_BODYFILE='$(BODYFILE)' PM_WT_API_JOB=$(JOB) \
          PM_SHARED_SQL_NETWORK=$(SHAREDSQL_NET) PM_SHARED_SQL_HOST=$(SHAREDSQL_HOST) \
          PM_SHARED_SQL_PORT=$(SHAREDSQL_PORT) PM_SHARED_SQL_PASSWORD='$(SHAREDSQL_PASSWORD)'
