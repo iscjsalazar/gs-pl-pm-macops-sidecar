@@ -2,7 +2,8 @@
 # Contratos hermeticos de la perilla login-skip-password del slot (T-101): no abre SSH, Docker, macdata
 # ni un slot real. Lee e2e/Dockerfile, lib/worktrees.sh y Makefile como texto, y ejecuta cmd_wt_flag /
 # normalizaciones con dependencias simuladas. Cada asercion nombra el defecto que atrapa
-# (analisis.md §5.2 A1-A14; ronda 2 endurece A4/A6-A9/A11-A14 y agrega A15).
+# (analisis.md §5.2 A1-A14; ronda 2 endurece A4/A6-A9/A11-A14 y agrega A15;
+# ronda 3 ancla A4/A7 al bloque ejecutable y asocia IF NOT EXISTS al INSERT).
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 WT="$ROOT/lib/worktrees.sh"
@@ -39,6 +40,122 @@ WT_ENV_BLOCK="$(awk '
   collecting && $0 !~ /\\[[:space:]]*$/ { exit }
 ' "$MK")"
 
+# Instrucciones RUN ejecutables del Dockerfile: omite comentarios y une "\".
+dockerfile_exec_runs() {
+  awk '
+    /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+    {
+      line = $0
+      while (line ~ /\\[[:space:]]*$/) {
+        sub(/\\[[:space:]]*$/, " ", line)
+        if ((getline nxt) <= 0) break
+        while (nxt ~ /^[[:space:]]*#/ || nxt ~ /^[[:space:]]*$/) {
+          if ((getline nxt) <= 0) { nxt = ""; break }
+        }
+        sub(/^[[:space:]]+/, "", nxt)
+        line = line nxt
+      }
+      if (line ~ /^[[:space:]]*RUN([[:space:]]|$)/) print line
+    }
+  ' "$1"
+}
+
+# Lineas ejecutables de un cuerpo de funcion: omite comentarios y une "\".
+fn_exec_lines() {
+  printf '%s\n' "$1" | awk '
+    /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+    {
+      line = $0
+      sub(/[[:space:]]+#.*$/, "", line)
+      while (line ~ /\\[[:space:]]*$/) {
+        sub(/\\[[:space:]]*$/, " ", line)
+        if ((getline nxt) <= 0) break
+        if (nxt ~ /^[[:space:]]*#/ || nxt ~ /^[[:space:]]*$/) continue
+        sub(/[[:space:]]+#.*$/, "", nxt)
+        sub(/^[[:space:]]+/, "", nxt)
+        line = line nxt
+      }
+      if (line ~ /[^[:space:]]/) print line
+    }
+  '
+}
+
+# Quita comentarios T-SQL (--) y (/* */) respetando literales; vacia su interior.
+sql_strip_comments() {
+  awk '
+    { buf = buf $0 "\n" }
+    END {
+      n = length(buf)
+      out = ""
+      in_str = 0
+      in_line = 0
+      in_block = 0
+      for (i = 1; i <= n; i++) {
+        c = substr(buf, i, 1)
+        nxt = (i < n) ? substr(buf, i + 1, 1) : ""
+        if (in_line) {
+          if (c == "\n") { in_line = 0; out = out c }
+          continue
+        }
+        if (in_block) {
+          if (c == "*" && nxt == "/") { in_block = 0; i++ }
+          else if (c == "\n") out = out c
+          continue
+        }
+        if (in_str) {
+          if (c == "'\''") {
+            if (nxt == "'\''") { i++ }
+            else { in_str = 0; out = out c }
+          }
+          continue
+        }
+        if (c == "'\''") { in_str = 1; out = out c; continue }
+        if (c == "-" && nxt == "-") { in_line = 1; i++; continue }
+        if (c == "/" && nxt == "*") { in_block = 1; i++; continue }
+        out = out c
+      }
+      printf "%s", out
+    }
+  '
+}
+
+# Clasifica cada INSERT INTO FeatureManagement.FeatureFlags: guarded si
+# queda dentro de IF NOT EXISTS ... BEGIN ... END; si no, unguarded.
+sql_insert_scopes() {
+  awk '
+    { buf = buf $0 "\n" }
+    END {
+      s = toupper(buf)
+      gsub(/IF[ \t\r\n]+NOT[ \t\r\n]+EXISTS/, " IF_NOT_EXISTS ", s)
+      gsub(/INSERT[ \t\r\n]+INTO[ \t\r\n]+FEATUREMANAGEMENT\.FEATUREFLAGS/, " INSERT_FF ", s)
+      n = split(s, w, /[^A-Z0-9_.]+/)
+      exists_pending = 0
+      exists_depth = 0
+      begin_depth = 0
+      for (i = 1; i <= n; i++) {
+        tok = w[i]
+        if (tok == "IF_NOT_EXISTS") {
+          exists_pending = 1
+        } else if (tok == "BEGIN") {
+          begin_depth++
+          if (exists_pending) {
+            exists_depth++
+            exists_at[exists_depth] = begin_depth
+            exists_pending = 0
+          }
+        } else if (tok == "END") {
+          if (exists_depth > 0 && exists_at[exists_depth] == begin_depth) exists_depth--
+          if (begin_depth > 0) begin_depth--
+        } else if (tok == "INSERT_FF") {
+          if (exists_depth > 0 || exists_pending) print "guarded"
+          else print "unguarded"
+          exists_pending = 0
+        }
+      }
+    }
+  '
+}
+
 # Ejecuta el case de PM_WT_LOGIN_SKIP_CAPABILITY aislado. Imprime RC= CAP=.
 run_cap_norm() {
   (
@@ -64,7 +181,8 @@ run_img_cap_norm() {
 # $1=create $2=state $3=start_rows $4=times $5=reread|__stored__
 # El estado vive en archivos: out="$(wt_shared_scalar ...)" corre en un subshell y
 # perderia incrementos en variables. Interpreta el lote interpolado: IF 1=1 + INSERT
-# crea; ELSE @outcome decide la ausencia; IF NOT EXISTS evita el segundo INSERT.
+# crea; ELSE @outcome decide la ausencia. IF NOT EXISTS solo protege el INSERT si
+# lo envuelve en el SQL ejecutable (comentarios fuera); un INSERT suelto duplica.
 harness_flag_repeat() {
   (
     create="$1"
@@ -93,7 +211,7 @@ harness_flag_repeat() {
     requested_v=0
     case "$state" in on|ON|1|true|TRUE) requested_v=1 ;; esac
     wt_shared_scalar() {
-      local sql="$2" else_out rows inserts create_on has_insert has_not_exists
+      local sql="$2" else_out rows inserts create_on has_insert has_unguarded sql_exec scope
       rows="$(cat "$hdir/rows")"
       inserts="$(cat "$hdir/inserts")"
       if printf '%s' "$sql" | grep -q 'CAST(IsEnabled AS int)'; then
@@ -106,11 +224,15 @@ harness_flag_repeat() {
       fi
       create_on=0
       has_insert=0
-      has_not_exists=0
-      printf '%s' "$sql" | grep -qE 'IF[[:space:]]+"?1"?[[:space:]]*=[[:space:]]*"?1"?' && create_on=1
-      printf '%s' "$sql" | grep -q 'INSERT INTO FeatureManagement.FeatureFlags' && has_insert=1
-      printf '%s' "$sql" | grep -q 'IF NOT EXISTS' && has_not_exists=1
-      else_out="$(printf '%s' "$sql" | sed -n "s/.*ELSE SET @outcome = N'\\([^']*\\)'.*/\\1/p" | head -1)"
+      has_unguarded=0
+      sql_exec="$(printf '%s' "$sql" | sql_strip_comments)"
+      printf '%s' "$sql_exec" | grep -qE 'IF[[:space:]]+"?1"?[[:space:]]*=[[:space:]]*"?1"?' && create_on=1
+      while IFS= read -r scope; do
+        [ -n "$scope" ] || continue
+        has_insert=1
+        [ "$scope" = "unguarded" ] && has_unguarded=1
+      done < <(printf '%s' "$sql_exec" | sql_insert_scopes)
+      else_out="$(printf '%s' "$sql_exec" | sed -n "s/.*ELSE SET @outcome = N'\\([^']*\\)'.*/\\1/p" | head -1)"
       if [ "$rows" -eq 0 ]; then
         if [ "$create_on" -eq 1 ] && [ "$has_insert" -eq 1 ]; then
           printf '%s' "$((inserts + 1))" > "$hdir/inserts"
@@ -121,7 +243,7 @@ harness_flag_repeat() {
           printf '%s' "${else_out:-absent}"
         fi
       else
-        if [ "$has_not_exists" -eq 0 ] && [ "$create_on" -eq 1 ] && [ "$has_insert" -eq 1 ]; then
+        if [ "$has_unguarded" -eq 1 ] && [ "$create_on" -eq 1 ]; then
           printf '%s' "$((inserts + 1))" > "$hdir/inserts"
           printf '%s' "$requested_v" > "$hdir/enabled"
           printf '%s' "created"
@@ -178,16 +300,23 @@ fi
 
 # --- A4 (M1) ---
 # Defecto: la propiedad se renombra en la solucion o MSBuild la ignora: la imagen queda etiquetada
-# true con un artefacto sin gate. Exige COMPARAR $found contra el ARG y cortar si no coinciden.
-# Mutante: retirar e2e/Dockerfile:24-25 (busqueda sin comparacion) deja A4 en verde.
-if grep -q 'LoginSkipPasswordTestCapabilityMarker' "$DF" \
-  && grep -qE 'grep[[:space:]]+-qa[[:space:]]+.LoginSkipPasswordTestCapabilityMarker' "$DF" \
-  && grep -qE '\[ "\$found" = "\$LOGIN_SKIP_PASSWORD_TEST_CAPABILITY" \]' "$DF" \
-  && awk '
-      /\[ "\$found" = "\$LOGIN_SKIP_PASSWORD_TEST_CAPABILITY" \]/ { seen=1 }
-      seen && /exit[[:space:]]+1/ { ok=1 }
-      END { exit(ok ? 0 : 1) }
-    ' "$DF"; then
+# true con un artefacto sin gate. La igualdad y el exit 1 deben vivir en el MISMO RUN
+# ejecutable posterior al publish que inspecciona el dll publicado. Un comentario u
+# otro RUN con el literal no acredita la comparacion.
+a4_ok=0
+a4_seen_publish=0
+while IFS= read -r run; do
+  printf '%s\n' "$run" | grep -q 'dotnet publish' && a4_seen_publish=1
+  [ "$a4_seen_publish" -eq 1 ] || continue
+  if printf '%s\n' "$run" | grep -q '/app/PL.PM.Catalogs.Infrastructure.dll' \
+    && printf '%s\n' "$run" | grep -qE 'grep[[:space:]]+-qa[[:space:]]+.LoginSkipPasswordTestCapabilityMarker' \
+    && printf '%s\n' "$run" | grep -qE '\[ "\$found" = "\$LOGIN_SKIP_PASSWORD_TEST_CAPABILITY" \]' \
+    && printf '%s\n' "$run" | grep -qE 'exit[[:space:]]+1'; then
+    a4_ok=1
+    break
+  fi
+done < <(dockerfile_exec_runs "$DF")
+if [ "$a4_ok" -eq 1 ]; then
   ok "A4 Dockerfile compara el marcador del artefacto contra el ARG y corta si no coincide"
 else
   bad "A4 Dockerfile compara el marcador del artefacto contra el ARG y corta si no coincide"
@@ -219,8 +348,18 @@ fi
 
 # --- A7 (M4) ---
 # Defecto: la etiqueta dice true y el build publica sin la capacidad: etiqueta mentirosa.
-# Exige el valor normalizado $cap, no un literal true.
-if printf '%s\n' "$BUILD_BODY" | grep -q -- "--build-arg LOGIN_SKIP_PASSWORD_TEST_CAPABILITY='\$cap'"; then
+# La igualdad $cap debe ir en la misma linea/comando ejecutable que docker ... build.
+# Un comentario o rama no ejecutada con el literal no acredita el argumento real.
+a7_builds=0
+a7_ok=1
+while IFS= read -r cmd; do
+  printf '%s\n' "$cmd" | grep -qE 'docker[[:space:]].*build' || continue
+  a7_builds=$((a7_builds + 1))
+  if ! printf '%s\n' "$cmd" | grep -q -- "--build-arg LOGIN_SKIP_PASSWORD_TEST_CAPABILITY='\$cap'"; then
+    a7_ok=0
+  fi
+done < <(fn_exec_lines "$BUILD_BODY")
+if [ "$a7_builds" -gt 0 ] && [ "$a7_ok" -eq 1 ]; then
   ok "A7 _wt_build_api_image pasa --build-arg LOGIN_SKIP_PASSWORD_TEST_CAPABILITY='\$cap'"
 else
   bad "A7 _wt_build_api_image pasa --build-arg LOGIN_SKIP_PASSWORD_TEST_CAPABILITY='\$cap'"
@@ -296,6 +435,7 @@ fi
 # Defecto: (a) sin CREATE, fila ausente deja de fallar; (b) CREATE=1 repetido inserta de nuevo.
 # Arnes: CREATE=0 + ausente + relectura que coincidiria -> rc=1 e INSERTS=0.
 #         CREATE=1 dos veces sobre tabla vacia -> rc=0 e INSERTS=1.
+# La proteccion de existencia se asocia a la rama del INSERT, no al token global.
 a13_absent="$(harness_flag_repeat 0 on 0 1 1)"
 a13_create="$(harness_flag_repeat 1 on 0 2 __stored__)"
 a13_abs_rc="$(hget "$a13_absent" RC)"
