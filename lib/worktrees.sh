@@ -631,21 +631,25 @@ wt_check_api_port_free() {
 # (lock GLOBAL entre slots): dos 'docker build' concurrentes sobre el mismo daemon containerd corrompen el
 # content-store (CreateDiff/rename ingest->blobs), fallo que la poda no cura de raiz. ctx/img llegan por args; el
 # resto son globals ya fijados por _cmd_wt_up_locked. wt_lock reclama el lock si el dueno muere (no deadlock).
-_wt_build_api_image() {  # uso: _wt_build_api_image <ctx> <img> <src-sha>
-  local ctx="$1" img="$2" sha="$3" attempt label_arg=""
+_wt_build_api_image() {  # uso: _wt_build_api_image <ctx> <img> <src-sha> <cap>
+  local ctx="$1" img="$2" sha="$3" cap="${4:-false}" attempt label_arg=""
   # I2: estampa el git-SHA del worktree pm como label OCI 'org.pm.src-sha'. wt_up_api lo lee ANTES de reconstruir
   # para saltar el build cuando el SHA no cambio. Vacio => sin label (gate degradado: la imagen no queda estampada
   # y el proximo wt-up reconstruye). Valor entre comillas simples: el shell remoto de on_intel lo recibe intacto.
   [ -n "$sha" ] && label_arg=" --label org.pm.src-sha='$sha'"
+  # Segunda etiqueta OCI SIEMPRE (tambien en false): invalida el reuso cuando la perilla cambia en
+  # cualquiera de los dos sentidos. Un slot liberado con la capacidad encendida no se la hereda a la
+  # sesion siguiente (D16 / F-10).
+  label_arg="$label_arg --label org.pm.login-skip-password-capability='$cap'"
   # Corre bajo wt_lock build (global): el retry no compite con otro build. La corrupcion del store containerd
   # (CreateDiff/apply diff/Lchown/commit rename ingest->blobs) suele ser transitoria -> 1 reintento la sortea
   # (ledger I6/I8). Entre intentos SOLO poda dangling (segura, no toca contenedores/volumenes vivos); la poda
   # agresiva es manual (make wt-prune-cache HARD=1).
   for attempt in 1 2; do
-    wt_log "build imagen $img (intento $attempt/2; contexto $PM_REMOTE_SSH:$PM_REMOTE_SOLUTION_DIR; SHA ${sha:-<n/d>}; ~varios min) ..."
+    wt_log "build imagen $img (intento $attempt/2; contexto $PM_REMOTE_SSH:$PM_REMOTE_SOLUTION_DIR; SHA ${sha:-<n/d>}; login-skip-password=$cap; ~varios min) ..."
     # Build con el builder legacy de docker (macdata NO tiene el componente buildx/BuildKit): I2 estampa el
     # git-SHA por $label_arg. La capa de restore cacheable (I1) queda diferida: requiere buildx o staging de csproj.
-    if on_intel "cd '$PM_REMOTE_SOLUTION_DIR' && docker $ctx build$label_arg -t '$img' -f- ." < "$BASE_DIR/e2e/Dockerfile"; then
+    if on_intel "cd '$PM_REMOTE_SOLUTION_DIR' && docker $ctx build$label_arg --build-arg LOGIN_SKIP_PASSWORD_TEST_CAPABILITY='$cap' -t '$img' -f- ." < "$BASE_DIR/e2e/Dockerfile"; then
       on_intel "docker $ctx image prune -f" || true
       return 0
     fi
@@ -733,6 +737,15 @@ wt_up_api() {  # uso: wt_up_api <password>
   local pw="$1" ctx; ctx="$(remote_docker_ctx)"
   local cname="pm-wt${WT_SLOT}-api" img="pm-wt-api:wt${WT_SLOT}"
   local hl="http://127.0.0.1:$PM_API_PORT/health/live"
+  # Perilla opt-in: normaliza a los literales true/false que Directory.Build.props compara. Un valor
+  # no reconocido ABORTA (fail-closed ruidoso): coercer a false ocultaria LOGINSKIP=yes como «login
+  # rechazado» sin pista; coercer a true encenderia el bypass sin pedirlo.
+  local cap
+  case "${PM_WT_LOGIN_SKIP_CAPABILITY:-0}" in
+    0|off|OFF|false|FALSE) cap=false ;;
+    1|on|ON|true|TRUE)     cap=true  ;;
+    *) wt_die "LOGINSKIP='${PM_WT_LOGIN_SKIP_CAPABILITY}' no es 0|1: la capacidad test-only NO se infiere; usa LOGINSKIP=1 o omitela"; return 2 ;;
+  esac
   # I2: gate por git-SHA de la imagen. Se computa el SHA del worktree pm (PM_SOLUTION_DIR, el arbol LOCAL fuente de
   # verdad, ya resuelto por _cmd_wt_up_locked) y, si la imagen del slot ya trae ESE mismo SHA estampado, se SALTA
   # sync+build (solo se recrea el contenedor mas abajo). Un arbol con cambios sin commitear (dirty) NUNCA se saltea:
@@ -746,11 +759,13 @@ wt_up_api() {  # uso: wt_up_api <password>
   if [ "${PM_WT_FORCE_BUILD:-0}" = "1" ]; then
     wt_log "PM_WT_FORCE_BUILD=1: se reconstruye la imagen $img (sin gate por SHA)"
   elif [ -n "$src_sha" ] && [ "$src_dirty" = "0" ]; then
-    local img_sha
+    local img_sha img_cap
     img_sha="$(on_intel "docker $ctx image inspect -f '{{index .Config.Labels \"org.pm.src-sha\"}}' '$img' 2>/dev/null" 2>/dev/null | tr -d '\r')"
-    if [ -n "$img_sha" ] && [ "$img_sha" = "$src_sha" ]; then
+    img_cap="$(on_intel "docker $ctx image inspect -f '{{index .Config.Labels \"org.pm.login-skip-password-capability\"}}' '$img' 2>/dev/null" 2>/dev/null | tr -d '\r')"
+    case "$img_cap" in ''|'<no value>') img_cap=false ;; esac   # imagen anterior a esta perilla = sin capacidad (F-1/F-2)
+    if [ -n "$img_sha" ] && [ "$img_sha" = "$src_sha" ] && [ "$img_cap" = "$cap" ]; then
       do_build=0
-      wt_log "[skip] API build: SHA $src_sha sin cambio (imagen $img ya estampada); solo se recrea el contenedor"
+      wt_log "[skip] API build: SHA $src_sha sin cambio y capacidad login-skip-password=$cap ya estampada"
     fi
   fi
   if [ "$do_build" = "1" ]; then
@@ -758,9 +773,10 @@ wt_up_api() {  # uso: wt_up_api <password>
     sync_solution_to_intel
     # Serializa el build entre TODOS los slots/sesiones (raiz de la corrupcion de containerd). WT_LOCK_WAIT_MAX=1800:
     # un build cold toma varios min, la espera detras de otro build debe superar el default 180 s de wt_lock. El SHA
-    # (3er arg) lo estampa el build como label OCI para el gate del siguiente wt-up.
-    WT_LOCK_WAIT_MAX=1800 wt_lock build _wt_build_api_image "$ctx" "$img" "$src_sha" || return 1
+    # (3er arg) lo estampa el build como label OCI para el gate del siguiente wt-up. El 4.o arg es la capacidad.
+    WT_LOCK_WAIT_MAX=1800 wt_lock build _wt_build_api_image "$ctx" "$img" "$src_sha" "$cap" || return 1
   fi
+  wt_log "capacidad login-skip-password del slot=$cap (imagen $img)"
   # connstrings vistas desde el contenedor: SQL por alias de la red compartida; bus por alias del singleton.
   local cs ln nuc sbcs
   cs="Server=$PM_SHARED_SQL_HOST,$PM_SHARED_SQL_PORT;Database=$PM_PLANNING_DB;User Id=sa;Password=$pw;TrustServerCertificate=True"
@@ -1688,27 +1704,70 @@ cmd_wt_oracle() {
 
 # wt-flag: fija un feature flag en la BD del slot por el motor compartido. Es el canal SANCIONADO para el slot: el
 # endpoint POST /api/v1/tools/feature-flags rechaza el SQL del slot por la allowlist DEV (Server 'sqlserver,1433'
-# fuera de la allowlist). KEY=<flag> STATE=on|off [PLANT=RES]. Falla si el flag no existe (0 filas afectadas).
+# fuera de la allowlist). KEY=<flag> STATE=on|off [PLANT=RES] [CREATE=1]. Sin CREATE=1 falla si el flag no existe.
 cmd_wt_flag() {
   wt_require_intel || return 1
-  [ -n "${PM_WT_FLAG_KEY:-}" ] || { wt_die "falta KEY=<flag> (make wt-flag WT=<folder> KEY=<flag> STATE=on|off [PLANT=RES])"; return 2; }
+  [ -n "${PM_WT_FLAG_KEY:-}" ] || { wt_die "falta KEY=<flag> (make wt-flag WT=<folder> KEY=<flag> STATE=on|off [PLANT=RES] [CREATE=1])"; return 2; }
   local v
   case "${PM_WT_FLAG_STATE:-}" in
     on|ON|1|true|TRUE)    v=1 ;;
     off|OFF|0|false|FALSE) v=0 ;;
     *) wt_die "falta STATE=on|off (make wt-flag WT=<folder> KEY=$PM_WT_FLAG_KEY STATE=on)"; return 2 ;;
   esac
+  local create
+  case "${PM_WT_FLAG_CREATE:-0}" in
+    0|off|OFF|false|FALSE) create=0 ;;
+    1|on|ON|true|TRUE)     create=1 ;;
+    *) wt_die "CREATE='${PM_WT_FLAG_CREATE}' no es 0|1: no se infiere crear; usa CREATE=1 o omitela"; return 2 ;;
+  esac
   _wt_bind_slot || return $?
-  local plant="${PM_WT_FLAG_PLANT:-RES}" pw key_esc sql out
+  local plant="${PM_WT_FLAG_PLANT:-RES}" pw key_esc plant_esc sql out observed
   pw="$(wt_shared_sql_password)" || return 1
   wt_shared_sql_check || return 1
   key_esc="$(printf '%s' "$PM_WT_FLAG_KEY" | sed "s/'/''/g")"
-  sql="SET NOCOUNT ON; USE [$PM_PLANNING_DB]; UPDATE FeatureManagement.FeatureFlags SET IsEnabled=$v, UpdatedAt=SYSUTCDATETIME() WHERE [Key]=N'$key_esc' AND Plant=N'$plant'; SELECT @@ROWCOUNT;"
+  plant_esc="$(printf '%s' "$plant" | sed "s/'/''/g")"
+  sql="$(cat <<SQL
+SET NOCOUNT ON; USE [$PM_PLANNING_DB];
+IF OBJECT_ID(N'FeatureManagement.FeatureFlags') IS NULL BEGIN SELECT N'no-table'; RETURN; END
+DECLARE @outcome nvarchar(16);
+IF NOT EXISTS (SELECT 1 FROM FeatureManagement.FeatureFlags WHERE [Key]=N'$key_esc' AND [Plant]=N'$plant_esc')
+BEGIN
+  IF $create = 1
+  BEGIN
+    INSERT INTO FeatureManagement.FeatureFlags ([Key],[Plant],[IsEnabled],[Description],[UpdatedAt])
+      VALUES (N'$key_esc', N'$plant_esc', $v, N'Bandera de pruebas creada por make wt-flag CREATE=1 en el slot.', SYSUTCDATETIME());
+    SET @outcome = N'created';
+  END
+  ELSE SET @outcome = N'absent';
+END
+ELSE
+BEGIN
+  UPDATE FeatureManagement.FeatureFlags SET IsEnabled=$v, UpdatedAt=SYSUTCDATETIME()
+    WHERE [Key]=N'$key_esc' AND [Plant]=N'$plant_esc';
+  SET @outcome = N'updated';
+END
+SELECT @outcome;
+SQL
+)"
   out="$(wt_shared_scalar "$pw" "$sql")"
-  if [ "${out:-0}" = "0" ]; then
-    wt_die "flag '$PM_WT_FLAG_KEY'/$plant no existe en $PM_PLANNING_DB (0 filas): revisa KEY/PLANT o que la BD tenga el seed del flag"; return 1
+  case "$out" in
+    no-table)
+      wt_die "la BD del slot no tiene el esquema de FeatureManagement: corre make wt-up WT=... primero"; return 1 ;;
+    absent)
+      wt_die "flag '$PM_WT_FLAG_KEY'/$plant no existe en $PM_PLANNING_DB (0 filas): revisa KEY/PLANT o que la BD tenga el seed del flag, o agrega CREATE=1 para crearla"; return 1 ;;
+    created|updated) ;;
+    *)
+      wt_die "flag '$PM_WT_FLAG_KEY'/$plant: resultado inesperado '${out:-<vacio>}'"; return 1 ;;
+  esac
+  observed="$(wt_shared_scalar "$pw" "SET NOCOUNT ON; USE [$PM_PLANNING_DB]; SELECT CAST(IsEnabled AS int) FROM FeatureManagement.FeatureFlags WHERE [Key]=N'$key_esc' AND [Plant]=N'$plant_esc'")"
+  if [ "$observed" != "$v" ]; then
+    wt_die "flag '$PM_WT_FLAG_KEY'/$plant: IsEnabled observado='${observed:-<vacio>}' no coincide con el pedido $v"; return 1
   fi
-  wt_log "flag '$PM_WT_FLAG_KEY'/$plant -> IsEnabled=$v en $PM_PLANNING_DB ($out fila(s) actualizada(s))"
+  if [ "$out" = "created" ]; then
+    wt_log "flag '$PM_WT_FLAG_KEY'/$plant CREADO con IsEnabled=$v en $PM_PLANNING_DB"
+  else
+    wt_log "flag '$PM_WT_FLAG_KEY'/$plant -> IsEnabled=$v en $PM_PLANNING_DB"
+  fi
 }
 
 # wt-heartbeat: refresca el arrendamiento (pid+heartbeat) del slot sin re-aprovisionar. Para holds largos que no
