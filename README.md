@@ -227,7 +227,7 @@ La fórmula `1521+offset` de `compute_ports` (`lib/common.sh`) sirve a los stack
 
 > **Dos sentidos de "worktree" (distintos).** Estos verbos `wt-*` aprovisionan el **runtime** por worktree
 > (un slot con su BD, puertos y contenedor de API). El "worktree" que aprovisionan es un **git worktree del
-> repo de código** (`pl-programa-maestro` / `pl-pm-legacy`), típicamente en `pm-cc-wrapper/worktrees/<folder>`,
+> repo de código** (`pl-programa-maestro` / `pl-pm-legacy`), típicamente bajo `worktrees/<folder>`,
 > que sirve de contexto de build de la API. Es distinto de un **git worktree del propio sidecar**: el sidecar
 > resuelve su raíz por marcador (no por su ubicación física), así que los verbos `make` funcionan tanto desde
 > el checkout central como desde un worktree del sidecar, compartiendo el estado con el central. Ver
@@ -237,6 +237,7 @@ La fórmula `1521+offset` de `compute_ports` (`lib/common.sh`) sirve a los stack
 | --- | --- |
 | `make wt-up WT=<folder>` | Asigna el slot, asegura los singletons (SQL compartido alcanzable, referencia LN `pm_erpln106`, bus `pm-shared`), siembra `pm_planning_wt<N>`, construye y corre `pm-wt<N>-api`; imprime los endpoints. |
 | `make wt-up WT=<folder> ORACLE=1` | Además aprovisiona el Oracle ControlPiso propio del slot (`pm-wt<N>-oracle-1`) y cablea la API a él (`Parity__LegacySource=oracle`). La vía `e2e-up` siempre lo enciende. |
+| `make wt-up WT=<folder> PM_WT_GC_FORCE=1` | Solicita el reclamo de arrendamientos vencidos antes de aprovisionar. Puede retirar los recursos de otra sesión cuyo arrendamiento ya sea reclamable. |
 | `make wt-up WT=<folder> SOLUTION=<path>` | Fuerza la raíz de la solución del worktree (contexto de build de la API). |
 | `make wt-down WT=<folder>` | Baja API, Oracle (contenedor **y volumen**) y BD del worktree; verifica su ausencia y sólo entonces libera el slot. Deja los singletons compartidos intactos. |
 | `make wt-info WT=<folder>` | Imprime la derivación completa del slot: API, BD, bus, Oracle, site IIS, túnel, rutas del guest, y la sección **Presupuesto** (topes reales: disco/RAM de la VM colima, `docker` reclamable, contadores del guest, slots vivos). |
@@ -244,6 +245,7 @@ La fórmula `1521+offset` de `compute_ports` (`lib/common.sh`) sirve a los stack
 | `make wt-status` | Estado de los contenedores PM por worktree (API y Oracle) y del bus. |
 | `make wt-gc` / `make wt-gc FORCE=1` | Cruza los cuatro planos (registro · contenedores API · contenedores Oracle · sites IIS y túneles) y lista los huérfanos; con `FORCE=1` los retira. El plano de arrendamientos reclama filas con dueño muerto por TTL **y fantasmas** (dueño muerto + slot sin contenedores vivos, aunque el heartbeat sea fresco). Toma snapshot del registro bajo `wt_registry_lock` y acota el barrido de túneles por `PM_WT_SLOTS_MAX` (mantiene fuera el túnel singleton `18080` y el puente `60211`). Retorna exit≠0 si no pudo limpiar un huérfano (0 si nada). Guard crítico: si el registro es no legible o no adquiere el lock, con `FORCE=1` **aborta sin retirar** (evita `docker rm -f` en masa de sesiones vivas). |
 | `make wt-seed-ln` | Asegura la referencia LN compartida `pm_erpln106` (paso deliberado de una vez; idempotente). |
+| `make wt-heartbeat WT=<folder>` | Refresca el arrendamiento del slot sin reprovisionar; conserva la protección durante trabajos prolongados. |
 
 ```bash
 make wt-up WT=feat_pm_mi-solicitud      # aprovisiona; WT se autodetecta con git rev-parse dentro del worktree
@@ -251,6 +253,27 @@ make wt-info WT=feat_pm_mi-solicitud     # "qué slot es mío": puertos, contene
 make wt-status                           # contenedores pm-wt* + bus pm-shared
 make wt-down WT=feat_pm_mi-solicitud     # baja API + Oracle + BD del worktree; libera el slot
 ```
+
+**Perillas separadas de `e2e-up`.** `FORCE=1` fuerza el redespliegue del legado, pero no habilita por sí mismo
+el reclamo de arrendamientos vencidos. Con un slot libre y el disco y la RAM sobre sus umbrales, el siguiente
+comando conserva el arrendamiento vencido de una sesión vecina; esa sesión no pierde los recursos de su slot:
+
+```bash
+make e2e-up WT=<wt-pm> LEGACYSRC=<legacy-develop> FORCE=1
+```
+
+`PM_WT_GC_FORCE=1` solicita el reclamo deliberado antes de aprovisionar, incluso cuando existe capacidad sana.
+El siguiente comando puede retirar los recursos del slot de una sesión vecina si su arrendamiento está vencido:
+
+```bash
+make e2e-up WT=<wt-pm> LEGACYSRC=<legacy-develop> PM_WT_GC_FORCE=1
+```
+
+La configuración anterior vinculaba el reclamo con `FORCE=1`; por ello, un redespliegue podía retirar el espacio
+vencido de otra sesión. Los reclamos por falta real de capacidad —pool lleno, disco bajo o RAM baja— conservan su
+comportamiento y no dependen de `PM_WT_GC_FORCE`; `FORCE=1` tampoco los suprime. El riesgo residual permanece: un
+arrendamiento vencido sigue siendo reclamable cuando se solicita explícitamente o cuando falta capacidad real. La
+mitigación recomendada para trabajos prolongados consiste en refrescarlo con `make wt-heartbeat WT=<folder>`.
 
 El **slot** se asigna desde un registro gitignored `.worktrees/slots.tsv` (lock por `mkdir`, slot libre más bajo,
 autodetección por `git rev-parse --show-toplevel`). La conexión al SQL compartido es parametrizable
@@ -375,7 +398,8 @@ discrimina ON por `MensajeTecnico` y OFF por la ausencia de órdenes nuevas (rob
 | --- | --- |
 | `make e2e-up WT=<wt-pm> LEGACYSRC=<legacy-develop>` | Todo: `wt-up ORACLE=1` (backend **y Oracle** del slot) + puente SQL + `legacy-launch SLOT=<N>` con inyección + verificación del wiring desplegado + activar el flag ON + `e2e-net-check` + smoke. |
 | `make e2e-up ... LINEA=<cod> ANOF=<aaaa> SEMF=<sem>` | Params reales del disparo (el caso OFF/Oracle los exige; el ON los ignora). |
-| `make e2e-up ... FORCE=1` | Re-deploya el legado (re-inyecta el wiring; necesario si el slot se reutiliza o se conservó el sitio). |
+| `make e2e-up ... FORCE=1` | Fuerza el redespliegue del legado y re-inyecta el wiring; no habilita por sí mismo el reclamo de arrendamientos vencidos. Con capacidad sana, una sesión vecina conserva su slot aunque el arrendamiento esté vencido. |
+| `make e2e-up ... PM_WT_GC_FORCE=1` | Solicita el reclamo de arrendamientos vencidos antes de aprovisionar. Una sesión vecina con un arrendamiento vencido puede perder los recursos de su slot; la perilla no fuerza el redespliegue del legado. |
 | `make e2e-smoke WT=<wt-pm>` | Solo el smoke funcional; dispara contra el **sitio del slot** (`8100+N`). Asume `e2e-up` ya dejó todo arriba. |
 | `make e2e-playwright WT=<wt-pm> LEGACYSRC=<legacy-develop>` | Runner focal de Núcleos: escenario `tnuc02`, tag `@nucleos-full`, proyecto `plant-res`, flag `subordinate-nucleos-backend` y estado `PM_E2E_NUCLEOS_FLAG_STATE`; ejecuta la matriz OFF/ON y deja evidencia por slot. |
 | `make e2e-playwright-winding WT=<wt-pm> LEGACYSRC=<wt-legacy>` | Runner focal de devanado: escenario SQL-only `winding-macro-res`, tag `@winding-macro` y proyecto `plant-res`; verifica `machines-oracle-replica/RES=OFF`, materializa el menú por API y nunca modifica el flag. |
@@ -670,7 +694,7 @@ La unidad de aislamiento de **sesiones** es el **slot** (`make wt-up WT=<worktre
 El sidecar localiza los repos hermanos y su propio estado por una **raíz canónica** (`WRAPPER_DIR`), que se
 resuelve subiendo el árbol hasta el primer ancestro que contiene `gs-pl-pm-macops-sidecar/` (override:
 `PM_WRAPPER_DIR`). Por eso los verbos `make` funcionan igual desde el checkout central que desde un **git
-worktree del propio sidecar** (`pm-cc-wrapper/worktrees/<folder>`): la raíz no depende de la ubicación física
+worktree del propio sidecar** (bajo `worktrees/<folder>`): la raíz no depende de la ubicación física
 del script.
 
 - **Estado compartido con el central.** El `.env` (`gs-pl-pm-macops-sidecar/.env`) y el registro de slots
