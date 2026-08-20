@@ -244,6 +244,8 @@ E2E_ORCH_ENV = $(E2E_ENV) WT=$(WT) PM_E2E_LEGACY_SRC='$(LEGACYSRC)' PM_E2E_PLANT
 WT          ?=
 SLOTS       ?= 8
 ORACLE      ?= 0
+# Perilla propia del barrido por vencimiento en wt-up. FORCE no la alimenta (FORCE solo redespliega el legado).
+PM_WT_GC_FORCE ?= 0
 SOLUTION    ?=
 SHAREDSQL_NET   ?=
 SHAREDSQL_HOST  ?=
@@ -282,7 +284,7 @@ export BODY
 # Se inyecta solo si viene con valor: vacio NO debe pisar un PM_UNIT_MANIFEST_REL ya exportado al entorno.
 MANIFEST_ENV = $(if $(MANIFEST),PM_UNIT_MANIFEST_REL='$(MANIFEST)',)
 
-WT_ENV = $(PM_ENV) $(MANIFEST_ENV) WT=$(WT) PM_WT_SLOTS=$(SLOTS) PM_WT_ORACLE=$(ORACLE) PM_WT_GC_FORCE=$(FORCE) \
+WT_ENV = $(PM_ENV) $(MANIFEST_ENV) WT=$(WT) PM_WT_SLOTS=$(SLOTS) PM_WT_ORACLE=$(ORACLE) PM_WT_GC_FORCE=$(PM_WT_GC_FORCE) \
          PM_WT_SEED_FORCE=$(FORCE) PM_WT_SOLUTION_DIR='$(SOLUTION)' \
          PM_WT_SQL_SCALAR=$(SCALAR) PM_WT_SQL_LN=$(LN) PM_WT_WARM=$(WARM) PM_WT_PRUNE_HARD=$(HARD) \
          PM_VM_RESTART_CONFIRM=$(CONFIRM) PM_VM_RESTART_ACK_LIVE=$(ACK_LIVE) \
